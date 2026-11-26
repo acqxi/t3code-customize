@@ -9,7 +9,7 @@ and loads the rebuilt bundles into it as it starts.
 You need git, Python 3 and T3 Code Nightly in `/Applications` or `~/Applications`.
 
 ```sh
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/btsouth/t3code-customize/main/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/acqxi/t3code-customize/main/install.sh)"
 ```
 
 1. The first run downloads T3 Code's source and build tools, so give it 5 to 15 minutes.

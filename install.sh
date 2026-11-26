@@ -9,7 +9,7 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) echo 'Use install.ps1 on Windows.' >&2; exit 1 ;;
   *) echo 'Only Linux, macOS and Windows are supported.' >&2; exit 1 ;;
 esac
-remote="${T3_CUSTOMIZE_REPOSITORY:-https://github.com/btsouth/t3code-customize.git}"
+remote="${T3_CUSTOMIZE_REPOSITORY:-https://github.com/acqxi/t3code-customize.git}"
 branch="${T3_CUSTOMIZE_BRANCH:-main}"
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || {
   echo 'Python 3.10 or newer is required.' >&2; exit 1;
