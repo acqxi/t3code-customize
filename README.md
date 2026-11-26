@@ -14,6 +14,7 @@ Unofficial. Not affiliated with T3 Tools. For T3 Code (Nightly, Beta or Release)
 - **Cache rate** for the last turn.
 - **Performance metrics**: time to first token and to first answer, live, average and peak tokens/s, token and cache usage, tool time and turn time, plus the provider, model, effort and speed of each turn. Show them under each reply, under the composer (current and previous turn, on one line), in the Thread details panel, or any combination. Estimated values show `≈` and unavailable ones `—`; which metrics exist depends on the provider. Codex, Claude Code and ACP agents such as Antigravity are timed from their streams. See [docs/performance-metrics.md](docs/performance-metrics.md).
 - **Subscription switch** when you have more than one signed-in subscription that offers your model. If the current one is on pace to run out before its 5 hour or weekly window resets, a chip like **Opus 5.5 on Personal →** switches the thread to the same model on the one with the most room. It also points out a subscription whose weekly allowance resets within a day mostly unused. Hover it for the reasoning.
+- **WSL host bridge** (Windows Desktop with a WSL backend): agents in WSL hand work that needs Windows, such as a browser, Computer Use, GUI apps or PowerShell, to the Windows backend on the same computer through T3's own Linked environments. The Desktop carries it over `wsl.exe` stdio, so the Windows backend needs no network access. Turn it on in **Settings > Connections > Local host bridge**. See [docs/wsl-host-bridge.md](docs/wsl-host-bridge.md).
 
 The official app's native dependencies and public T3 Connect configuration are
 reused. Windows signature changes and platform restrictions are described below.
@@ -101,6 +102,11 @@ depends on the provider and the conversation. The same settings section has a
 switch for each metric and for each place it appears. The customized app's
 window title ends with "(Customized)", so you can tell it from stock.
 
+**Settings > About > Restart** reloads the window, restarts T3 Code (into the
+newest customized build) or hard-restarts it when a backend hangs. While the
+WSL runtime installs and starts, the WSL backend row in Settings and its card
+in the Environments map show the current step.
+
 The command wrapper lives in `~/.local/bin` on Linux, or
 `%LOCALAPPDATA%\t3code-customize\bin` on Windows. If it is not on PATH, add that
 directory or use `python t3code-customize <command>` from the checkout
@@ -131,8 +137,7 @@ Your current T3 Code keeps working the whole time.
 
 ## How it works
 
-T3 Code is open source (MIT). This repo holds seven feature patches, one that marks the customized
-build's window title, and one script. The script:
+T3 Code is open source (MIT). This repo holds ten patches and one script. The script:
 
 1. reads your installed application: its exact upstream commit and the public config T3 Connect needs,
 2. applies the patches to that commit and runs their tests,

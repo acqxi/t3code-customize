@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: acqxi <kacqxi@gmail.com>
 Date: Fri, 27 Nov 2026 01:35:59 +0800
-Subject: [PATCH 6/8] Performance metrics: composer, per-reply history
+Subject: [PATCH 06/10] Performance metrics: composer, per-reply history
 
 Stats for nerds turn performance in the web UI, coded against the
 OrchestrationV2TurnPerformance contract.
@@ -20,37 +20,45 @@ OrchestrationV2TurnPerformance contract.
   window drops the lowest-priority items before the right side wraps.
   The stats line hands its tok/s and cache chips to the turn summaries
   when they are shown.
-- Timeline: a one-line footer under each reply for the provider turn that
-  produced it, with the breakdown on hover.
+- Timeline: the provider turn that produced each reply, right-aligned on
+  the reply's action row (copy, fork, reply, time), with the breakdown on
+  hover. It stays visible when the actions fade out and drops metrics in
+  the composer's priority order instead of wrapping.
+- Details: a compact grid instead of one row per metric. The provider
+  icon, model, effort and speed head it as badges; short labels from the
+  catalog (TTFT, Avg, Out, Hit%, ...) group timing, speed and tokens in
+  three columns with compact numbers (332k, 1.8k); context is one bar.
+  Each cell opens its full name, exact value and how it was measured on
+  hover, click, tap or keyboard.
 - Both follow the composer and per-reply settings and the hidden metric
   list (all shown by default). New catalog keys in every web locale.
 ---
- apps/web/src/components/ChatView.tsx          | 273 +++---
+ apps/web/src/components/ChatView.tsx          | 275 +++---
  .../web/src/components/chat/ComposerStats.tsx |  63 +-
- .../components/chat/TimelineAssistantRows.tsx |  11 +
- .../chat/TurnPerformance.catalog.ts           |  97 +++
- .../chat/TurnPerformance.logic.test.ts        | 709 ++++++++++++++++
- .../components/chat/TurnPerformance.logic.ts  | 787 ++++++++++++++++++
- .../src/components/chat/TurnPerformance.tsx   | 459 ++++++++++
- apps/web/src/i18n/translations/de.json        |  51 +-
- apps/web/src/i18n/translations/en.json        |  51 +-
- apps/web/src/i18n/translations/es.json        |  51 +-
- apps/web/src/i18n/translations/fr.json        |  51 +-
- apps/web/src/i18n/translations/ja.json        |  51 +-
- apps/web/src/i18n/translations/ko.json        |  51 +-
- apps/web/src/i18n/translations/pt-BR.json     |  51 +-
- apps/web/src/i18n/translations/ru.json        |  51 +-
- apps/web/src/i18n/translations/sv.json        |  51 +-
- apps/web/src/i18n/translations/zh.json        |  51 +-
+ .../components/chat/TimelineAssistantRows.tsx |  99 +-
+ .../chat/TurnPerformance.catalog.ts           | 120 +++
+ .../chat/TurnPerformance.logic.test.ts        | 795 ++++++++++++++++
+ .../components/chat/TurnPerformance.logic.ts  | 863 ++++++++++++++++++
+ .../src/components/chat/TurnPerformance.tsx   | 601 ++++++++++++
+ apps/web/src/i18n/translations/de.json        |  74 +-
+ apps/web/src/i18n/translations/en.json        |  74 +-
+ apps/web/src/i18n/translations/es.json        |  74 +-
+ apps/web/src/i18n/translations/fr.json        |  74 +-
+ apps/web/src/i18n/translations/ja.json        |  74 +-
+ apps/web/src/i18n/translations/ko.json        |  74 +-
+ apps/web/src/i18n/translations/pt-BR.json     |  74 +-
+ apps/web/src/i18n/translations/ru.json        |  74 +-
+ apps/web/src/i18n/translations/sv.json        |  74 +-
+ apps/web/src/i18n/translations/zh.json        |  74 +-
  apps/web/src/state/entities.ts                |   5 +
- 18 files changed, 2776 insertions(+), 138 deletions(-)
+ 18 files changed, 3383 insertions(+), 178 deletions(-)
  create mode 100644 apps/web/src/components/chat/TurnPerformance.catalog.ts
  create mode 100644 apps/web/src/components/chat/TurnPerformance.logic.test.ts
  create mode 100644 apps/web/src/components/chat/TurnPerformance.logic.ts
  create mode 100644 apps/web/src/components/chat/TurnPerformance.tsx
 
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index 0884d63683..f468f6841a 100644
+index 0884d63683..30d5fa25c6 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
 @@ -359,6 +359,17 @@ import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEn
@@ -71,7 +79,7 @@ index 0884d63683..f468f6841a 100644
  import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
  import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
  import { ComposerSurface } from "./chat/ComposerSurface";
-@@ -1658,6 +1669,39 @@ export default function ChatView(props: ChatViewProps) {
+@@ -1658,6 +1669,41 @@ export default function ChatView(props: ChatViewProps) {
        ),
      };
    })();
@@ -82,8 +90,10 @@ index 0884d63683..f468f6841a 100644
 +      const provider = providerStatuses.find((candidate) => candidate.instanceId === instanceId);
 +      return provider?.displayName?.trim() || instanceId || "This provider";
 +    };
++    const accentColorOf = (instanceId: string | undefined) =>
++      providerStatuses.find((candidate) => candidate.instanceId === instanceId)?.accentColor;
 +    const sourceOf = (turn: (typeof serverProjection.providerTurns)[number]) =>
-+      resolveTurnPerformanceSource(serverProjection, turn, providerNameOf);
++      resolveTurnPerformanceSource(serverProjection, turn, providerNameOf, accentColorOf);
 +    const hiddenMetrics = hiddenMetricSet(settings.statsForNerdsHiddenMetrics);
 +    const { current, previous } = selectComposerPerformanceTurns(
 +      selectComposerStatsTurns(serverProjection),
@@ -111,7 +121,7 @@ index 0884d63683..f468f6841a 100644
    const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection);
    const activeWorkStartedAt =
      deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
-@@ -3719,114 +3763,116 @@ export default function ChatView(props: ChatViewProps) {
+@@ -3719,114 +3765,116 @@ export default function ChatView(props: ChatViewProps) {
                className="relative flex min-h-0 flex-1 flex-col bg-background"
              >
                <WorkspaceMutationIdContext value={workspaceMutationId}>
@@ -335,7 +345,7 @@ index 0884d63683..f468f6841a 100644
                </WorkspaceMutationIdContext>
  
                {showScrollToBottom && !isThreadFindActive && (
-@@ -4187,6 +4233,19 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4187,6 +4235,19 @@ export default function ChatView(props: ChatViewProps) {
                              getDisabledReason: getModelDisabledReason,
                              onSwitch: onProviderModelSelectStable,
                            }}
@@ -491,9 +501,18 @@ index b81c19079d..4273e4ef05 100644
      </div>
    );
 diff --git a/apps/web/src/components/chat/TimelineAssistantRows.tsx b/apps/web/src/components/chat/TimelineAssistantRows.tsx
-index 9692bbedad..a729ca3137 100644
+index 9692bbedad..4ad3a250a7 100644
 --- a/apps/web/src/components/chat/TimelineAssistantRows.tsx
 +++ b/apps/web/src/components/chat/TimelineAssistantRows.tsx
+@@ -3,7 +3,7 @@ import { MessageId, type TurnItemId } from "@t3tools/contracts";
+ import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
+ import { agentWorkingDirectories } from "@t3tools/client-runtime/workspace-basename-lookup";
+ import { T, useGT, useMessages } from "gt-react";
+-import { use, useState } from "react";
++import { use, useState, type ReactNode } from "react";
+ import { type ChatMessage } from "../../types";
+ import ChatMarkdown from "../ChatMarkdown";
+ import { GitForkIcon, ReplyIcon } from "lucide-react";
 @@ -24,6 +24,7 @@ import { readThreadTurnItems } from "../../state/entities";
  import { useV2ItemSupport } from "../../state/v2ItemSupport";
  import { TimelineRowCtx, TimelineRowActivityCtx, type TimelineRow } from "./timelineRowContext";
@@ -502,36 +521,141 @@ index 9692bbedad..a729ca3137 100644
  
  export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
    const ctx = use(TimelineRowCtx);
-@@ -74,6 +75,12 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
-             <AssistantStatusBadge status="interrupted" />
-           </div>
+@@ -81,6 +82,12 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
+             message={row.message}
+             showCopyButton={row.showAssistantCopyButton}
+             copyStreaming={row.assistantCopyStreaming}
++            trailing={
++              <ReplyTurnPerformance
++                sourceThreadId={row.projectedItem?.sourceThreadId}
++                providerTurnId={row.projectedItem?.item.providerTurnId}
++              />
++            }
+           />
          ) : null}
-+        {row.showAssistantMeta ? (
+       </div>
+@@ -187,6 +194,12 @@ export function AssistantMetaTimelineRow({
+         showCopyButton={row.showAssistantCopyButton}
+         copyStreaming={row.assistantCopyStreaming}
+         alwaysVisible
++        trailing={
 +          <ReplyTurnPerformance
 +            sourceThreadId={row.projectedItem?.sourceThreadId}
 +            providerTurnId={row.projectedItem?.item.providerTurnId}
 +          />
-+        ) : null}
-         {row.showAssistantMeta ? (
-           <AssistantMessageMeta
-             className="mt-1.5"
-@@ -180,6 +187,10 @@ export function AssistantMetaTimelineRow({
++        }
+       />
+     </div>
+   );
+@@ -199,6 +212,7 @@ function AssistantMessageMeta({
+   showCopyButton,
+   copyStreaming,
+   alwaysVisible = false,
++  trailing = null,
+ }: {
+   className?: string;
+   projectedItem?: Extract<TimelineRow, { kind: "message" }>["projectedItem"];
+@@ -206,50 +220,55 @@ function AssistantMessageMeta({
+   showCopyButton: boolean;
+   copyStreaming: boolean;
+   alwaysVisible?: boolean;
++  /** Shown right-aligned on the same row and always visible, such as the reply's turn stats. */
++  trailing?: ReactNode;
  }) {
+   const ctx = use(TimelineRowCtx);
+   const m = useMessages();
+ 
    return (
-     <div className="px-1">
-+      <ReplyTurnPerformance
-+        sourceThreadId={row.projectedItem?.sourceThreadId}
-+        providerTurnId={row.projectedItem?.item.providerTurnId}
-+      />
-       <AssistantMessageMeta
-         className="mt-0.5"
-         projectedItem={row.projectedItem}
+-    <div
+-      className={cn(
+-        "flex items-center gap-2 text-xs tabular-nums transition-opacity duration-200",
+-        alwaysVisible
+-          ? "opacity-100"
+-          : "opacity-0 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover/assistant:opacity-100",
+-        className,
+-      )}
+-    >
+-      {projectedItem && projectedItem.item.status !== "completed" ? (
+-        <AssistantStatusBadge status={projectedItem.item.status} />
+-      ) : null}
+-      <AssistantCopyButton
+-        message={message}
+-        showCopyButton={showCopyButton}
+-        streaming={copyStreaming}
+-      />
+-      {projectedItem?.item.type === "assistant_message" ? (
+-        <AssistantForkButton projectedItem={projectedItem} />
+-      ) : null}
+-      {!message.streaming && projectedItem ? (
+-        <AssistantReplyButton message={message} itemId={projectedItem.sourceItemId} />
+-      ) : null}
+-      {!message.streaming && (
+-        <Tooltip>
+-          <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
+-            {formatDayAwareTimestamp(
+-              message.updatedAt,
+-              ctx.timestampFormat,
+-              undefined,
+-              undefined,
+-              m,
+-            )}
+-          </TooltipTrigger>
+-          <TooltipPopup>
+-            {formatChatTimestampTooltip(message.updatedAt, ctx.timestampFormat, m)}
+-          </TooltipPopup>
+-        </Tooltip>
+-      )}
++    <div className={cn("flex min-w-0 items-center gap-3", className)}>
++      {/* Only the actions fade in on hover; they keep their space, so nothing shifts. */}
++      <div
++        className={cn(
++          "flex shrink-0 items-center gap-2 text-xs tabular-nums transition-opacity duration-200",
++          alwaysVisible
++            ? "opacity-100"
++            : "opacity-0 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover/assistant:opacity-100",
++        )}
++      >
++        {projectedItem && projectedItem.item.status !== "completed" ? (
++          <AssistantStatusBadge status={projectedItem.item.status} />
++        ) : null}
++        <AssistantCopyButton
++          message={message}
++          showCopyButton={showCopyButton}
++          streaming={copyStreaming}
++        />
++        {projectedItem?.item.type === "assistant_message" ? (
++          <AssistantForkButton projectedItem={projectedItem} />
++        ) : null}
++        {!message.streaming && projectedItem ? (
++          <AssistantReplyButton message={message} itemId={projectedItem.sourceItemId} />
++        ) : null}
++        {!message.streaming && (
++          <Tooltip>
++            <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
++              {formatDayAwareTimestamp(
++                message.updatedAt,
++                ctx.timestampFormat,
++                undefined,
++                undefined,
++                m,
++              )}
++            </TooltipTrigger>
++            <TooltipPopup>
++              {formatChatTimestampTooltip(message.updatedAt, ctx.timestampFormat, m)}
++            </TooltipPopup>
++          </Tooltip>
++        )}
++      </div>
++      {trailing}
+     </div>
+   );
+ }
 diff --git a/apps/web/src/components/chat/TurnPerformance.catalog.ts b/apps/web/src/components/chat/TurnPerformance.catalog.ts
 new file mode 100644
-index 0000000000..96007c9792
+index 0000000000..eee613334e
 --- /dev/null
 +++ b/apps/web/src/components/chat/TurnPerformance.catalog.ts
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,120 @@
 +import { msg } from "gt-react";
 +
 +import type { TurnPerformanceMetricId } from "./TurnPerformance.logic";
@@ -539,89 +663,112 @@ index 0000000000..96007c9792
 +/** Labels for Stats for nerds turn metrics; resolve with `useMessages()`. */
 +export const TURN_PERFORMANCE_METRIC_LABELS: Record<
 +  TurnPerformanceMetricId,
-+  { readonly label: string; readonly short: string; readonly description: string }
++  {
++    /** Grid cell label, learned over time; the full label is in the cell's tooltip. */
++    readonly abbr: string;
++    readonly label: string;
++    readonly short: string;
++    readonly description: string;
++  }
 +> = {
 +  ttft: {
++    abbr: msg("TTFT", { $context: "short label of a turn performance metric" }),
 +    label: msg("Time to first token"),
 +    short: msg("TTFT"),
 +    description: msg("Request sent to the first generated token, including reasoning."),
 +  },
 +  ttfa: {
++    abbr: msg("TTFA", { $context: "short label of a turn performance metric" }),
 +    label: msg("Time to first answer"),
 +    short: msg("TTFA"),
 +    description: msg("Request sent to the first visible answer text."),
 +  },
 +  liveTps: {
++    abbr: msg("Live", { $context: "short label of a turn performance metric" }),
 +    label: msg("Live tokens/s"),
 +    short: msg("live"),
 +    description: msg("Estimated rate over the last 2 seconds while a turn runs."),
 +  },
 +  avgTps: {
++    abbr: msg("Avg", { $context: "short label of a turn performance metric" }),
 +    label: msg("Average tokens/s"),
 +    short: msg("avg"),
 +    description: msg("Generation tokens over active generation time, never over turn duration."),
 +  },
 +  peakTps: {
++    abbr: msg("Peak", { $context: "short label of a turn performance metric" }),
 +    label: msg("Peak tokens/s"),
 +    short: msg("peak"),
 +    description: msg("Highest estimated rate over a 2 second window."),
 +  },
 +  inputTokens: {
++    abbr: msg("In", { $context: "short label of a turn performance metric" }),
 +    label: msg("Input tokens"),
 +    short: msg("in"),
 +    description: msg("Provider-reported input, including cache reads and writes."),
 +  },
 +  outputTokens: {
++    abbr: msg("Out", { $context: "short label of a turn performance metric" }),
 +    label: msg("Output tokens"),
 +    short: msg("out"),
 +    description: msg("Provider-reported output, including reasoning."),
 +  },
 +  reasoningTokens: {
++    abbr: msg("Rsn", { $context: "short label of a turn performance metric" }),
 +    label: msg("Reasoning tokens"),
 +    short: msg("reasoning"),
 +    description: msg("Provider-reported reasoning tokens, when reported separately."),
 +  },
 +  cachedTokens: {
++    abbr: msg("Cache", { $context: "short label of a turn performance metric" }),
 +    label: msg("Cached tokens"),
 +    short: msg("cached in"),
 +    description: msg("Input served from the prompt cache."),
 +  },
 +  cacheHitRate: {
++    abbr: msg("Hit%", { $context: "short label of a turn performance metric" }),
 +    label: msg("Cache hit rate"),
 +    short: msg("cached"),
 +    description: msg("Cached input divided by total input."),
 +  },
 +  context: {
++    abbr: msg("Ctx", { $context: "short label of a turn performance metric" }),
 +    label: msg("Context usage"),
 +    short: msg("context"),
 +    description: msg("Context occupancy and window size."),
 +  },
 +  toolTime: {
++    abbr: msg("Tools", { $context: "short label of a turn performance metric" }),
 +    label: msg("Tool time"),
 +    short: msg("tools"),
 +    description: msg("Wall-clock time waiting on tools, with overlaps merged."),
 +  },
 +  turnTime: {
++    abbr: msg("Turn", { $context: "short label of a turn performance metric" }),
 +    label: msg("Turn time"),
 +    short: msg("turn"),
 +    description: msg("Request sent to the end of the turn."),
 +  },
 +  provider: {
++    abbr: msg("Prov", { $context: "short label of a turn performance metric" }),
 +    label: msg("Provider"),
 +    short: msg("provider"),
 +    description: msg("Provider that ran the turn."),
 +  },
 +  model: {
++    abbr: msg("Model", { $context: "short label of a turn performance metric" }),
 +    label: msg("Model"),
 +    short: msg("model"),
 +    description: msg("Requested model, and the reported one when it differs."),
 +  },
 +  reasoningEffort: {
++    abbr: msg("Effort", { $context: "short label of a turn performance metric" }),
 +    label: msg("Reasoning effort"),
 +    short: msg("effort"),
 +    description: msg("Reasoning effort requested for the turn."),
 +  },
 +  speedMode: {
++    abbr: msg("Speed", { $context: "short label of a turn performance metric" }),
 +    label: msg("Speed mode"),
 +    short: msg("speed"),
 +    description: msg("Claude fast mode or Codex service tier."),
@@ -631,10 +778,10 @@ index 0000000000..96007c9792
 +export const LEGACY_RESPONSE_RATE_LABEL = msg("Response rate");
 diff --git a/apps/web/src/components/chat/TurnPerformance.logic.test.ts b/apps/web/src/components/chat/TurnPerformance.logic.test.ts
 new file mode 100644
-index 0000000000..9257e01f3e
+index 0000000000..dc408d0e4d
 --- /dev/null
 +++ b/apps/web/src/components/chat/TurnPerformance.logic.test.ts
-@@ -0,0 +1,709 @@
+@@ -0,0 +1,795 @@
 +import {
 +  NodeId,
 +  ProviderInstanceId,
@@ -647,8 +794,15 @@ index 0000000000..9257e01f3e
 +import * as DateTime from "effect/DateTime";
 +import { describe, expect, it } from "vite-plus/test";
 +
++import { decodeMsg } from "gt-react";
++
++import { TURN_PERFORMANCE_METRIC_LABELS } from "./TurnPerformance.catalog";
 +import {
 +  COMPOSER_INLINE_PRIORITY,
++  compactMetricText,
++  formatCompactContext,
++  formatCompactCount,
++  TURN_PERFORMANCE_LAYOUT,
 +  TURN_PERFORMANCE_METRIC_IDS,
 +  countTurnStreamedChars,
 +  createLiveRateSampler,
@@ -1269,6 +1423,16 @@ index 0000000000..9257e01f3e
 +    expect(COMPOSER_INLINE_PRIORITY.current[0]).toBe("turnTime");
 +  });
 +
++  it("drops reply metrics in the composer's order, with tool time before TTFA", () => {
++    const reply: ReadonlyArray<TurnPerformanceMetricId> = COMPOSER_INLINE_PRIORITY.reply;
++    const previous: ReadonlyArray<TurnPerformanceMetricId> = COMPOSER_INLINE_PRIORITY.previous;
++    const shared = reply.filter((id) => previous.includes(id));
++    expect(shared).toEqual(previous.filter((id) => reply.includes(id)));
++    expect(reply.at(-1)).toBe("ttfa");
++    expect(reply.indexOf("toolTime")).toBeGreaterThan(reply.indexOf("outputTokens"));
++    expect(reply).not.toContain("peakTps");
++  });
++
 +  it("keeps priority order after hidden and unavailable metrics drop out", () => {
 +    const rows = filterVisibleMetrics(
 +      metrics({
@@ -1344,12 +1508,81 @@ index 0000000000..9257e01f3e
 +    expect(source.modelSelection?.model).toBe("gpt");
 +  });
 +});
++
++describe("compact detail grid", () => {
++  it("gives every metric a short, unique label next to its full one", () => {
++    const abbreviations = TURN_PERFORMANCE_METRIC_IDS.map((id) =>
++      decodeMsg(TURN_PERFORMANCE_METRIC_LABELS[id].abbr),
++    );
++    for (const abbr of abbreviations) {
++      expect(abbr.length).toBeGreaterThan(0);
++      expect(abbr.length).toBeLessThanOrEqual(6);
++    }
++    expect(new Set(abbreviations).size).toBe(abbreviations.length);
++    expect(abbreviations).toEqual(expect.arrayContaining(["TTFT", "TTFA", "Rsn", "Hit%"]));
++  });
++
++  it("places every metric exactly once: header, a group, or the context line", () => {
++    const placed = [
++      ...TURN_PERFORMANCE_LAYOUT.header,
++      ...TURN_PERFORMANCE_LAYOUT.groups.flatMap((group) => group.metrics),
++      TURN_PERFORMANCE_LAYOUT.context,
++    ];
++    expect(placed.toSorted()).toEqual([...TURN_PERFORMANCE_METRIC_IDS].toSorted());
++  });
++
++  it.each([
++    [0, "0"],
++    [950, "950"],
++    [1_765, "1.8k"],
++    [9_960, "10k"],
++    [11_080, "11k"],
++    [331_604, "332k"],
++    [999_600, "1m"],
++    [1_000_000, "1m"],
++    [2_400_000, "2.4m"],
++    [12_600_000, "13m"],
++  ])("counts %d as %s", (value, text) => {
++    expect(formatCompactCount(value)).toBe(text);
++  });
++
++  it("shortens context to percent and both counts", () => {
++    expect(formatCompactContext(331_604, 1_000_000)).toBe("33% · 332k/1m");
++    expect(formatCompactContext(331_604, null)).toBe("332k");
++  });
++
++  it("shortens cell values and keeps the estimate and unavailable marks", () => {
++    const rows = metrics({
++      turn: turn({
++        performance: perf({ firstTokenMs: 4_100, firstAnswerMs: 820 }),
++        turnTokenUsage: {
++          usageScope: "main_agent",
++          usageStatus: "complete",
++          inputTokens: 331_604,
++          cachedInputTokens: 300_000,
++          outputTokens: 11_080,
++          hasSubagents: false,
++        },
++      }),
++    });
++    expect(compactMetricText(byId(rows, "ttft"))).toBe("4.1s");
++    expect(compactMetricText(byId(rows, "ttfa"))).toBe("820ms");
++    expect(compactMetricText(byId(rows, "inputTokens"))).toBe("332k");
++    expect(compactMetricText(byId(rows, "outputTokens"))).toBe("11k");
++    expect(compactMetricText(byId(rows, "reasoningTokens"))).toBe("—");
++    const estimate = { ...byId(rows, "outputTokens"), precision: "estimated" as const };
++    expect(compactMetricText(estimate)).toBe("≈11k");
++    const rate = { ...byId(rows, "outputTokens"), id: "avgTps" as const, value: 108.4 };
++    expect(compactMetricText(rate)).toBe("108");
++    expect(compactMetricText({ ...rate, value: 9.46 })).toBe("9.5");
++  });
++});
 diff --git a/apps/web/src/components/chat/TurnPerformance.logic.ts b/apps/web/src/components/chat/TurnPerformance.logic.ts
 new file mode 100644
-index 0000000000..1f09bedf3a
+index 0000000000..7afe2629a6
 --- /dev/null
 +++ b/apps/web/src/components/chat/TurnPerformance.logic.ts
-@@ -0,0 +1,787 @@
+@@ -0,0 +1,863 @@
 +import type {
 +  ModelSelection,
 +  OrchestrationV2ProviderTurn,
@@ -1423,6 +1656,8 @@ index 0000000000..1f09bedf3a
 +  readonly driver: string | undefined;
 +  /** Display name used in "unavailable" tooltips. */
 +  readonly providerName: string;
++  /** The provider instance's accent color, for its icon. */
++  readonly accentColor?: string | undefined;
 +  /** What the run requested; null when unknown. */
 +  readonly modelSelection: ModelSelection | null;
 +}
@@ -1984,7 +2219,79 @@ index 0000000000..1f09bedf3a
 +export const COMPOSER_INLINE_PRIORITY = {
 +  current: ["turnTime", "liveTps", "ttft", "ttfa"],
 +  previous: ["avgTps", "ttft", "cacheHitRate", "turnTime", "outputTokens", "peakTps", "ttfa"],
-+} as const satisfies Record<"current" | "previous", ReadonlyArray<TurnPerformanceMetricId>>;
++  // The line beside each reply's actions: the previous turn's order, with tool time for history.
++  reply: ["avgTps", "ttft", "cacheHitRate", "turnTime", "outputTokens", "toolTime", "ttfa"],
++} as const satisfies Record<
++  "current" | "previous" | "reply",
++  ReadonlyArray<TurnPerformanceMetricId>
++>;
++
++/** The detail grid: what reads as a header badge, which cells group together, and context. */
++export const TURN_PERFORMANCE_LAYOUT = {
++  header: ["provider", "model", "reasoningEffort", "speedMode"],
++  groups: [
++    { id: "timing", metrics: ["ttft", "ttfa", "turnTime", "toolTime"] },
++    { id: "speed", metrics: ["liveTps", "avgTps", "peakTps"] },
++    {
++      id: "tokens",
++      metrics: ["inputTokens", "outputTokens", "reasoningTokens", "cachedTokens", "cacheHitRate"],
++    },
++  ],
++  context: "context",
++} as const satisfies {
++  readonly header: ReadonlyArray<TurnPerformanceMetricId>;
++  readonly groups: ReadonlyArray<{
++    readonly id: string;
++    readonly metrics: ReadonlyArray<TurnPerformanceMetricId>;
++  }>;
++  readonly context: TurnPerformanceMetricId;
++};
++
++/** "950", "1.8k", "332k", "1m", "2.4m": a token count that fits a grid cell. */
++export function formatCompactCount(value: number): string {
++  const n = Math.max(0, Math.round(value));
++  const trim = (text: string) => text.replace(/\.0$/, "");
++  if (n < 1_000) return String(n);
++  if (n < 10_000) return `${trim((n / 1_000).toFixed(1))}k`;
++  const thousands = Math.round(n / 1_000);
++  if (thousands < 1_000) return `${thousands}k`;
++  if (n < 10_000_000) return `${trim((n / 1_000_000).toFixed(1))}m`;
++  return `${Math.round(n / 1_000_000)}m`;
++}
++
++/** "33% · 332k/1m", or the used count alone when the window size is unknown. */
++export function formatCompactContext(usedTokens: number, maxTokens: number | null): string {
++  if (maxTokens === null || maxTokens <= 0) return formatCompactCount(usedTokens);
++  const percent = Math.round((usedTokens / maxTokens) * 100);
++  return `${percent}% · ${formatCompactCount(usedTokens)}/${formatCompactCount(maxTokens)}`;
++}
++
++const COMPACT_COUNT_METRICS = new Set<TurnPerformanceMetricId>([
++  "inputTokens",
++  "outputTokens",
++  "reasoningTokens",
++  "cachedTokens",
++]);
++const COMPACT_RATE_METRICS = new Set<TurnPerformanceMetricId>(["liveTps", "avgTps", "peakTps"]);
++
++/** A cell's value: counts and rates shortened, units the label implies dropped, ≈ and — kept. */
++export function compactMetricText(metric: TurnPerformanceMetric): string {
++  if (metric.precision === "unavailable") return UNAVAILABLE_TEXT;
++  const prefix = metric.precision === "estimated" ? ESTIMATE_PREFIX : "";
++  if (typeof metric.value === "number" && COMPACT_COUNT_METRICS.has(metric.id)) {
++    return `${prefix}${formatCompactCount(metric.value)}`;
++  }
++  if (
++    typeof metric.value === "number" &&
++    COMPACT_RATE_METRICS.has(metric.id) &&
++    metric.variant === undefined
++  ) {
++    const digits = metric.value < 10 ? 1 : 0;
++    return `${prefix}${metric.value.toFixed(digits)}`;
++  }
++  // "4.1 s" and "820 ms" read as "4.1s" and "820ms" in a cell.
++  return `${prefix}${metric.text.replace(/ (ms|s)$/, "$1")}`;
++}
 +
 +export function pickInlineMetrics(
 +  rows: ReadonlyArray<TurnPerformanceMetric>,
@@ -2019,6 +2326,7 @@ index 0000000000..1f09bedf3a
 +  projection: ProjectionForSource,
 +  turn: OrchestrationV2ProviderTurn,
 +  providerNameOf: (providerInstanceId: string | undefined) => string,
++  accentColorOf: (providerInstanceId: string | undefined) => string | undefined = () => undefined,
 +): TurnPerformanceSource {
 +  const providerThread = projection.providerThreads.find(
 +    (candidate) => candidate.id === turn.providerThreadId,
@@ -2036,6 +2344,7 @@ index 0000000000..1f09bedf3a
 +    turn,
 +    driver: providerThread?.driver ?? turn.nativeTurnRef?.driver,
 +    providerName: providerNameOf(providerThread?.providerInstanceId ?? run?.providerInstanceId),
++    accentColor: accentColorOf(providerThread?.providerInstanceId ?? run?.providerInstanceId),
 +    modelSelection: run?.modelSelection ?? null,
 +  };
 +}
@@ -2139,17 +2448,18 @@ index 0000000000..1f09bedf3a
 +}
 diff --git a/apps/web/src/components/chat/TurnPerformance.tsx b/apps/web/src/components/chat/TurnPerformance.tsx
 new file mode 100644
-index 0000000000..8d90dcc78a
+index 0000000000..126dea3e6b
 --- /dev/null
 +++ b/apps/web/src/components/chat/TurnPerformance.tsx
-@@ -0,0 +1,459 @@
+@@ -0,0 +1,601 @@
 +import type { ProviderTurnId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
-+import { useMessages } from "gt-react";
++import { ProviderDriverKind } from "@t3tools/contracts";
++import { msg, useGT, useMessages } from "gt-react";
 +import { createContext, use, useEffect, useRef, useState, type ReactNode } from "react";
 +
 +import { readThreadStreamedTurnItems } from "../../state/entities";
 +import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
-+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
++import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 +import { composerFloatingLayerProps } from "./composerEventScope";
 +import {
 +  LEGACY_RESPONSE_RATE_LABEL,
@@ -2157,13 +2467,16 @@ index 0000000000..8d90dcc78a
 +} from "./TurnPerformance.catalog";
 +import {
 +  COMPOSER_INLINE_PRIORITY,
++  compactMetricText,
 +  countTurnStreamedChars,
 +  createLiveRateSampler,
 +  deriveTurnPerformanceMetrics,
 +  filterVisibleMetrics,
++  formatCompactContext,
 +  isTurnRunning,
 +  liveRateKey,
 +  pickInlineMetrics,
++  TURN_PERFORMANCE_LAYOUT,
 +  type TurnPerformanceInput,
 +  type TurnPerformanceMetric,
 +  type TurnPerformanceMetricId,
@@ -2277,58 +2590,204 @@ index 0000000000..8d90dcc78a
 +  ));
 +}
 +
-+/** Every visible metric of one turn, each value with how it was measured on hover. */
++const PRECISION_TEXT = {
++  exact: msg("Exact", { $context: "a measured value, not an estimate" }),
++  estimated: msg("Estimate"),
++  unavailable: msg("Not reported by this provider"),
++} as const;
++
++/** One metric as a short label and a compact value; hover, click, tap or Enter shows the details. */
++function MetricCell({
++  metric,
++  badge = false,
++}: {
++  metric: TurnPerformanceMetric;
++  /** A header badge shows only its value, such as the model. */
++  badge?: boolean;
++}) {
++  const gt = useGT();
++  const m = useMessages();
++  const labelOf = useMetricLabel();
++  const label = labelOf(metric, "label");
++  const abbr =
++    metric.variant === "legacyResponseRate"
++      ? gt("Rate", { $context: "short label of the legacy response rate" })
++      : m(TURN_PERFORMANCE_METRIC_LABELS[metric.id].abbr);
++  const unavailable = metric.precision === "unavailable";
++  return (
++    <Popover>
++      <PopoverTrigger
++        openOnHover
++        delay={300}
++        closeDelay={100}
++        render={
++          <button
++            type="button"
++            data-metric={metric.id}
++            data-precision={metric.precision}
++            aria-label={gt("{label}: {value}", { label, value: metric.display })}
++            className={
++              badge
++                ? "max-w-40 truncate rounded-sm border border-border/70 px-1.5 text-2xs leading-4 text-foreground/80 -outline-offset-2"
++                : `flex min-w-0 items-baseline justify-between gap-1.5 rounded-sm text-left -outline-offset-2 ${unavailable ? "opacity-50" : ""}`
++            }
++          />
++        }
++      >
++        {badge ? (
++          metric.display
++        ) : (
++          <>
++            <span className="shrink-0 text-muted-foreground">{abbr}</span>
++            <span
++              className={`truncate tabular-nums ${metric.precision === "estimated" ? "text-foreground/70" : "text-foreground/85"}`}
++            >
++              {compactMetricText(metric)}
++              {metric.partial && !unavailable ? (
++                <span aria-hidden="true" className="text-muted-foreground">
++                  *
++                </span>
++              ) : null}
++            </span>
++          </>
++        )}
++      </PopoverTrigger>
++      <PopoverPopup {...composerFloatingLayerProps} side="top" className="max-w-72">
++        <div className="flex flex-col gap-0.5 text-xs">
++          <span className="font-medium">{label}</span>
++          {unavailable ? null : <span className="tabular-nums">{metric.display}</span>}
++          <span className="text-muted-foreground">{m(PRECISION_TEXT[metric.precision])}</span>
++          <span className="text-muted-foreground">{metric.reason}</span>
++          {metric.partial && !unavailable ? (
++            <span className="text-muted-foreground">
++              {gt("Partial: measured from incomplete data.")}
++            </span>
++          ) : null}
++        </div>
++      </PopoverPopup>
++    </Popover>
++  );
++}
++
++/**
++ * One turn's metrics, compact: a header of provider, model, effort and speed, grouped cells of
++ * short labels (timing, speed, tokens), and context as one bar.
++ */
++export function TurnPerformanceGrid({
++  source,
++  metrics,
++  live,
++}: {
++  source: TurnPerformanceSource;
++  metrics: ReadonlyArray<TurnPerformanceMetric>;
++  live: boolean;
++}) {
++  const byId = new Map(metrics.map((metric) => [metric.id, metric]));
++  const badges = TURN_PERFORMANCE_LAYOUT.header.flatMap((id) => {
++    const metric = byId.get(id);
++    return metric === undefined || id === "provider" || metric.precision === "unavailable"
++      ? []
++      : [metric];
++  });
++  const context = byId.get(TURN_PERFORMANCE_LAYOUT.context);
++  const usage = contextOf(source);
++  const contextPercent =
++    usage !== null && usage.maxTokens != null && usage.maxTokens > 0
++      ? Math.max(0, Math.min(100, (usage.usedTokens / usage.maxTokens) * 100))
++      : null;
++  return (
++    <div className="flex flex-col gap-2 text-xs">
++      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
++        {live && (
++          <span aria-hidden="true" className="size-1.5 animate-pulse rounded-full bg-success" />
++        )}
++        {byId.has("provider") ? (
++          <span className="inline-flex min-w-0 items-center gap-1 text-muted-foreground">
++            {source.driver !== undefined ? (
++              <ProviderInstanceIcon
++                driverKind={ProviderDriverKind.make(source.driver)}
++                displayName={source.providerName}
++                accentColor={source.accentColor}
++                className="z-auto"
++                iconClassName="size-3.5"
++              />
++            ) : null}
++            <span className="max-w-32 truncate">{source.providerName}</span>
++          </span>
++        ) : null}
++        {badges.map((metric) => (
++          <MetricCell key={metric.id} metric={metric} badge />
++        ))}
++      </div>
++      {TURN_PERFORMANCE_LAYOUT.groups.map((group) => {
++        const cells = group.metrics.flatMap((id) => {
++          const metric = byId.get(id);
++          return metric === undefined ? [] : [metric];
++        });
++        return cells.length === 0 ? null : (
++          <div
++            key={group.id}
++            data-metric-group={group.id}
++            className="grid grid-cols-3 gap-x-3 gap-y-0.5"
++          >
++            {cells.map((metric) => (
++              <MetricCell key={metric.id} metric={metric} />
++            ))}
++          </div>
++        );
++      })}
++      {context !== undefined ? (
++        <div className="flex min-w-0 items-center gap-2">
++          <span className="min-w-0 flex-1">
++            <MetricCell
++              metric={
++                usage === null || context.precision === "unavailable"
++                  ? context
++                  : {
++                      ...context,
++                      text: formatCompactContext(usage.usedTokens, usage.maxTokens ?? null),
++                    }
++              }
++            />
++          </span>
++          {contextPercent !== null ? (
++            <span
++              aria-hidden="true"
++              className="block h-[3px] w-16 shrink-0 overflow-hidden rounded-full bg-foreground/10"
++            >
++              <span
++                className="block h-full bg-muted-foreground/70"
++                style={{ width: `${contextPercent}%` }}
++              />
++            </span>
++          ) : null}
++        </div>
++      ) : null}
++    </div>
++  );
++}
++
++/** A turn's metrics in a popover: its title, then the compact grid. */
 +export function TurnPerformanceBreakdown({
 +  title,
-+  subtitle,
++  source,
 +  metrics,
++  live = false,
 +}: {
 +  title: string;
-+  subtitle?: string;
++  source: TurnPerformanceSource;
 +  metrics: ReadonlyArray<TurnPerformanceMetric>;
++  live?: boolean;
 +}) {
-+  const labelOf = useMetricLabel();
++  const gt = useGT();
 +  return (
-+    <div className="flex flex-col gap-3 text-xs">
-+      <div className="flex items-baseline justify-between gap-4">
-+        <h3 className="font-medium">{title}</h3>
-+        {subtitle && <span className="truncate text-muted-foreground">{subtitle}</span>}
-+      </div>
-+      <dl className="space-y-1.5">
-+        {metrics.map((metric) => (
-+          <div
-+            key={metric.id}
-+            data-metric={metric.id}
-+            className="flex items-baseline justify-between gap-4"
-+          >
-+            <dt className="text-muted-foreground">{labelOf(metric, "label")}</dt>
-+            <dd className="min-w-0 text-right tabular-nums">
-+              <Tooltip>
-+                <TooltipTrigger
-+                  render={
-+                    <span
-+                      tabIndex={0}
-+                      data-precision={metric.precision}
-+                      className={`rounded-sm -outline-offset-2 ${metric.precision === "unavailable" ? "text-muted-foreground" : ""}`}
-+                    />
-+                  }
-+                >
-+                  {metric.display}
-+                  {metric.partial && metric.precision !== "unavailable" && (
-+                    <span className="ms-1 text-muted-foreground">partial</span>
-+                  )}
-+                </TooltipTrigger>
-+                <TooltipPopup {...composerFloatingLayerProps} className="max-w-72">
-+                  {metric.reason}
-+                </TooltipPopup>
-+              </Tooltip>
-+            </dd>
-+          </div>
-+        ))}
-+      </dl>
-+      <p className="text-muted-foreground">
-+        Plain values are exact, ≈ marks an estimate, — means the provider does not expose it. Hover
-+        a value for how it was measured. Times are taken on the T3 server.
++    <div className="flex flex-col gap-2.5 text-xs">
++      <h3 className="font-medium">{title}</h3>
++      <TurnPerformanceGrid source={source} metrics={metrics} live={live} />
++      <p className="text-2xs text-muted-foreground">
++        {gt(
++          "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured.",
++        )}
 +      </p>
 +    </div>
 +  );
@@ -2340,7 +2799,7 @@ index 0000000000..8d90dcc78a
 +  metrics,
 +  inline,
 +  title,
-+  subtitle,
++  source,
 +  ariaLabel,
 +  className,
 +}: {
@@ -2349,7 +2808,7 @@ index 0000000000..8d90dcc78a
 +  metrics: ReadonlyArray<TurnPerformanceMetric>;
 +  inline: ReadonlyArray<TurnPerformanceMetric>;
 +  title: string;
-+  subtitle: string;
++  source: TurnPerformanceSource;
 +  ariaLabel: string;
 +  className?: string;
 +}) {
@@ -2377,21 +2836,11 @@ index 0000000000..8d90dcc78a
 +        <InlineMetrics metrics={inline} />
 +      </PopoverTrigger>
 +      <PopoverPopup {...composerFloatingLayerProps} side="top" align="start" width="md">
-+        <TurnPerformanceBreakdown title={title} subtitle={subtitle} metrics={metrics} />
++        <TurnPerformanceBreakdown title={title} source={source} metrics={metrics} live={live} />
 +      </PopoverPopup>
 +    </Popover>
 +  );
 +}
-+
-+const REPLY_INLINE: ReadonlyArray<TurnPerformanceMetricId> = [
-+  "avgTps",
-+  "ttft",
-+  "ttfa",
-+  "outputTokens",
-+  "cacheHitRate",
-+  "toolTime",
-+  "turnTime",
-+];
 +
 +function contextOf(source: TurnPerformanceSource): TurnPerformanceInput["context"] {
 +  const usage = source.turn.tokenUsage;
@@ -2437,7 +2886,7 @@ index 0000000000..8d90dcc78a
 +      metrics={metrics}
 +      inline={inline}
 +      title="Current turn"
-+      subtitle={source.providerName}
++      source={source}
 +      ariaLabel="Current turn performance details"
 +      className="shrink"
 +    />
@@ -2469,7 +2918,7 @@ index 0000000000..8d90dcc78a
 +      metrics={metrics}
 +      inline={inline}
 +      title={`Previous turn · ${source.turn.status}`}
-+      subtitle={source.providerName}
++      source={source}
 +      ariaLabel="Previous turn performance details"
 +      className="shrink-[8]"
 +    />
@@ -2565,12 +3014,14 @@ index 0000000000..8d90dcc78a
 +    }),
 +    hidden,
 +  );
-+  const inline = pickInlineMetrics(metrics, REPLY_INLINE);
++  const inline = pickInlineMetrics(metrics, COMPOSER_INLINE_PRIORITY.reply);
 +  if (metrics.length === 0) return null;
 +  return (
-+    <div
++    // Right of the reply's actions, on their row: one clipped line that drops its lowest-priority
++    // metrics when narrow, so it never wraps or pushes the actions.
++    <span
 +      data-reply-turn-performance={source.turn.id}
-+      className="mt-1 flex min-w-0 overflow-hidden text-2xs leading-4 text-muted-foreground tabular-nums"
++      className="flex min-w-0 flex-1 justify-end overflow-hidden text-2xs leading-4 text-muted-foreground tabular-nums"
 +    >
 +      <Popover>
 +        <PopoverTrigger
@@ -2581,7 +3032,7 @@ index 0000000000..8d90dcc78a
 +            <button
 +              type="button"
 +              aria-label="Turn performance details"
-+              className="inline-flex min-w-0 items-baseline gap-x-1.5 truncate rounded-sm text-left -outline-offset-2"
++              className="flex h-4 min-w-0 flex-wrap items-baseline justify-end gap-x-1.5 overflow-hidden rounded-sm text-left -outline-offset-2"
 +            />
 +          }
 +        >
@@ -2591,22 +3042,22 @@ index 0000000000..8d90dcc78a
 +            <span className="text-muted-foreground/70">Stats</span>
 +          )}
 +        </PopoverTrigger>
-+        <PopoverPopup side="top" align="start" width="md">
++        <PopoverPopup side="top" align="end" width="md">
 +          <TurnPerformanceBreakdown
 +            title={`Turn ${source.turn.ordinal} · ${source.turn.status}`}
-+            subtitle={source.providerName}
++            source={source}
 +            metrics={metrics}
 +          />
 +        </PopoverPopup>
 +      </Popover>
-+    </div>
++    </span>
 +  );
 +}
 diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
-index 087a421021..52c80c94e4 100644
+index 087a421021..356eada387 100644
 --- a/apps/web/src/i18n/translations/de.json
 +++ b/apps/web/src/i18n/translations/de.json
-@@ -12985,5 +12985,54 @@
+@@ -12985,5 +12985,77 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -2660,13 +3111,36 @@ index 087a421021..52c80c94e4 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
  }
 diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
-index c958bf348d..7d0c74efc5 100644
+index c958bf348d..5b37e71095 100644
 --- a/apps/web/src/i18n/translations/en.json
 +++ b/apps/web/src/i18n/translations/en.json
-@@ -12994,5 +12994,54 @@
+@@ -12994,5 +12994,77 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -2720,13 +3194,36 @@ index c958bf348d..7d0c74efc5 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
  }
 diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
-index 497db0cdb5..37069f070d 100644
+index 497db0cdb5..8ca2681742 100644
 --- a/apps/web/src/i18n/translations/es.json
 +++ b/apps/web/src/i18n/translations/es.json
-@@ -12980,5 +12980,54 @@
+@@ -12980,5 +12980,77 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -2780,13 +3277,36 @@ index 497db0cdb5..37069f070d 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
  }
 diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
-index 273889e103..465dc82606 100644
+index 273889e103..64e6b68cb7 100644
 --- a/apps/web/src/i18n/translations/fr.json
 +++ b/apps/web/src/i18n/translations/fr.json
-@@ -12985,5 +12985,54 @@
+@@ -12985,5 +12985,77 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -2840,13 +3360,36 @@ index 273889e103..465dc82606 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
  }
 diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
-index cc3160c4d6..4466e1991b 100644
+index cc3160c4d6..7daeab7a6d 100644
 --- a/apps/web/src/i18n/translations/ja.json
 +++ b/apps/web/src/i18n/translations/ja.json
-@@ -12921,5 +12921,54 @@
+@@ -12921,5 +12921,77 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -2900,13 +3443,36 @@ index cc3160c4d6..4466e1991b 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
  }
 diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
-index a49d7ab8a4..59a516f79a 100644
+index a49d7ab8a4..0c9efaa487 100644
 --- a/apps/web/src/i18n/translations/ko.json
 +++ b/apps/web/src/i18n/translations/ko.json
-@@ -12918,5 +12918,54 @@
+@@ -12918,5 +12918,77 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -2960,13 +3526,36 @@ index a49d7ab8a4..59a516f79a 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
  }
 diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
-index f9807ad230..6d3027d045 100644
+index f9807ad230..0fc7421cda 100644
 --- a/apps/web/src/i18n/translations/pt-BR.json
 +++ b/apps/web/src/i18n/translations/pt-BR.json
-@@ -12985,5 +12985,54 @@
+@@ -12985,5 +12985,77 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -3020,13 +3609,36 @@ index f9807ad230..6d3027d045 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
  }
 diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
-index 7a6c2d8617..d1380f807a 100644
+index 7a6c2d8617..e250442048 100644
 --- a/apps/web/src/i18n/translations/ru.json
 +++ b/apps/web/src/i18n/translations/ru.json
-@@ -12985,5 +12985,54 @@
+@@ -12985,5 +12985,77 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -3080,13 +3692,36 @@ index 7a6c2d8617..d1380f807a 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
  }
 diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
-index 51f36f89f1..54391039f8 100644
+index 51f36f89f1..25bfeccda0 100644
 --- a/apps/web/src/i18n/translations/sv.json
 +++ b/apps/web/src/i18n/translations/sv.json
-@@ -12992,5 +12992,54 @@
+@@ -12992,5 +12992,77 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -3140,13 +3775,36 @@ index 51f36f89f1..54391039f8 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
  }
 diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
-index c869bd1240..59ffc1574b 100644
+index c869bd1240..cd1e31b102 100644
 --- a/apps/web/src/i18n/translations/zh.json
 +++ b/apps/web/src/i18n/translations/zh.json
-@@ -12999,5 +12999,54 @@
+@@ -12999,5 +12999,77 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -3200,7 +3858,30 @@ index c869bd1240..59ffc1574b 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
  }
 diff --git a/apps/web/src/state/entities.ts b/apps/web/src/state/entities.ts
 index e2205c7c2d..91d7722987 100644

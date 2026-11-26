@@ -14,6 +14,7 @@
 - **快取命中率**：上一輪的快取命中率。
 - **效能指標**：首個 token 時間、首段回答時間，即時、平均與峰值 tokens/s，token 與快取用量，工具耗時與整輪耗時，以及每一輪的模型供應商、模型、推理強度與速度模式。可以顯示在每則回覆下方、輸入框下方（本輪與上一輪，排成一行）、Thread details 側欄，或任意組合。估計值標示 `≈`，無法取得的值顯示 `—`；有哪些指標取決於模型供應商。Codex、Claude Code 與 Antigravity 等 ACP 代理都依串流內容計時。定義見 [docs/performance-metrics.md](docs/performance-metrics.md)。
 - **訂閱切換**：同一個模型有多個已登入的訂閱可用時，若目前的訂閱照這個速度會在 5 小時或每週額度重置前用完，會出現像 **Opus 5.5 on Personal →** 的標籤，點一下就把對話串切到額度最充裕的那個訂閱上的同一個模型。每週額度將在一天內重置、卻還剩很多的訂閱也會提示。滑鼠移上去可以看到判斷依據。
+- **WSL 主機橋接**（使用 WSL 後端的 Windows Desktop）：WSL 中的代理可以透過 T3 原生的 Linked environments，把需要 Windows 的工作（瀏覽器、Computer Use、GUI 程式或 PowerShell）交給同一台電腦上的 Windows 後端。Desktop 經由 `wsl.exe` 的 stdio 轉送，Windows 後端不必開放網路存取。在 **Settings > Connections > Local host bridge** 開啟。說明見 [docs/wsl-host-bridge.md](docs/wsl-host-bridge.md)。
 
 客製版沿用官方 App 的原生相依套件與 T3 Connect 公開設定。Windows 簽章變動與平台限制說明如下。
 
@@ -67,6 +68,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/acqxi/t3code-customize/m
 
 客製版開啟後是一般的 T3 Code 主畫面，不會跳出另外的設定精靈。找不到開關的話，請自行打開 Settings 搜尋 **Stats for nerds**。這個開關預設是關閉的。開啟後，統計會顯示在輸入框下方與每則回覆下方；能顯示哪些數值，取決於模型供應商與對話內容。同一個設定區塊裡，每個指標和每個顯示位置都有各自的開關。客製版的視窗標題結尾會加上「(Customized)」，方便跟原版區分。
 
+**Settings > About > Restart** 可以重新載入視窗、重新啟動 T3 Code（會開啟最新的客製版建置），或在後端卡住時強制重啟。WSL runtime 安裝與啟動期間，設定裡的 WSL backend 那一列與 Environments 地圖上的卡片會顯示目前進行到哪一步。
+
 指令包裝程式在 Linux 位於 `~/.local/bin`，在 Windows 位於 `%LOCALAPPDATA%\t3code-customize\bin`。如果它不在 PATH 中，請把該資料夾加入 PATH，或在儲存庫資料夾中執行 `python t3code-customize <指令>`（Linux 用 `python3`）。
 
 macOS 請從 Spotlight、Launchpad 或 `~/Applications` 開啟 **T3 Code (Customized)**。設定方式、日常使用，以及為什麼是把 patch 載入你的 App 而不是重新建置，請見 [macOS 說明](docs/macos.md)。工具會在 `/Applications` 與 `~/Applications` 尋找 `T3 Code (Nightly).app`；其他位置請用 `--app "/path/to/T3 Code (Nightly).app"` 指定一次。
@@ -91,7 +94,7 @@ upstream 變動很快，有時 nightly 會改到 patch 動到的程式碼。這�
 
 ## 運作方式
 
-T3 Code 是開放原始碼軟體（MIT）。本儲存庫包含七個功能 patch、一個在客製版視窗標題加上標記的 patch，以及一支腳本。腳本會：
+T3 Code 是開放原始碼軟體（MIT）。本儲存庫包含十個 patch 與一支腳本。腳本會：
 
 1. 讀取已安裝的 App：它對應的 upstream commit，以及 T3 Connect 需要的公開設定，
 2. 把 patch 套用到該 commit 並執行測試，

@@ -25,7 +25,18 @@
     "apps/web/src/components/settings/settingsSearch.test.ts",
     "apps/web/src/components/chat/ThreadDetailsUsage.logic.test.ts",
     "packages/provider-cursor/src/server/usageLimits.test.ts",
-    "apps/desktop/src/app/DesktopRestart.test.ts"
+    "apps/desktop/src/app/DesktopRestart.test.ts",
+    "packages/shared/src/hostBridgeMux.test.ts",
+    "apps/server/src/hostBridge/hostBridgeHelper.test.ts",
+    "apps/server/src/peer/PeerLinks.test.ts",
+    "apps/desktop/src/hostBridge/hostBridgePlan.test.ts",
+    "apps/desktop/src/hostBridge/DesktopHostBridge.test.ts",
+    "apps/desktop/src/settings/DesktopAppSettings.test.ts",
+    "apps/desktop/src/app/DesktopApp.test.ts",
+    "apps/web/src/components/settings/LocalHostBridge.logic.test.ts",
+    "apps/desktop/src/window/DesktopWindow.test.ts",
+    "apps/desktop/src/wsl/DesktopWslRuntimeStatus.test.ts",
+    "apps/web/src/components/settings/wslRuntimeStatus.logic.test.ts"
   ],
   "typecheck": [
     "apps/server",
@@ -33,6 +44,7 @@
     "apps/web",
     "packages/contracts",
     "packages/client-runtime",
+    "packages/shared",
     "packages/provider-core",
     "packages/provider-cursor",
     "packages/provider-grok",

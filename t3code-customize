@@ -1289,6 +1289,10 @@ def cmd_uninstall(args):
             wsl.windows_remove_tree(folder) if WINDOWS_FROM_WSL and folder == DATA else shutil.rmtree(folder)
     tail = '' if DATA in REPO.parents else f' You can delete {REPO} too.'
     say('Removed t3code-customize, its launcher, builds and caches. Your T3 Code and its data are untouched.' + tail)
+    if WINDOWS_FROM_WSL:
+        # A WSL host bridge link is an ordinary T3 link; it outlives the customization until revoked.
+        say('A WSL host bridge link, if you made one, stays in T3 until you revoke it: `t3 environment unlink '
+            '<windows-environment-id>` in WSL, or Settings > Sharing & access on Windows.')
 
 
 def main():
