@@ -185,6 +185,16 @@ LAUNCH_PS1 = r'''# Written by t3code-customize. Opens the customized T3 Code whi
 # installed T3 Code, otherwise the installed (stock) one. Never changes either app.
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$pass = @($args)
+# The app's Restart button starts this script and quits; wait for it so the
+# running-instance check below does not see it.
+if ($pass.Count -ge 2 -and $pass[0] -ieq '-WaitPid') {
+  $waitId = [int]$pass[1]
+  $pass = @($pass | Select-Object -Skip 2)
+  $deadline = (Get-Date).AddSeconds(60)
+  while ((Get-Process -Id $waitId -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+  Start-Sleep -Milliseconds 500
+}
 function Notify($text) {
   try { (New-Object -ComObject WScript.Shell).Popup($text, 12, 'T3 Code (Customized)', 64) | Out-Null } catch {}
 }
@@ -218,8 +228,11 @@ if ($running.Count -gt 0) {
   }
 }
 if ($notice) { Notify $notice }
-if ($target -ne $state.stockExe) { $env:T3CODE_DISABLE_AUTO_UPDATE = 'true' }
-if ($args.Count -gt 0) { Start-Process -FilePath $target -ArgumentList $args } else { Start-Process -FilePath $target }
+if ($target -ne $state.stockExe) {
+  $env:T3CODE_DISABLE_AUTO_UPDATE = 'true'
+  $env:T3CODE_CUSTOMIZE_RELAUNCH = Join-Path $here 'launch.ps1'
+}
+if ($pass.Count -gt 0) { Start-Process -FilePath $target -ArgumentList $pass } else { Start-Process -FilePath $target }
 '''
 
 
