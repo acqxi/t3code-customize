@@ -16,7 +16,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/acqxi/t3code-customize/m
    It uses about 6 GB of disk.
 2. Quit T3 Code fully (Cmd+Q, not just closing the window).
 3. Open **T3 Code (Customized)** from Spotlight, Launchpad or `~/Applications`.
-4. Turn on **Settings > General > Stats for nerds**.
+4. Turn on **Settings > Appearance > Stats for nerds**.
 
 If your app is somewhere else, point to it once:
 

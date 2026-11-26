@@ -1,0 +1,2270 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: acqxi <kacqxi@gmail.com>
+Date: Fri, 27 Nov 2026 01:36:00 +0800
+Subject: [PATCH 7/8] Stats for nerds: settings, placement, thread details and
+ every provider's limits
+
+- Settings: Stats for nerds moves from Chat to Appearance, with its
+  master switch, a "Where stats show" checkbox menu (under each reply,
+  under the composer, in thread details; each backed by its own setting,
+  the last by the thread details item), the usage limits scope, a switch
+  per metric (statsForNerdsHiddenMetrics), reset buttons and search
+  entries.
+- Thread details: a "Turn performance" item (id "performance", off by
+  default, offered while Stats for nerds is on) with the current or last
+  turn's metrics as label/value rows.
+- Usage limits: every enabled provider that reports limits, the thread's
+  provider first, each with its icon and its tightest window in the
+  provider's accent color (the theme's primary without one). Thread
+  details lists them grouped per provider.
+  statsForNerdsUsageLimitsScope ("all" by default, or "current") limits
+  both to the thread's provider.
+- New catalog keys in every web locale.
+---
+ apps/web/src/components/ChatView.tsx          |  38 ++-
+ .../chat/ComposerStats.logic.test.ts          | 140 ++++++++++
+ .../components/chat/ComposerStats.logic.ts    |  83 ++++++
+ .../web/src/components/chat/ComposerStats.tsx | 145 +++++++---
+ .../chat/ThreadDetailsItemsMenu.tsx           |   5 +-
+ .../components/chat/ThreadDetailsPanel.tsx    |  10 +
+ .../components/chat/ThreadDetailsUsage.tsx    | 127 +++++++--
+ .../src/components/chat/TurnPerformance.tsx   | 114 +++++++-
+ .../chat/statsForNerdsPlacement.test.ts       |  72 +++++
+ .../components/chat/statsForNerdsPlacement.ts |  82 ++++++
+ .../chat/threadDetailsItems.test.ts           |  12 +
+ .../src/components/chat/threadDetailsItems.ts |   6 +
+ .../settings/AppearanceSettingsPanel.tsx      |   3 +
+ .../components/settings/SettingsPanels.tsx    |  41 +--
+ .../settings/StatsForNerdsSettings.tsx        | 254 ++++++++++++++++++
+ .../settings/ThreadDetailsItemsRow.tsx        |  11 +-
+ .../src/components/settings/settingsSearch.ts |  36 ++-
+ apps/web/src/i18n/translations/de.json        |  29 +-
+ apps/web/src/i18n/translations/en.json        |  29 +-
+ apps/web/src/i18n/translations/es.json        |  29 +-
+ apps/web/src/i18n/translations/fr.json        |  29 +-
+ apps/web/src/i18n/translations/ja.json        |  29 +-
+ apps/web/src/i18n/translations/ko.json        |  29 +-
+ apps/web/src/i18n/translations/pt-BR.json     |  29 +-
+ apps/web/src/i18n/translations/ru.json        |  29 +-
+ apps/web/src/i18n/translations/sv.json        |  29 +-
+ apps/web/src/i18n/translations/zh.json        |  29 +-
+ packages/contracts/src/settings.ts            |   9 +-
+ 28 files changed, 1337 insertions(+), 141 deletions(-)
+ create mode 100644 apps/web/src/components/chat/statsForNerdsPlacement.test.ts
+ create mode 100644 apps/web/src/components/chat/statsForNerdsPlacement.ts
+ create mode 100644 apps/web/src/components/settings/StatsForNerdsSettings.tsx
+
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index f468f6841a..b4bb56dde3 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -358,7 +358,12 @@ import { useProactivePanels } from "../hooks/useProactivePanels";
+ import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEntries";
+ import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
+ import { ComposerStats } from "./chat/ComposerStats";
+-import { selectComposerStatsTurns, selectRecordedCompactions } from "./chat/ComposerStats.logic";
++import {
++  selectComposerStatsTurns,
++  selectRecordedCompactions,
++  selectUsageLimitProviders,
++} from "./chat/ComposerStats.logic";
++import { resolveThreadDetailsVisibility } from "./chat/threadDetailsItems";
+ import {
+   ComposerTurnPerformance,
+   TurnPerformanceTimelineCtx,
+@@ -1612,7 +1617,6 @@ export default function ChatView(props: ChatViewProps) {
+     activeThreadLiveTokenUsage,
+     activeProviderThread,
+   );
+-  const activeUsageLimits = activeProviderStatus?.usageLimits;
+   // The model the composer shows, so the switch keeps it while changing subscription.
+   const subscriptionSwitchDraft = useComposerDraftModelState(composerDraftTarget);
+   const { selectedModel: subscriptionSwitchModel } = deriveEffectiveComposerModelState({
+@@ -1625,13 +1629,18 @@ export default function ChatView(props: ChatViewProps) {
+     projectModelSelection: activeProjectDefaultModelSelection,
+     settings,
+   });
+-  const activeProviderName =
+-    activeProviderStatus?.displayName?.trim() || activeProviderStatus?.instanceId || "";
+   const composerStats = (() => {
+     if (!settings.statsForNerdsEnabled) return null;
+-    const usageLimits = activeUsageLimits
+-      ? { limits: activeUsageLimits, providerName: activeProviderName }
+-      : null;
++    // Picker order and the project's enabled state, so a provider turned off here stays hidden.
++    const usageLimits = selectUsageLimitProviders(
++      providerInstanceEntries.map((entry) =>
++        entry.enabled === entry.snapshot.enabled
++          ? entry.snapshot
++          : { ...entry.snapshot, enabled: entry.enabled },
++      ),
++      activeProviderInstanceId,
++      settings.statsForNerdsUsageLimitsScope,
++    );
+     if (!serverProjection)
+       return {
+         turn: null,
+@@ -1682,11 +1691,13 @@ export default function ChatView(props: ChatViewProps) {
+     const { current, previous } = selectComposerPerformanceTurns(
+       selectComposerStatsTurns(serverProjection),
+     );
+-    const composer = settings.statsForNerdsShowInComposer
+-      ? {
+-          current: current === null ? null : sourceOf(current),
+-          previous: previous === null ? null : sourceOf(previous),
+-        }
++    const latest = {
++      current: current === null ? null : sourceOf(current),
++      previous: previous === null ? null : sourceOf(previous),
++    };
++    const composer = settings.statsForNerdsShowInComposer ? latest : null;
++    const threadDetails = resolveThreadDetailsVisibility(settings).performance
++      ? { threadRef: routeThreadDetailRef, ...latest, hiddenMetrics }
+       : null;
+     const timeline: TurnPerformanceTimelineValue | null = settings.statsForNerdsShowPerReply
+       ? {
+@@ -1700,7 +1711,7 @@ export default function ChatView(props: ChatViewProps) {
+           hiddenMetrics,
+         }
+       : null;
+-    return { composer, timeline, hiddenMetrics };
++    return { composer, timeline, threadDetails, hiddenMetrics };
+   })();
+   const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection);
+   const activeWorkStartedAt =
+@@ -4350,6 +4361,7 @@ export default function ChatView(props: ChatViewProps) {
+                     sources: serverConfig?.usageLimitSources ?? EMPTY_USAGE_LIMIT_SOURCES,
+                     contextWindow: activeContextWindow,
+                   }}
++                  performance={turnPerformance?.threadDetails ?? null}
+                 />
+ 
+                 <PullRequestThreadDialogHost
+diff --git a/apps/web/src/components/chat/ComposerStats.logic.test.ts b/apps/web/src/components/chat/ComposerStats.logic.test.ts
+index 79b01fd80e..d9d0d1765c 100644
+--- a/apps/web/src/components/chat/ComposerStats.logic.test.ts
++++ b/apps/web/src/components/chat/ComposerStats.logic.test.ts
+@@ -1,6 +1,9 @@
+ import {
+   NodeId,
+   ProviderDriverKind,
++  ProviderInstanceId,
++  type ServerProvider,
++  type ServerProviderUsageWindow,
+   ThreadId,
+   TurnItemId,
+   type OrchestrationV2TurnItem,
+@@ -12,6 +15,7 @@ import * as DateTime from "effect/DateTime";
+ import { describe, expect, it } from "vite-plus/test";
+ 
+ import {
++  composerLimitChips,
+   composerLimitDisplay,
+   composerLimitsFreshness,
+   deriveContextCompaction,
+@@ -22,6 +26,8 @@ import {
+   selectComposerLimitWindows,
+   selectComposerStatsTurns,
+   selectRecordedCompactions,
++  selectTightestLimitWindow,
++  selectUsageLimitProviders,
+ } from "./ComposerStats.logic";
+ 
+ const start = DateTime.makeUnsafe("2026-10-03T10:00:00Z");
+@@ -533,3 +539,137 @@ describe("context compaction pressure", () => {
+     ).toMatchObject({ remainingTokens: 220_000, pressurePercentage: 90 });
+   });
+ });
++
++describe("usage limits across providers", () => {
++  const now = Date.parse("2026-10-04T16:00:00.000Z");
++  const checkedAt = new Date(now - 60_000).toISOString();
++  const limitWindow = (
++    id: string,
++    kind: "session" | "weekly",
++    usedPercent: number,
++    overrides: Partial<ServerProviderUsageWindow> = {},
++  ): ServerProviderUsageWindow => ({
++    id,
++    kind,
++    label: id,
++    usedPercent,
++    windowDurationMins: kind === "session" ? 300 : 10_080,
++    ...overrides,
++  });
++  const provider = (
++    instanceId: string,
++    windows: ReadonlyArray<ServerProviderUsageWindow> | null,
++    overrides: Partial<ServerProvider> = {},
++  ) =>
++    ({
++      instanceId: ProviderInstanceId.make(instanceId),
++      driver: "codex",
++      enabled: true,
++      installed: true,
++      ...(windows === null ? {} : { usageLimits: { checkedAt, windows: [...windows] } }),
++      ...overrides,
++    }) as ServerProvider;
++  const ids = (entries: ReadonlyArray<{ provider: ServerProvider }>) =>
++    entries.map((entry) => entry.provider.instanceId);
++
++  const codex = provider("codex", [limitWindow("five_hour", "session", 10)]);
++  const claude = provider("claude", [limitWindow("seven_day", "weekly", 40)]);
++  const antigravity = provider("antigravity", [limitWindow("five_hour", "session", 70)]);
++
++  it("lists the thread's provider first, then the others in their order", () => {
++    const entries = selectUsageLimitProviders(
++      [codex, claude, antigravity],
++      ProviderInstanceId.make("claude"),
++      "all",
++    );
++    expect(ids(entries)).toEqual(["claude", "codex", "antigravity"]);
++    expect(entries.map((entry) => entry.current)).toEqual([true, false, false]);
++  });
++
++  it("keeps only the thread's provider when scoped to it", () => {
++    expect(
++      ids(selectUsageLimitProviders([codex, claude], ProviderInstanceId.make("codex"), "current")),
++    ).toEqual(["codex"]);
++    expect(selectUsageLimitProviders([codex, claude], null, "current")).toEqual([]);
++  });
++
++  it("skips other providers that are off, missing or report no windows", () => {
++    const entries = selectUsageLimitProviders(
++      [
++        codex,
++        provider("disabled", [limitWindow("five_hour", "session", 5)], { enabled: false }),
++        provider("missing", [limitWindow("five_hour", "session", 5)], { installed: false }),
++        provider("offline", [limitWindow("five_hour", "session", 5)], {
++          availability: "unavailable",
++        }),
++        provider("none", null),
++        provider("empty", []),
++        claude,
++      ],
++      null,
++      "all",
++    );
++    expect(ids(entries)).toEqual(["codex", "claude"]);
++  });
++
++  it("picks the readable window closest to running out", () => {
++    const limits = {
++      checkedAt,
++      windows: [limitWindow("five_hour", "session", 30), limitWindow("seven_day", "weekly", 80)],
++    };
++    expect(selectTightestLimitWindow(limits, now)?.window.id).toBe("seven_day");
++  });
++
++  it("prefers a fresh window over a stale, higher one", () => {
++    const limits = {
++      checkedAt,
++      windows: [
++        limitWindow("five_hour", "session", 30),
++        limitWindow("seven_day", "weekly", 95, {
++          checkedAt: new Date(now - 10 * 60_000).toISOString(),
++        }),
++      ],
++    };
++    expect(selectTightestLimitWindow(limits, now)?.window.id).toBe("five_hour");
++  });
++
++  it("treats a window past its reset as empty", () => {
++    const limits = {
++      checkedAt,
++      windows: [
++        limitWindow("five_hour", "session", 99, {
++          resetsAt: new Date(now - 60_000).toISOString(),
++        }),
++        limitWindow("seven_day", "weekly", 20),
++      ],
++    };
++    expect(selectTightestLimitWindow(limits, now)?.window.id).toBe("seven_day");
++    expect(selectTightestLimitWindow(undefined, now)).toBeNull();
++  });
++
++  it("keeps every window for one provider and the tightest for several", () => {
++    const both = provider("both", [
++      limitWindow("five_hour", "session", 30),
++      limitWindow("seven_day", "weekly", 60),
++    ]);
++    const single = selectUsageLimitProviders([both], ProviderInstanceId.make("both"), "all");
++    expect(
++      composerLimitChips(single, now).map(({ chips }) => chips.map(({ shortLabel }) => shortLabel)),
++    ).toEqual([["5h", "Week"]]);
++
++    const several = selectUsageLimitProviders(
++      [both, codex],
++      ProviderInstanceId.make("both"),
++      "all",
++    );
++    expect(
++      composerLimitChips(several, now).map(({ entry, chips }) => [
++        entry.provider.instanceId,
++        chips.map(({ window }) => window.id),
++      ]),
++    ).toEqual([
++      ["both", ["seven_day"]],
++      ["codex", ["five_hour"]],
++    ]);
++  });
++});
+diff --git a/apps/web/src/components/chat/ComposerStats.logic.ts b/apps/web/src/components/chat/ComposerStats.logic.ts
+index 7d344f7d90..5aceb0b12d 100644
+--- a/apps/web/src/components/chat/ComposerStats.logic.ts
++++ b/apps/web/src/components/chat/ComposerStats.logic.ts
+@@ -2,6 +2,8 @@ import type {
+   OrchestrationV2ProviderTurn,
+   OrchestrationV2ThreadProjection,
+   OrchestrationV2TurnItem,
++  ProviderInstanceId,
++  ServerProvider,
+   ServerProviderUsageLimits,
+   ServerProviderUsageWindow,
+   TurnTokenUsage,
+@@ -166,6 +168,87 @@ export function selectComposerLimitWindows(
+   });
+ }
+ 
++export type UsageLimitsScope = "current" | "all";
++
++export interface UsageLimitProviderEntry {
++  readonly provider: ServerProvider;
++  readonly limits: ServerProviderUsageLimits;
++  readonly current: boolean;
++}
++
++/**
++ * Providers whose limits Stats for nerds shows: the thread's provider first, then every other
++ * enabled provider that reports limit windows, in the configured order.
++ */
++export function selectUsageLimitProviders(
++  providers: ReadonlyArray<ServerProvider>,
++  currentInstanceId: ProviderInstanceId | null,
++  scope: UsageLimitsScope,
++): ReadonlyArray<UsageLimitProviderEntry> {
++  const current = providers.find((provider) => provider.instanceId === currentInstanceId);
++  const entries: UsageLimitProviderEntry[] =
++    current?.usageLimits !== undefined
++      ? [{ provider: current, limits: current.usageLimits, current: true }]
++      : [];
++  if (scope === "current") return entries;
++  for (const provider of providers) {
++    if (
++      provider === current ||
++      !provider.enabled ||
++      !provider.installed ||
++      provider.availability === "unavailable" ||
++      selectComposerLimitWindows(provider.usageLimits).length === 0
++    )
++      continue;
++    entries.push({ provider, limits: provider.usageLimits!, current: false });
++  }
++  return entries;
++}
++
++/**
++ * The account-wide window closest to running out. Readable windows beat dimmed ones (stale,
++ * expired or awaiting a reset reading), so an old high reading never hides a live one.
++ */
++export function selectTightestLimitWindow(
++  limits: ServerProviderUsageLimits | undefined,
++  nowMs: number,
++): { readonly window: ServerProviderUsageWindow; readonly shortLabel: string } | null {
++  const ranked = selectComposerLimitWindows(limits).map((chip) => {
++    const display = composerLimitDisplay(chip.window, limits?.checkedAt, nowMs);
++    return { chip, readable: !display.dimmed, percent: display.displayPercent ?? -1 };
++  });
++  const best = ranked.reduce<(typeof ranked)[number] | null>(
++    (top, entry) =>
++      top === null ||
++      (entry.readable && !top.readable) ||
++      (entry.readable === top.readable && entry.percent > top.percent)
++        ? entry
++        : top,
++    null,
++  );
++  return best?.chip ?? null;
++}
++
++/** One provider keeps every account-wide window; several show only each one's tightest. */
++export function composerLimitChips(
++  entries: ReadonlyArray<UsageLimitProviderEntry>,
++  nowMs: number,
++): ReadonlyArray<{
++  readonly entry: UsageLimitProviderEntry;
++  readonly chips: ReadonlyArray<{
++    readonly window: ServerProviderUsageWindow;
++    readonly shortLabel: string;
++  }>;
++}> {
++  return entries.flatMap((entry) => {
++    const chips =
++      entries.length === 1
++        ? selectComposerLimitWindows(entry.limits)
++        : [selectTightestLimitWindow(entry.limits, nowMs)].filter((chip) => chip !== null);
++    return chips.length === 0 ? [] : [{ entry, chips }];
++  });
++}
++
+ export const COMPOSER_STATS_CLOCK_MS = 30_000;
+ 
+ /** Age of the newest valid fetch among the displayed windows. */
+diff --git a/apps/web/src/components/chat/ComposerStats.tsx b/apps/web/src/components/chat/ComposerStats.tsx
+index 4273e4ef05..c2cd768e74 100644
+--- a/apps/web/src/components/chat/ComposerStats.tsx
++++ b/apps/web/src/components/chat/ComposerStats.tsx
+@@ -3,12 +3,17 @@ import type {
+   OrchestrationV2TurnItem,
+   ProviderInstanceId,
+   ServerProvider,
+-  ServerProviderUsageLimits,
+   ServerProviderUsageWindow,
+ } from "@t3tools/contracts";
++import {
++  normalizeProviderAccentColor,
++  resolveProviderInstanceDisplayName,
++} from "@t3tools/client-runtime/state/provider-instance-display";
+ import { formatDuration } from "@t3tools/shared/orchestrationTiming";
++import { paceOf, type LimitPace } from "@t3tools/shared/usageLimits";
+ import { formatResetsIn } from "@t3tools/shared/usageLimitsCopy";
+ import * as DateTime from "effect/DateTime";
++import { T, useGT } from "gt-react";
+ import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+ 
+ import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
+@@ -19,6 +24,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+ import { composerFloatingLayerProps } from "./composerEventScope";
+ import {
+   COMPOSER_STATS_CLOCK_MS,
++  composerLimitChips,
+   composerLimitDisplay,
+   composerLimitSourceLabel,
+   composerLimitsFreshness,
+@@ -28,7 +34,9 @@ import {
+   formatCachePercentage,
+   deriveTurnElapsedMs,
+   selectComposerLimitWindows,
++  type UsageLimitProviderEntry,
+ } from "./ComposerStats.logic";
++import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+ import { recommendSubscriptionSwitch } from "./SubscriptionSwitch.logic";
+ 
+ function ElapsedTime({ turn }: { turn: OrchestrationV2ProviderTurn }) {
+@@ -101,12 +109,15 @@ function Meter({
+   displayPercent,
+   percentText,
+   dimmed,
++  accentColor,
+ }: {
+   label: string;
+   percent: number;
+   displayPercent: number | null;
+   percentText: string;
+   dimmed: boolean;
++  /** The provider's accent; the theme's primary color when it has none. */
++  accentColor?: string | null | undefined;
+ }) {
+   const tone = toneOf(percent);
+   return (
+@@ -117,9 +128,14 @@ function Meter({
+         className="block h-[3px] w-7 overflow-hidden rounded-full bg-foreground/10"
+       >
+         <span
+-          className={`block h-full ${dimmed ? "bg-muted-foreground/60" : TONE_FILL[tone]}`}
++          className={`block h-full ${
++            dimmed ? "bg-muted-foreground/60" : accentColor === undefined ? TONE_FILL[tone] : ""
++          }`}
+           style={{
+             width: `${displayPercent === null ? 0 : Math.max(0, Math.min(100, displayPercent))}%`,
++            ...(dimmed || accentColor === undefined
++              ? {}
++              : { backgroundColor: accentColor ?? "var(--primary)" }),
+           }}
+         />
+       </span>
+@@ -158,6 +174,12 @@ function usageReadingLabel(
+   )}`;
+ }
+ 
++const PACE_TEXT: Record<LimitPace, string> = {
++  ahead: "Ahead of pace",
++  on: "On pace",
++  under: "Under pace",
++};
++
+ /** Ages and reset countdowns share the summary clock while the popover is open. */
+ function UsageLimitRows({
+   windows,
+@@ -192,6 +214,9 @@ function UsageLimitRows({
+             <p className="text-right text-muted-foreground tabular-nums">
+               {usageReadingLabel(window, checkedAt, now)}
+             </p>
++            {!display.dimmed && paceOf(window, now) !== null && (
++              <p className="text-right text-muted-foreground">{PACE_TEXT[paceOf(window, now)!]}</p>
++            )}
+             {display.resetPending ? (
+               <p className="text-right text-muted-foreground tabular-nums">
+                 {window.resetsAt
+@@ -212,24 +237,41 @@ function UsageLimitRows({
+   );
+ }
+ 
+-function UsageLimitsSummary({
+-  limits,
+-  providerName,
+-}: {
+-  limits: ServerProviderUsageLimits;
+-  providerName: string;
+-}) {
++function ProviderMark({ provider }: { provider: ServerProvider }) {
++  return (
++    <ProviderInstanceIcon
++      driverKind={provider.driver}
++      displayName={resolveProviderInstanceDisplayName(provider)}
++      accentColor={provider.accentColor}
++      {...(provider.driver === "acpRegistry" && provider.iconUrl
++        ? { acpRegistryIconUrl: provider.iconUrl }
++        : {})}
++      className="z-auto"
++      iconClassName="size-3"
++    />
++  );
++}
++
++/**
++ * Every provider that reports limits, the thread's own first, each as its icon and its tightest
++ * window. One clipped line: providers that do not fit wrap out of view, the thread's provider last.
++ */
++function UsageLimitsSummary({ entries }: { entries: ReadonlyArray<UsageLimitProviderEntry> }) {
++  const gt = useGT();
+   const [now, setNow] = useState(Date.now);
+   useEffect(() => {
+     const timer = window.setInterval(() => setNow(Date.now()), COMPOSER_STATS_CLOCK_MS);
+     return () => window.clearInterval(timer);
+   }, []);
+-  const chips = selectComposerLimitWindows(limits);
++  const groups = composerLimitChips(entries, now);
++  if (groups.length === 0) return null;
+   const freshness = composerLimitsFreshness(
+-    chips.map(({ window }) => window.checkedAt ?? limits.checkedAt),
++    groups.flatMap(({ entry, chips }) =>
++      chips.map(({ window }) => window.checkedAt ?? entry.limits.checkedAt),
++    ),
+     now,
+   );
+-  if (chips.length === 0) return null;
++  const showMarks = groups.length > 1 || groups.some(({ entry }) => !entry.current);
+   return (
+     <Popover>
+       <PopoverTrigger
+@@ -240,34 +282,65 @@ function UsageLimitsSummary({
+           <button
+             type="button"
+             aria-label="Usage limit details"
+-            className="flex h-4 min-w-0 flex-wrap items-center gap-x-4 overflow-hidden rounded-sm text-left -outline-offset-2"
++            className="flex h-4 min-w-0 flex-wrap items-center gap-x-3 overflow-hidden rounded-sm text-left -outline-offset-2"
+           />
+         }
+       >
+-        {chips.map(({ window, shortLabel }) => {
+-          const display = composerLimitDisplay(window, limits.checkedAt, now);
++        {groups.map(({ entry, chips }) => {
++          const accentColor = normalizeProviderAccentColor(entry.provider.accentColor) ?? null;
+           return (
+-            <Meter
+-              key={window.id}
+-              label={shortLabel}
+-              percent={window.usedPercent}
+-              displayPercent={display.displayPercent}
+-              percentText={display.percentText}
+-              dimmed={display.dimmed}
+-            />
++            <span
++              key={entry.provider.instanceId}
++              data-usage-limits-provider={entry.provider.instanceId}
++              className="inline-flex h-4 shrink-0 items-center gap-x-1.5"
++            >
++              {showMarks && <ProviderMark provider={entry.provider} />}
++              {chips.map(({ window, shortLabel }) => {
++                const display = composerLimitDisplay(window, entry.limits.checkedAt, now);
++                return (
++                  <Meter
++                    key={window.id}
++                    label={shortLabel}
++                    percent={window.usedPercent}
++                    displayPercent={display.displayPercent}
++                    percentText={display.percentText}
++                    dimmed={display.dimmed}
++                    accentColor={accentColor}
++                  />
++                );
++              })}
++            </span>
+           );
+         })}
+       </PopoverTrigger>
+       <PopoverPopup {...composerFloatingLayerProps} side="top" align="start" width="md">
+-        <div className="flex flex-col gap-3 text-xs">
+-          <div className="flex items-baseline justify-between gap-4">
+-            <h3 className="font-medium">Usage limits</h3>
+-            <span className="truncate text-muted-foreground">{providerName}</span>
+-          </div>
+-          <UsageLimitRows windows={limits.windows} checkedAt={limits.checkedAt} now={now} />
++        <div className="flex max-h-[70vh] flex-col gap-3 overflow-y-auto text-xs">
++          <h3 className="font-medium">Usage limits</h3>
++          {groups.map(({ entry }) => (
++            <section key={entry.provider.instanceId} className="flex flex-col gap-2">
++              <div className="flex items-center gap-1.5">
++                <ProviderMark provider={entry.provider} />
++                <span className="truncate font-medium">
++                  {resolveProviderInstanceDisplayName(entry.provider)}
++                </span>
++                {entry.current && groups.length > 1 && (
++                  <span className="ms-auto shrink-0 text-muted-foreground">
++                    <T>This thread</T>
++                  </span>
++                )}
++              </div>
++              <UsageLimitRows
++                windows={entry.limits.windows}
++                checkedAt={entry.limits.checkedAt}
++                now={now}
++              />
++            </section>
++          ))}
+           <p className="text-muted-foreground">
+             Usage comes from account and turn readings, with CLI estimates filling gaps. Stale
+             values show their age; readings older than 15 minutes are hidden.
++            {groups.length > 1 &&
++              ` ${gt("The line shows each provider's window closest to running out.")}`}
+             {freshness.ageMins === null
+               ? " Check time unavailable."
+               : ` Checked ${freshness.ageMins === 0 ? "just now" : `${freshness.ageMins} min ago`}.`}
+@@ -359,7 +432,8 @@ export function ComposerStats({
+   context: ContextWindowSnapshot | null;
+   turn: OrchestrationV2ProviderTurn | null;
+   compactions: ReadonlyArray<Extract<OrchestrationV2TurnItem, { type: "compaction" }>>;
+-  usageLimits: { limits: ServerProviderUsageLimits; providerName: string } | null;
++  /** Providers whose limits to show, the thread's provider first. */
++  usageLimits: ReadonlyArray<UsageLimitProviderEntry>;
+   contextDriver: string | undefined;
+   configuredClaudeThreshold: unknown;
+   onCompact: () => void;
+@@ -390,7 +464,7 @@ export function ComposerStats({
+     !hasTokens &&
+     responseRate === null &&
+     compactions.length === 0 &&
+-    selectComposerLimitWindows(usageLimits?.limits).length === 0 &&
++    usageLimits.every((entry) => selectComposerLimitWindows(entry.limits).length === 0) &&
+     subscriptionSwitch === null &&
+     performance === null &&
+     compactDisabled
+@@ -652,14 +726,9 @@ export function ComposerStats({
+       aria-label="Stats for nerds"
+       className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 pt-1.5 text-2xs leading-4 text-muted-foreground tabular-nums"
+     >
+-      {(usageLimits || subscriptionSwitch) && (
++      {(usageLimits.length > 0 || subscriptionSwitch) && (
+         <div className="flex min-w-0 max-w-max flex-[1_1_0%] items-center gap-x-3">
+-          {usageLimits && (
+-            <UsageLimitsSummary
+-              limits={usageLimits.limits}
+-              providerName={usageLimits.providerName}
+-            />
+-          )}
++          <UsageLimitsSummary entries={usageLimits} />
+           {subscriptionSwitch && <SubscriptionSwitchChip {...subscriptionSwitch} />}
+         </div>
+       )}
+diff --git a/apps/web/src/components/chat/ThreadDetailsItemsMenu.tsx b/apps/web/src/components/chat/ThreadDetailsItemsMenu.tsx
+index 691e15fdc0..d56b9b019c 100644
+--- a/apps/web/src/components/chat/ThreadDetailsItemsMenu.tsx
++++ b/apps/web/src/components/chat/ThreadDetailsItemsMenu.tsx
+@@ -7,15 +7,16 @@ import {
+ import { MenuCheckboxItem, MenuGroup, MenuGroupLabel, MenuItem, MenuSeparator } from "../ui/menu";
+ import {
+   isDefaultThreadDetailsVisibility,
++  offeredThreadDetailsItems,
+   resolveThreadDetailsVisibility,
+   RESET_THREAD_DETAILS_ITEMS,
+   setThreadDetailsItem,
+-  THREAD_DETAILS_ITEMS,
+ } from "./threadDetailsItems";
+ 
+ /** Menu body that shows and hides thread details items. The card's context menu and Settings share it. */
+ export function ThreadDetailsItemsMenuItems() {
+   const visibility = useClientSettings(resolveThreadDetailsVisibility);
++  const statsForNerdsEnabled = useClientSettings((settings) => settings.statsForNerdsEnabled);
+   const m = useMessages();
+   return (
+     <>
+@@ -23,7 +24,7 @@ export function ThreadDetailsItemsMenuItems() {
+         <MenuGroupLabel>
+           <T>Show in thread details</T>
+         </MenuGroupLabel>
+-        {THREAD_DETAILS_ITEMS.map((item) => (
++        {offeredThreadDetailsItems(statsForNerdsEnabled).map((item) => (
+           <MenuCheckboxItem
+             key={item.id}
+             checked={visibility[item.id]}
+diff --git a/apps/web/src/components/chat/ThreadDetailsPanel.tsx b/apps/web/src/components/chat/ThreadDetailsPanel.tsx
+index 69c3cd7133..3638814dfb 100644
+--- a/apps/web/src/components/chat/ThreadDetailsPanel.tsx
++++ b/apps/web/src/components/chat/ThreadDetailsPanel.tsx
+@@ -34,6 +34,10 @@ import {
+   type ThreadDetailsUsageInput,
+ } from "./ThreadDetailsUsage";
+ import { ThreadDetailsItemsMenuItems } from "./ThreadDetailsItemsMenu";
++import {
++  ThreadDetailsTurnPerformance,
++  type ThreadDetailsPerformanceInput,
++} from "./TurnPerformance";
+ import { resolveThreadDetailsVisibility, THREAD_DETAILS_ITEMS } from "./threadDetailsItems";
+ import { useClientSettings } from "../../hooks/useSettings";
+ import { useProject, useServerConfigs } from "../../state/entities";
+@@ -95,6 +99,8 @@ interface ThreadDetailsPanelProps extends Pick<
+   ) => Promise<ProjectScriptActionResult>;
+   onDeleteProjectScript: (scriptId: string) => Promise<ProjectScriptActionResult>;
+   usage: ThreadDetailsUsageInput;
++  /** Stats for nerds turn performance, or null while Stats for nerds is off. */
++  performance?: ThreadDetailsPerformanceInput | null;
+ }
+ 
+ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
+@@ -332,6 +338,10 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
+                 <ThreadDetailsContext usage={props.usage.contextWindow} />
+               ) : null}
+ 
++              {visible.performance && props.performance ? (
++                <ThreadDetailsTurnPerformance {...props.performance} />
++              ) : null}
++
+               {/* Shown only when no section above has content, so an emptied card can be refilled. */}
+               <div className="p-2 group-has-[>section>:last-child:not(:empty)]/details-items:hidden">
+                 <ThreadDetailsControl
+diff --git a/apps/web/src/components/chat/ThreadDetailsUsage.tsx b/apps/web/src/components/chat/ThreadDetailsUsage.tsx
+index 3eac602eb5..deea215055 100644
+--- a/apps/web/src/components/chat/ThreadDetailsUsage.tsx
++++ b/apps/web/src/components/chat/ThreadDetailsUsage.tsx
+@@ -15,9 +15,13 @@ import {
+ import { formatDuration, limitsNotice } from "@t3tools/shared/usageLimitsCopy";
+ import { Link } from "@tanstack/react-router";
+ import { msg, useGT, useLocale, useMessages } from "gt-react";
+-import type { ReactNode } from "react";
++import { Fragment, type ReactNode } from "react";
+ 
+-import { usePrimarySettings } from "../../hooks/useSettings";
++import {
++  normalizeProviderAccentColor,
++  resolveProviderInstanceDisplayName,
++} from "@t3tools/client-runtime/state/provider-instance-display";
++import { useClientSettings, usePrimarySettings } from "../../hooks/useSettings";
+ import { useNowMinute } from "../../hooks/useNowMinute";
+ import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
+ import { formatContextWindowTokens } from "../../lib/contextWindow";
+@@ -25,6 +29,8 @@ import { cn } from "../../lib/utils";
+ import { formatUpcomingTimestamp } from "../../timestampFormat";
+ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+ import { formatContextWindowCompactionMessage } from "./compaction.logic";
++import { selectUsageLimitProviders } from "./ComposerStats.logic";
++import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+ import { ThreadDetailsSection } from "./ThreadDetailsSection";
+ import {
+   nextPoolReset,
+@@ -55,7 +61,11 @@ function limitTone(left: number): UsageTone {
+   return null;
+ }
+ 
+-/** The selected provider's limit windows. Each row reads as room left and opens the usage page. */
++/**
++ * Limit windows per provider: the thread's provider first, then, unless Stats for nerds is set to
++ * the current provider only, every other provider that reports limits. Each row reads as room left
++ * and opens the usage page.
++ */
+ export function ThreadDetailsUsage({
+   providerInstanceId,
+   model,
+@@ -65,9 +75,24 @@ export function ThreadDetailsUsage({
+   const gt = useGT();
+   const nowMinute = useNowMinute();
+   const now = Date.parse(`${nowMinute}:00Z`);
+-  const resolved = resolveThreadDetailsLimits(providerInstanceId, model, providers, sources, now);
+-  const quotas = resolveThreadHttpQuotas(providerInstanceId, sources);
+-  if (!resolved && quotas.length === 0) return null;
++  const scope = useClientSettings((settings) => settings.statsForNerdsUsageLimitsScope);
++  const others = selectUsageLimitProviders(providers, providerInstanceId, scope).flatMap((entry) =>
++    entry.current ? [] : [entry.provider],
++  );
++  const current = providers.find((provider) => provider.instanceId === providerInstanceId);
++  const groups = [...(current ? [current] : []), ...others].flatMap((provider) => {
++    const resolved = resolveThreadDetailsLimits(
++      provider.instanceId,
++      provider === current ? model : null,
++      providers,
++      sources,
++      now,
++    );
++    const quotas = resolveThreadHttpQuotas(provider.instanceId, sources);
++    return !resolved && quotas.length === 0 ? [] : [{ provider, resolved, quotas }];
++  });
++  if (groups.length === 0) return null;
++  const grouped = groups.length > 1;
+ 
+   return (
+     <ThreadDetailsSection
+@@ -76,26 +101,66 @@ export function ThreadDetailsUsage({
+       showHeading={false}
+     >
+       <div className="grid grid-cols-[auto_minmax(3rem,1fr)_auto] gap-x-3 text-xs">
+-        {resolved?.kind === "pool"
+-          ? resolved.windows.map((window) => <PoolRow key={window.id} window={window} now={now} />)
+-          : resolved &&
+-            (quotas.length === 0 || limitsNotice(resolved.limits) === null) && (
+-              <InstanceRows limits={resolved.limits} now={now} />
+-            )}
+-        {quotas.map(({ key, accountLabel, window }) => (
+-          <LimitRow key={key} window={window} now={now} accountLabel={accountLabel} />
+-        ))}
++        {groups.map(({ provider, resolved, quotas }) => {
++          const accentColor = normalizeProviderAccentColor(provider.accentColor) ?? null;
++          return (
++            <Fragment key={provider.instanceId}>
++              {grouped ? <ProviderGroupHeading provider={provider} /> : null}
++              {resolved?.kind === "pool"
++                ? resolved.windows.map((window) => (
++                    <PoolRow key={window.id} window={window} now={now} accentColor={accentColor} />
++                  ))
++                : resolved &&
++                  (quotas.length === 0 || limitsNotice(resolved.limits) === null) && (
++                    <InstanceRows limits={resolved.limits} now={now} accentColor={accentColor} />
++                  )}
++              {quotas.map(({ key, accountLabel, window }) => (
++                <LimitRow
++                  key={key}
++                  window={window}
++                  now={now}
++                  accountLabel={accountLabel}
++                  accentColor={accentColor}
++                />
++              ))}
++            </Fragment>
++          );
++        })}
+       </div>
+     </ThreadDetailsSection>
+   );
+ }
+ 
++function ProviderGroupHeading({ provider }: { readonly provider: ServerProvider }) {
++  const displayName = resolveProviderInstanceDisplayName(provider);
++  return (
++    <div
++      data-usage-limits-provider={provider.instanceId}
++      className="col-span-3 flex h-6 min-w-0 items-center gap-1.5 px-2.5 text-2xs font-medium text-muted-foreground"
++    >
++      <ProviderInstanceIcon
++        driverKind={provider.driver}
++        displayName={displayName}
++        accentColor={provider.accentColor}
++        {...(provider.driver === "acpRegistry" && provider.iconUrl
++          ? { acpRegistryIconUrl: provider.iconUrl }
++          : {})}
++        className="z-auto"
++        iconClassName="size-3"
++      />
++      <span className="truncate">{displayName}</span>
++    </div>
++  );
++}
++
+ function InstanceRows({
+   limits,
+   now,
++  accentColor,
+ }: {
+   readonly limits: ServerProviderUsageLimits;
+   readonly now: number;
++  readonly accentColor: string | null;
+ }) {
+   const gt = useGT();
+   const m = useMessages();
+@@ -112,7 +177,9 @@ function InstanceRows({
+       />
+     );
+   }
+-  return limits.windows.map((window) => <LimitRow key={window.id} window={window} now={now} />);
++  return limits.windows.map((window) => (
++    <LimitRow key={window.id} window={window} now={now} accentColor={accentColor} />
++  ));
+ }
+ 
+ /** The thread's context window. The bar fills as context is used; the tick marks auto-compaction. */
+@@ -186,10 +253,12 @@ function LimitRow({
+   window,
+   now,
+   accountLabel,
++  accentColor,
+ }: {
+   readonly window: ServerProviderUsageWindow;
+   readonly now: number;
+   readonly accountLabel?: string;
++  readonly accentColor: string | null;
+ }) {
+   const gt = useGT();
+   const m = useMessages();
+@@ -203,6 +272,7 @@ function LimitRow({
+       label={window.label}
+       fill={left}
+       tone={limitTone(left)}
++      accentColor={accentColor}
+       tick={timeLeft}
+       value={`${left}%`}
+       ariaValue={gt("{left}% left", { left })}
+@@ -232,7 +302,15 @@ function LimitRow({
+   );
+ }
+ 
+-function PoolRow({ window, now }: { readonly window: LimitPoolWindow; readonly now: number }) {
++function PoolRow({
++  window,
++  now,
++  accentColor,
++}: {
++  readonly window: LimitPoolWindow;
++  readonly now: number;
++  readonly accentColor: string | null;
++}) {
+   const gt = useGT();
+   const m = useMessages();
+   const timestampFormat = usePrimarySettings((settings) => settings.timestampFormat);
+@@ -254,6 +332,7 @@ function PoolRow({ window, now }: { readonly window: LimitPoolWindow; readonly n
+       label={window.label}
+       fill={left}
+       tone={limitTone(left)}
++      accentColor={accentColor}
+       value={`${left}%`}
+       ariaValue={gt("{left}% left", { left })}
+       opensUsage
+@@ -297,6 +376,7 @@ function UsageRow({
+   label,
+   fill,
+   tone,
++  accentColor,
+   tick = null,
+   value,
+   ariaValue = value,
+@@ -308,6 +388,8 @@ function UsageRow({
+   /** Bar fill from 0 to 100. Null hides the bar. */
+   readonly fill: number | null;
+   readonly tone: UsageTone;
++  /** Limit bars take the provider's accent, or the theme's primary color without one. */
++  readonly accentColor?: string | null;
+   /** A marker on the bar, from 0 to 100. */
+   readonly tick?: number | null;
+   readonly value: string;
+@@ -348,9 +430,16 @@ function UsageRow({
+                       ? "bg-warning"
+                       : muted
+                         ? "bg-muted-foreground"
+-                        : "bg-foreground/80",
++                        : accentColor === undefined
++                          ? "bg-foreground/80"
++                          : null,
+                 )}
+-                style={{ width: `max(${fill}%, 6px)` }}
++                style={{
++                  width: `max(${fill}%, 6px)`,
++                  ...(tone === null && !muted && accentColor !== undefined
++                    ? { backgroundColor: accentColor ?? "var(--primary)" }
++                    : {}),
++                }}
+               />
+             ) : null}
+             {tick !== null ? (
+diff --git a/apps/web/src/components/chat/TurnPerformance.tsx b/apps/web/src/components/chat/TurnPerformance.tsx
+index 8d90dcc78a..fd437bb337 100644
+--- a/apps/web/src/components/chat/TurnPerformance.tsx
++++ b/apps/web/src/components/chat/TurnPerformance.tsx
+@@ -1,11 +1,12 @@
+ import type { ProviderTurnId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+-import { useMessages } from "gt-react";
++import { useGT, useMessages } from "gt-react";
+ import { createContext, use, useEffect, useRef, useState, type ReactNode } from "react";
+ 
+ import { readThreadStreamedTurnItems } from "../../state/entities";
+ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+ import { composerFloatingLayerProps } from "./composerEventScope";
++import { ThreadDetailsSection } from "./ThreadDetailsSection";
+ import {
+   LEGACY_RESPONSE_RATE_LABEL,
+   TURN_PERFORMANCE_METRIC_LABELS,
+@@ -374,6 +375,117 @@ export function ComposerTurnPerformance({
+   );
+ }
+ 
++export interface ThreadDetailsPerformanceInput {
++  readonly threadRef: ScopedThreadRef | null;
++  readonly current: TurnPerformanceSource | null;
++  readonly previous: TurnPerformanceSource | null;
++  readonly hiddenMetrics: ReadonlySet<string>;
++}
++
++/** Thread details: the running turn, else the last completed one, one metric per row. */
++export function ThreadDetailsTurnPerformance({
++  threadRef,
++  current,
++  previous,
++  hiddenMetrics,
++}: ThreadDetailsPerformanceInput) {
++  const source = current ?? previous;
++  if (source === null) return null;
++  const threadKey = threadRef === null ? "" : `${threadRef.environmentId}:${threadRef.threadId}`;
++  return (
++    <ThreadDetailsTurnPerformanceRows
++      key={`${threadKey}:${source.turn.id}`}
++      threadRef={threadRef}
++      source={source}
++      hidden={hiddenMetrics}
++    />
++  );
++}
++
++const THREAD_DETAILS_ROW_CLASS =
++  "col-span-2 grid h-6 cursor-default grid-cols-subgrid items-center rounded-lg px-2.5 outline-none hover:bg-black/[0.035] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring data-popup-open:bg-black/[0.035] dark:hover:bg-white/[0.08] dark:data-popup-open:bg-white/[0.08]";
++
++function ThreadDetailsTurnPerformanceRows({
++  threadRef,
++  source,
++  hidden,
++}: {
++  threadRef: ScopedThreadRef | null;
++  source: TurnPerformanceSource;
++  hidden: ReadonlySet<string>;
++}) {
++  const gt = useGT();
++  const labelOf = useMetricLabel();
++  const running = isTurnRunning(source.turn);
++  const metrics = useTurnMetrics(threadRef, source, hidden);
++  return (
++    <ThreadDetailsSection
++      headingId="thread-details-performance-heading"
++      title={gt("Turn performance")}
++      showHeading={false}
++    >
++      <div
++        data-thread-details-performance={source.turn.id}
++        className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 text-xs"
++      >
++        <div className={THREAD_DETAILS_ROW_CLASS}>
++          <span className="inline-flex min-w-0 items-center gap-1.5 text-muted-foreground">
++            {running && (
++              <span aria-hidden="true" className="size-1.5 animate-pulse rounded-full bg-success" />
++            )}
++            <span className="truncate">
++              {running ? gt("Current turn") : gt("Last turn", { $context: "previous agent turn" })}
++            </span>
++          </span>
++          <span className="max-w-40 truncate text-end text-muted-foreground">
++            {source.providerName}
++          </span>
++        </div>
++        {metrics.map((metric) => (
++          <Tooltip key={metric.id}>
++            <TooltipTrigger
++              render={
++                <div
++                  tabIndex={0}
++                  data-metric={metric.id}
++                  aria-label={gt("{label}: {value}", {
++                    label: labelOf(metric, "label"),
++                    value: metric.display,
++                  })}
++                  className={THREAD_DETAILS_ROW_CLASS}
++                />
++              }
++            >
++              <span className="truncate text-muted-foreground">{labelOf(metric, "label")}</span>
++              <span
++                data-precision={metric.precision}
++                className={`max-w-48 truncate text-end font-medium tabular-nums ${
++                  metric.precision === "unavailable"
++                    ? "text-muted-foreground"
++                    : metric.precision === "estimated"
++                      ? "text-foreground/70"
++                      : "text-foreground/80"
++                }`}
++              >
++                {metric.display}
++                {metric.partial && metric.precision !== "unavailable" && (
++                  <span className="ms-1 font-normal text-muted-foreground">
++                    {gt("partial", { $context: "a measurement that covers only part of a turn" })}
++                  </span>
++                )}
++              </span>
++            </TooltipTrigger>
++            {/* Rows sit 8px inside the card; clear its edge instead of overlapping it. */}
++            <TooltipPopup side="left" sideOffset={16} className="max-w-72">
++              {metric.reason}
++            </TooltipPopup>
++          </Tooltip>
++        ))}
++      </div>
++    </ThreadDetailsSection>
++  );
++}
++
+ export interface TurnPerformanceTimelineValue {
+   readonly threadId: ThreadId;
+   /** This thread's own provider turns; items from other threads never resolve. */
+diff --git a/apps/web/src/components/chat/statsForNerdsPlacement.test.ts b/apps/web/src/components/chat/statsForNerdsPlacement.test.ts
+new file mode 100644
+index 0000000000..831319fcf9
+--- /dev/null
++++ b/apps/web/src/components/chat/statsForNerdsPlacement.test.ts
+@@ -0,0 +1,72 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import {
++  isDefaultStatsForNerdsPlacements,
++  resetStatsForNerdsPlacements,
++  resolveStatsForNerdsPlacements,
++  setStatsForNerdsPlacement,
++} from "./statsForNerdsPlacement";
++import { resolveThreadDetailsVisibility } from "./threadDetailsItems";
++
++const defaults = { statsForNerdsShowPerReply: true, statsForNerdsShowInComposer: true };
++const base = { ...defaults, threadDetailsItems: {}, threadDetailsUsageEnabled: false };
++
++describe("stats for nerds placements", () => {
++  it("reads the two switches and the thread details item", () => {
++    expect(resolveStatsForNerdsPlacements(base)).toEqual({
++      perReply: true,
++      composer: true,
++      threadDetails: false,
++    });
++    expect(
++      resolveStatsForNerdsPlacements({
++        ...base,
++        statsForNerdsShowInComposer: false,
++        threadDetailsItems: { performance: true },
++      }),
++    ).toEqual({ perReply: true, composer: false, threadDetails: true });
++  });
++
++  it("writes each place to its own setting", () => {
++    expect(setStatsForNerdsPlacement(base, "perReply", false)).toEqual({
++      statsForNerdsShowPerReply: false,
++    });
++    expect(setStatsForNerdsPlacement(base, "composer", false)).toEqual({
++      statsForNerdsShowInComposer: false,
++    });
++    const shown = setStatsForNerdsPlacement(
++      { ...base, threadDetailsItems: { servers: false } },
++      "threadDetails",
++      true,
++    );
++    expect(shown).toEqual({ threadDetailsItems: { servers: false, performance: true } });
++  });
++
++  it("is the thread details card's own item, so the card menu and the placement agree", () => {
++    const patch = setStatsForNerdsPlacement(base, "threadDetails", true);
++    const next = { ...base, ...patch };
++    expect(resolveThreadDetailsVisibility(next).performance).toBe(true);
++    expect(resolveStatsForNerdsPlacements(next).threadDetails).toBe(true);
++    // Back to the default stores nothing.
++    expect(setStatsForNerdsPlacement(next, "threadDetails", false)).toEqual({
++      threadDetailsItems: {},
++    });
++  });
++
++  it("resets every place and keeps other thread details choices", () => {
++    const changed = {
++      statsForNerdsShowPerReply: false,
++      statsForNerdsShowInComposer: false,
++      threadDetailsItems: { performance: true, servers: false },
++      threadDetailsUsageEnabled: false,
++    };
++    expect(
++      isDefaultStatsForNerdsPlacements(resolveStatsForNerdsPlacements(changed), defaults),
++    ).toBe(false);
++    const reset = { ...changed, ...resetStatsForNerdsPlacements(changed, defaults) };
++    expect(reset.threadDetailsItems).toEqual({ servers: false });
++    expect(isDefaultStatsForNerdsPlacements(resolveStatsForNerdsPlacements(reset), defaults)).toBe(
++      true,
++    );
++  });
++});
+diff --git a/apps/web/src/components/chat/statsForNerdsPlacement.ts b/apps/web/src/components/chat/statsForNerdsPlacement.ts
+new file mode 100644
+index 0000000000..f5fba7f8ae
+--- /dev/null
++++ b/apps/web/src/components/chat/statsForNerdsPlacement.ts
+@@ -0,0 +1,82 @@
++import type { ClientSettings } from "@t3tools/contracts";
++import { msg } from "gt-react";
++
++import {
++  resolveThreadDetailsVisibility,
++  setThreadDetailsItem,
++  THREAD_DETAILS_ITEMS,
++} from "./threadDetailsItems";
++
++/**
++ * Where Stats for nerds turn performance shows. Each place keeps its own stored setting: the two
++ * Stats for nerds switches, and the thread details "performance" item, so the card's own menu and
++ * this list can never disagree.
++ */
++export const STATS_FOR_NERDS_PLACEMENTS = [
++  { id: "perReply", label: msg("Under each reply") },
++  { id: "composer", label: msg("Under the composer") },
++  { id: "threadDetails", label: msg("In thread details") },
++] as const;
++
++export type StatsForNerdsPlacement = (typeof STATS_FOR_NERDS_PLACEMENTS)[number]["id"];
++
++type PlacementSettings = Pick<
++  ClientSettings,
++  | "statsForNerdsShowPerReply"
++  | "statsForNerdsShowInComposer"
++  | "threadDetailsItems"
++  | "threadDetailsUsageEnabled"
++>;
++
++const PERFORMANCE_ITEM = THREAD_DETAILS_ITEMS.find((item) => item.id === "performance")!;
++
++export function resolveStatsForNerdsPlacements(
++  settings: PlacementSettings,
++): Readonly<Record<StatsForNerdsPlacement, boolean>> {
++  return {
++    perReply: settings.statsForNerdsShowPerReply,
++    composer: settings.statsForNerdsShowInComposer,
++    threadDetails: resolveThreadDetailsVisibility(settings).performance,
++  };
++}
++
++export function setStatsForNerdsPlacement(
++  settings: PlacementSettings,
++  placement: StatsForNerdsPlacement,
++  visible: boolean,
++): Partial<ClientSettings> {
++  switch (placement) {
++    case "perReply":
++      return { statsForNerdsShowPerReply: visible };
++    case "composer":
++      return { statsForNerdsShowInComposer: visible };
++    case "threadDetails":
++      return { threadDetailsItems: setThreadDetailsItem(settings, PERFORMANCE_ITEM, visible) };
++  }
++}
++
++export function isDefaultStatsForNerdsPlacements(
++  placements: Readonly<Record<StatsForNerdsPlacement, boolean>>,
++  defaults: Pick<ClientSettings, "statsForNerdsShowPerReply" | "statsForNerdsShowInComposer">,
++): boolean {
++  return (
++    placements.perReply === defaults.statsForNerdsShowPerReply &&
++    placements.composer === defaults.statsForNerdsShowInComposer &&
++    placements.threadDetails === PERFORMANCE_ITEM.defaultVisible
++  );
++}
++
++export function resetStatsForNerdsPlacements(
++  settings: PlacementSettings,
++  defaults: Pick<ClientSettings, "statsForNerdsShowPerReply" | "statsForNerdsShowInComposer">,
++): Partial<ClientSettings> {
++  return {
++    statsForNerdsShowPerReply: defaults.statsForNerdsShowPerReply,
++    statsForNerdsShowInComposer: defaults.statsForNerdsShowInComposer,
++    threadDetailsItems: setThreadDetailsItem(
++      settings,
++      PERFORMANCE_ITEM,
++      PERFORMANCE_ITEM.defaultVisible,
++    ),
++  };
++}
+diff --git a/apps/web/src/components/chat/threadDetailsItems.test.ts b/apps/web/src/components/chat/threadDetailsItems.test.ts
+index 6e3e746fd7..c439014b8e 100644
+--- a/apps/web/src/components/chat/threadDetailsItems.test.ts
++++ b/apps/web/src/components/chat/threadDetailsItems.test.ts
+@@ -1,6 +1,7 @@
+ import { describe, expect, it } from "vite-plus/test";
+ 
+ import {
++  offeredThreadDetailsItems,
+   resolveThreadDetailsVisibility,
+   setThreadDetailsItem,
+   THREAD_DETAILS_ITEMS,
+@@ -33,4 +34,15 @@ describe("thread details items", () => {
+     const hidden = { threadDetailsItems: { servers: false }, threadDetailsUsageEnabled: false };
+     expect(setThreadDetailsItem(hidden, servers, true)).toEqual({});
+   });
++
++  it("keeps turn performance off by default and offers it only with Stats for nerds", () => {
++    expect(
++      resolveThreadDetailsVisibility({ threadDetailsItems: {}, threadDetailsUsageEnabled: true })
++        .performance,
++    ).toBe(false);
++    expect(offeredThreadDetailsItems(false).some((item) => item.id === "performance")).toBe(false);
++    expect(offeredThreadDetailsItems(true).map((item) => item.id)).toEqual(
++      THREAD_DETAILS_ITEMS.map((item) => item.id),
++    );
++  });
+ });
+diff --git a/apps/web/src/components/chat/threadDetailsItems.ts b/apps/web/src/components/chat/threadDetailsItems.ts
+index 9f8f05449c..94de8e9102 100644
+--- a/apps/web/src/components/chat/threadDetailsItems.ts
++++ b/apps/web/src/components/chat/threadDetailsItems.ts
+@@ -27,6 +27,7 @@ export const THREAD_DETAILS_ITEMS = [
+   { id: "sideChats", label: msg("Side chats"), defaultVisible: true },
+   { id: "usage", label: msg("Usage limits"), defaultVisible: false },
+   { id: "context", label: msg("Context window"), defaultVisible: false },
++  { id: "performance", label: msg("Turn performance"), defaultVisible: false },
+ ] as const;
+ 
+ export type ThreadDetailsItemId = (typeof THREAD_DETAILS_ITEMS)[number]["id"];
+@@ -66,6 +67,11 @@ export function setThreadDetailsItem(
+   return visible === defaultVisible(item, settings) ? rest : { ...rest, [item.id]: visible };
+ }
+ 
++/** Turn performance is part of Stats for nerds, so the menus offer it only while that is on. */
++export function offeredThreadDetailsItems(statsForNerdsEnabled: boolean) {
++  return THREAD_DETAILS_ITEMS.filter((item) => item.id !== "performance" || statsForNerdsEnabled);
++}
++
+ export function isDefaultThreadDetailsVisibility(visibility: ThreadDetailsVisibility) {
+   return THREAD_DETAILS_ITEMS.every((item) => visibility[item.id] === item.defaultVisible);
+ }
+diff --git a/apps/web/src/components/settings/AppearanceSettingsPanel.tsx b/apps/web/src/components/settings/AppearanceSettingsPanel.tsx
+index 1bb96d39c9..43eca334a0 100644
+--- a/apps/web/src/components/settings/AppearanceSettingsPanel.tsx
++++ b/apps/web/src/components/settings/AppearanceSettingsPanel.tsx
+@@ -37,6 +37,7 @@ import { useSearchableSetting } from "./settingsSearch";
+ import { AdvancedSettings } from "./AdvancedSettings";
+ import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
+ import { TypographySection } from "./TypographySettings";
++import { StatsForNerdsSettingsSection } from "./StatsForNerdsSettings";
+ import { ThreadDetailsItemsRow } from "./ThreadDetailsItemsRow";
+ 
+ const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
+@@ -544,6 +545,8 @@ export function AppearanceSettingsPanel() {
+         </AdvancedSettings>
+       </SettingsSection>
+ 
++      <StatsForNerdsSettingsSection />
++
+       <TypographySection />
+     </SettingsPageContainer>
+   );
+diff --git a/apps/web/src/components/settings/SettingsPanels.tsx b/apps/web/src/components/settings/SettingsPanels.tsx
+index e0d23512bf..fd55605b7f 100644
+--- a/apps/web/src/components/settings/SettingsPanels.tsx
++++ b/apps/web/src/components/settings/SettingsPanels.tsx
+@@ -597,6 +597,16 @@ export function useSettingsRestore(onRestored?: () => void) {
+     ...(settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled
+       ? [gt("Stats for nerds")]
+       : []),
++    ...(settings.statsForNerdsShowInComposer !==
++      DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowInComposer ||
++    settings.statsForNerdsShowPerReply !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowPerReply
++      ? [gt("Where stats show")]
++      : []),
++    ...(settings.statsForNerdsUsageLimitsScope !==
++    DEFAULT_UNIFIED_SETTINGS.statsForNerdsUsageLimitsScope
++      ? [gt("Usage limits to show")]
++      : []),
++    ...(settings.statsForNerdsHiddenMetrics.length > 0 ? [gt("Stats for nerds metrics")] : []),
+     ...(settings.sideThreadOpenTarget !== DEFAULT_UNIFIED_SETTINGS.sideThreadOpenTarget
+       ? [gt("Open subagents and side chats in")]
+       : []),
+@@ -733,6 +743,10 @@ export function useSettingsRestore(onRestored?: () => void) {
+       sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut,
+       followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
+       statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
++      statsForNerdsShowInComposer: DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowInComposer,
++      statsForNerdsShowPerReply: DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowPerReply,
++      statsForNerdsHiddenMetrics: DEFAULT_UNIFIED_SETTINGS.statsForNerdsHiddenMetrics,
++      statsForNerdsUsageLimitsScope: DEFAULT_UNIFIED_SETTINGS.statsForNerdsUsageLimitsScope,
+       sideThreadOpenTarget: DEFAULT_UNIFIED_SETTINGS.sideThreadOpenTarget,
+       toolCallVisibility: DEFAULT_UNIFIED_SETTINGS.toolCallVisibility,
+       screenReaderAnnouncements: DEFAULT_UNIFIED_SETTINGS.screenReaderAnnouncements,
+@@ -1278,33 +1292,6 @@ export function ChatSettingsPanel() {
+             />
+           }
+         />
+-        <SettingsRow
+-          {...setting("stats-for-nerds")}
+-          description={gt(
+-            "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+-          )}
+-          resetAction={
+-            settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled ? (
+-              <SettingResetButton
+-                ariaLabel={gt("Reset stats for nerds to default")}
+-                onClick={() =>
+-                  updateSettings({
+-                    statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
+-                  })
+-                }
+-              />
+-            ) : null
+-          }
+-          control={
+-            <Switch
+-              checked={settings.statsForNerdsEnabled}
+-              onCheckedChange={(checked) =>
+-                updateSettings({ statsForNerdsEnabled: Boolean(checked) })
+-              }
+-              aria-label={gt("Stats for nerds")}
+-            />
+-          }
+-        />
+         <SettingsRow
+           {...setting("send-shortcut")}
+           description={gt("Choose when Enter sends a prompt or inserts a new line")}
+diff --git a/apps/web/src/components/settings/StatsForNerdsSettings.tsx b/apps/web/src/components/settings/StatsForNerdsSettings.tsx
+new file mode 100644
+index 0000000000..7261379b77
+--- /dev/null
++++ b/apps/web/src/components/settings/StatsForNerdsSettings.tsx
+@@ -0,0 +1,254 @@
++import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
++import { msg, T, useGT, useMessages, Var } from "gt-react";
++import { ChevronDownIcon } from "lucide-react";
++
++import type { UsageLimitsScope } from "../chat/ComposerStats.logic";
++import {
++  isDefaultStatsForNerdsPlacements,
++  resetStatsForNerdsPlacements,
++  resolveStatsForNerdsPlacements,
++  setStatsForNerdsPlacement,
++  STATS_FOR_NERDS_PLACEMENTS,
++} from "../chat/statsForNerdsPlacement";
++import { TURN_PERFORMANCE_METRIC_LABELS } from "../chat/TurnPerformance.catalog";
++import { TURN_PERFORMANCE_METRIC_IDS, toggleHiddenMetric } from "../chat/TurnPerformance.logic";
++import { Button } from "../ui/button";
++import {
++  Menu,
++  MenuCheckboxItem,
++  MenuGroup,
++  MenuGroupLabel,
++  MenuItem,
++  MenuPopup,
++  MenuSeparator,
++  MenuTrigger,
++} from "../ui/menu";
++import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
++import { Switch } from "../ui/switch";
++import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
++import { useSearchableSetting } from "./settingsSearch";
++import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
++
++const USAGE_LIMITS_SCOPE_LABELS: Record<UsageLimitsScope, string> = {
++  all: msg("All providers", { $context: "show usage limits of every provider" }),
++  current: msg("Current provider", { $context: "show usage limits of the thread's provider only" }),
++};
++
++/** Under each reply, under the composer, in thread details: a checkbox menu like Thread details. */
++function StatsForNerdsPlacementRow() {
++  const gt = useGT();
++  const m = useMessages();
++  const setting = useSearchableSetting();
++  const settings = useScopedSettings();
++  const updateSettings = useUpdateScopedSettings();
++  const placements = resolveStatsForNerdsPlacements(settings);
++  const enabled = STATS_FOR_NERDS_PLACEMENTS.filter((placement) => placements[placement.id]).length;
++  const isDefault = isDefaultStatsForNerdsPlacements(placements, DEFAULT_UNIFIED_SETTINGS);
++  return (
++    <SettingsRow
++      {...setting("stats-for-nerds-placement")}
++      description={gt(
++        "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
++      )}
++      resetAction={
++        isDefault ? null : (
++          <SettingResetButton
++            ariaLabel={gt("Reset where stats show to default")}
++            onClick={() =>
++              updateSettings(resetStatsForNerdsPlacements(settings, DEFAULT_UNIFIED_SETTINGS))
++            }
++          />
++        )
++      }
++      control={
++        <Menu>
++          <MenuTrigger
++            render={
++              <Button
++                variant="outline"
++                size="sm"
++                className="w-full justify-between sm:w-40"
++                aria-label={gt("Where stats show: {enabled} of {total} on", {
++                  enabled,
++                  total: STATS_FOR_NERDS_PLACEMENTS.length,
++                })}
++              />
++            }
++          >
++            <T>
++              <Var>{enabled}</Var> of <Var>{STATS_FOR_NERDS_PLACEMENTS.length}</Var> on
++            </T>
++            <ChevronDownIcon aria-hidden />
++          </MenuTrigger>
++          <MenuPopup align="end">
++            <MenuGroup>
++              <MenuGroupLabel>
++                <T>Show stats</T>
++              </MenuGroupLabel>
++              {STATS_FOR_NERDS_PLACEMENTS.map((placement) => (
++                <MenuCheckboxItem
++                  key={placement.id}
++                  checked={placements[placement.id]}
++                  onCheckedChange={(checked) =>
++                    updateSettings(setStatsForNerdsPlacement(settings, placement.id, checked))
++                  }
++                >
++                  {m(placement.label)}
++                </MenuCheckboxItem>
++              ))}
++            </MenuGroup>
++            <MenuSeparator />
++            <MenuItem
++              disabled={isDefault}
++              onClick={() =>
++                updateSettings(resetStatsForNerdsPlacements(settings, DEFAULT_UNIFIED_SETTINGS))
++              }
++            >
++              <T>Reset to default</T>
++            </MenuItem>
++          </MenuPopup>
++        </Menu>
++      }
++    />
++  );
++}
++
++function StatsForNerdsUsageLimitsRow() {
++  const gt = useGT();
++  const m = useMessages();
++  const setting = useSearchableSetting();
++  const scope = useScopedSettings((settings) => settings.statsForNerdsUsageLimitsScope);
++  const updateSettings = useUpdateScopedSettings();
++  return (
++    <SettingsRow
++      {...setting("stats-for-nerds-usage-limits")}
++      description={gt(
++        "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
++      )}
++      resetAction={
++        scope !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsUsageLimitsScope ? (
++          <SettingResetButton
++            ariaLabel={gt("Reset usage limits to show to default")}
++            onClick={() =>
++              updateSettings({
++                statsForNerdsUsageLimitsScope:
++                  DEFAULT_UNIFIED_SETTINGS.statsForNerdsUsageLimitsScope,
++              })
++            }
++          />
++        ) : null
++      }
++      control={
++        <Select
++          value={scope}
++          onValueChange={(value) => {
++            if (value === "all" || value === "current") {
++              updateSettings({ statsForNerdsUsageLimitsScope: value });
++            }
++          }}
++        >
++          <SelectTrigger
++            size="sm"
++            className="w-full sm:w-40"
++            aria-label={gt("Usage limits to show")}
++          >
++            <SelectValue>{m(USAGE_LIMITS_SCOPE_LABELS[scope])}</SelectValue>
++          </SelectTrigger>
++          <SelectPopup align="end" alignItemWithTrigger={false}>
++            {(["all", "current"] as const).map((value) => (
++              <SelectItem hideIndicator key={value} value={value}>
++                {m(USAGE_LIMITS_SCOPE_LABELS[value])}
++              </SelectItem>
++            ))}
++          </SelectPopup>
++        </Select>
++      }
++    />
++  );
++}
++
++export function StatsForNerdsSettingsSection() {
++  const gt = useGT();
++  const m = useMessages();
++  const setting = useSearchableSetting();
++  const settings = useScopedSettings();
++  const updateSettings = useUpdateScopedSettings();
++  const hidden = settings.statsForNerdsHiddenMetrics;
++
++  return (
++    <SettingsSection id="stats-for-nerds-section" title={gt("Stats for nerds")}>
++      <SettingsRow
++        {...setting("stats-for-nerds")}
++        description={gt(
++          "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
++        )}
++        resetAction={
++          settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled ? (
++            <SettingResetButton
++              ariaLabel={gt("Reset stats for nerds to default")}
++              onClick={() =>
++                updateSettings({
++                  statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
++                })
++              }
++            />
++          ) : null
++        }
++        control={
++          <Switch
++            checked={settings.statsForNerdsEnabled}
++            onCheckedChange={(checked) =>
++              updateSettings({ statsForNerdsEnabled: Boolean(checked) })
++            }
++            aria-label={gt("Stats for nerds")}
++          />
++        }
++      />
++      {settings.statsForNerdsEnabled && (
++        <>
++          <StatsForNerdsPlacementRow />
++          <StatsForNerdsUsageLimitsRow />
++          {TURN_PERFORMANCE_METRIC_IDS.map((id) => {
++            const { label, description } = TURN_PERFORMANCE_METRIC_LABELS[id];
++            const visible = !hidden.includes(id);
++            return (
++              <SettingsRow
++                key={id}
++                id={`stats-for-nerds-metric-${id}`}
++                title={m(label)}
++                description={m(description)}
++                resetAction={
++                  visible ? null : (
++                    <SettingResetButton
++                      ariaLabel={gt("Reset {metric} to default", { metric: m(label) })}
++                      onClick={() =>
++                        updateSettings({
++                          statsForNerdsHiddenMetrics: toggleHiddenMetric(hidden, id, true),
++                        })
++                      }
++                    />
++                  )
++                }
++                control={
++                  <Switch
++                    checked={visible}
++                    onCheckedChange={(checked) =>
++                      updateSettings({
++                        statsForNerdsHiddenMetrics: toggleHiddenMetric(
++                          hidden,
++                          id,
++                          Boolean(checked),
++                        ),
++                      })
++                    }
++                    aria-label={m(label)}
++                  />
++                }
++              />
++            );
++          })}
++        </>
++      )}
++    </SettingsSection>
++  );
++}
+diff --git a/apps/web/src/components/settings/ThreadDetailsItemsRow.tsx b/apps/web/src/components/settings/ThreadDetailsItemsRow.tsx
+index f8da21718c..91eb5042be 100644
+--- a/apps/web/src/components/settings/ThreadDetailsItemsRow.tsx
++++ b/apps/web/src/components/settings/ThreadDetailsItemsRow.tsx
+@@ -5,9 +5,9 @@ import { updateClientSettings, useClientSettings } from "../../hooks/useSettings
+ import { ThreadDetailsItemsMenuItems } from "../chat/ThreadDetailsItemsMenu";
+ import {
+   isDefaultThreadDetailsVisibility,
++  offeredThreadDetailsItems,
+   resolveThreadDetailsVisibility,
+   RESET_THREAD_DETAILS_ITEMS,
+-  THREAD_DETAILS_ITEMS,
+ } from "../chat/threadDetailsItems";
+ import { Button } from "../ui/button";
+ import { Menu, MenuPopup, MenuTrigger } from "../ui/menu";
+@@ -18,7 +18,10 @@ export function ThreadDetailsItemsRow() {
+   const gt = useGT();
+   const searchableSetting = useSearchableSetting();
+   const visibility = useClientSettings(resolveThreadDetailsVisibility);
+-  const enabled = THREAD_DETAILS_ITEMS.filter((item) => visibility[item.id]).length;
++  const offered = offeredThreadDetailsItems(
++    useClientSettings((settings) => settings.statsForNerdsEnabled),
++  );
++  const enabled = offered.filter((item) => visibility[item.id]).length;
+   return (
+     <SettingsRow
+       {...searchableSetting("thread-details-items")}
+@@ -43,13 +46,13 @@ export function ThreadDetailsItemsRow() {
+                 className="w-full justify-between sm:w-40"
+                 aria-label={gt("Thread details: {enabled} of {total} on", {
+                   enabled,
+-                  total: THREAD_DETAILS_ITEMS.length,
++                  total: offered.length,
+                 })}
+               />
+             }
+           >
+             <T>
+-              <Var>{enabled}</Var> of <Var>{THREAD_DETAILS_ITEMS.length}</Var> on
++              <Var>{enabled}</Var> of <Var>{offered.length}</Var> on
+             </T>
+             <ChevronDownIcon aria-hidden />
+           </MenuTrigger>
+diff --git a/apps/web/src/components/settings/settingsSearch.ts b/apps/web/src/components/settings/settingsSearch.ts
+index 4fc38779ca..3a48d6e9d1 100644
+--- a/apps/web/src/components/settings/settingsSearch.ts
++++ b/apps/web/src/components/settings/settingsSearch.ts
+@@ -396,6 +396,36 @@ export const SETTINGS_SEARCH_ITEMS = [
+       ),
+     ],
+   },
++  {
++    id: "stats-for-nerds",
++    title: msg("Stats for nerds"),
++    to: "/settings/appearance",
++    searchTerms: [
++      msg(
++        "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++      ),
++    ],
++  },
++  {
++    id: "stats-for-nerds-placement",
++    title: msg("Where stats show"),
++    to: "/settings/appearance",
++    searchTerms: [
++      msg(
++        "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++      ),
++    ],
++  },
++  {
++    id: "stats-for-nerds-usage-limits",
++    title: msg("Usage limits to show"),
++    to: "/settings/appearance",
++    searchTerms: [
++      msg(
++        "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++      ),
++    ],
++  },
+   {
+     id: "effort-display",
+     title: msg("Effort display"),
+@@ -829,12 +859,6 @@ export const SETTINGS_SEARCH_ITEMS = [
+     to: "/settings/chat",
+     searchTerms: [msg("composer rich text tiptap bold italic markdown styled wysiwyg")],
+   },
+-  {
+-    id: "stats-for-nerds",
+-    title: msg("Stats for nerds"),
+-    to: "/settings/chat",
+-    searchTerms: [msg("context tokens cache elapsed telemetry composer usage")],
+-  },
+   {
+     id: "send-shortcut",
+     title: msg("Send shortcut"),
+diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
+index 52c80c94e4..d1107ed34e 100644
+--- a/apps/web/src/i18n/translations/de.json
++++ b/apps/web/src/i18n/translations/de.json
+@@ -12977,9 +12977,7 @@
+   "3ee30a50b70fffab": "Zurückgezogen von {by}: {reason}",
+   "92e129bf413a1220": "zurückgezogen",
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13034,5 +13032,30 @@
+   "b7670f25c58e1951": "Speed mode",
+   "f1a40a6668b555d8": "speed",
+   "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
+-  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "2796dafc8c101aff": "Reset {metric} to default",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "75ff29ab6278438a": "partial",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "57f684d52fc9e328": "Usage limits to show",
++  "141f235c64ef4b39": "All providers",
++  "5dcc87e26d4dc762": "Current provider",
++  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
++  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
++  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
++  "77aeb1520122e429": "Show stats",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "74659304f79806ca": "The line shows each provider's window closest to running out.",
++  "21a392236b8f4581": "This thread"
+ }
+diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
+index 7d0c74efc5..fa1cf1d5f7 100644
+--- a/apps/web/src/i18n/translations/en.json
++++ b/apps/web/src/i18n/translations/en.json
+@@ -12986,9 +12986,7 @@
+   "3ee30a50b70fffab": "Withdrawn by {by}: {reason}",
+   "92e129bf413a1220": "withdrawn",
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13043,5 +13041,30 @@
+   "b7670f25c58e1951": "Speed mode",
+   "f1a40a6668b555d8": "speed",
+   "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
+-  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "2796dafc8c101aff": "Reset {metric} to default",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "75ff29ab6278438a": "partial",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "57f684d52fc9e328": "Usage limits to show",
++  "141f235c64ef4b39": "All providers",
++  "5dcc87e26d4dc762": "Current provider",
++  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
++  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
++  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
++  "77aeb1520122e429": "Show stats",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "74659304f79806ca": "The line shows each provider's window closest to running out.",
++  "21a392236b8f4581": "This thread"
+ }
+diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
+index 37069f070d..16e6200b5d 100644
+--- a/apps/web/src/i18n/translations/es.json
++++ b/apps/web/src/i18n/translations/es.json
+@@ -12972,9 +12972,7 @@
+   "3ee30a50b70fffab": "Retirada por {by}: {reason}",
+   "92e129bf413a1220": "retirada",
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13029,5 +13027,30 @@
+   "b7670f25c58e1951": "Speed mode",
+   "f1a40a6668b555d8": "speed",
+   "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
+-  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "2796dafc8c101aff": "Reset {metric} to default",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "75ff29ab6278438a": "partial",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "57f684d52fc9e328": "Usage limits to show",
++  "141f235c64ef4b39": "All providers",
++  "5dcc87e26d4dc762": "Current provider",
++  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
++  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
++  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
++  "77aeb1520122e429": "Show stats",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "74659304f79806ca": "The line shows each provider's window closest to running out.",
++  "21a392236b8f4581": "This thread"
+ }
+diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
+index 465dc82606..761c6bba40 100644
+--- a/apps/web/src/i18n/translations/fr.json
++++ b/apps/web/src/i18n/translations/fr.json
+@@ -12977,9 +12977,7 @@
+   "3ee30a50b70fffab": "Retirée par {by} : {reason}",
+   "92e129bf413a1220": "retirée",
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13034,5 +13032,30 @@
+   "b7670f25c58e1951": "Speed mode",
+   "f1a40a6668b555d8": "speed",
+   "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
+-  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "2796dafc8c101aff": "Reset {metric} to default",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "75ff29ab6278438a": "partial",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "57f684d52fc9e328": "Usage limits to show",
++  "141f235c64ef4b39": "All providers",
++  "5dcc87e26d4dc762": "Current provider",
++  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
++  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
++  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
++  "77aeb1520122e429": "Show stats",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "74659304f79806ca": "The line shows each provider's window closest to running out.",
++  "21a392236b8f4581": "This thread"
+ }
+diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
+index 4466e1991b..4029acfff6 100644
+--- a/apps/web/src/i18n/translations/ja.json
++++ b/apps/web/src/i18n/translations/ja.json
+@@ -12913,9 +12913,7 @@
+   "3ee30a50b70fffab": "{by} が取り下げました: {reason}",
+   "92e129bf413a1220": "取り下げ済み",
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -12970,5 +12968,30 @@
+   "b7670f25c58e1951": "Speed mode",
+   "f1a40a6668b555d8": "speed",
+   "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
+-  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "2796dafc8c101aff": "Reset {metric} to default",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "75ff29ab6278438a": "partial",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "57f684d52fc9e328": "Usage limits to show",
++  "141f235c64ef4b39": "All providers",
++  "5dcc87e26d4dc762": "Current provider",
++  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
++  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
++  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
++  "77aeb1520122e429": "Show stats",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "74659304f79806ca": "The line shows each provider's window closest to running out.",
++  "21a392236b8f4581": "This thread"
+ }
+diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
+index 59a516f79a..70f768557c 100644
+--- a/apps/web/src/i18n/translations/ko.json
++++ b/apps/web/src/i18n/translations/ko.json
+@@ -12910,9 +12910,7 @@
+   "3ee30a50b70fffab": "{by}에서 철회했습니다: {reason}",
+   "92e129bf413a1220": "철회됨",
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -12967,5 +12965,30 @@
+   "b7670f25c58e1951": "Speed mode",
+   "f1a40a6668b555d8": "speed",
+   "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
+-  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "2796dafc8c101aff": "Reset {metric} to default",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "75ff29ab6278438a": "partial",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "57f684d52fc9e328": "Usage limits to show",
++  "141f235c64ef4b39": "All providers",
++  "5dcc87e26d4dc762": "Current provider",
++  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
++  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
++  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
++  "77aeb1520122e429": "Show stats",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "74659304f79806ca": "The line shows each provider's window closest to running out.",
++  "21a392236b8f4581": "This thread"
+ }
+diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
+index 6d3027d045..2d8f61868d 100644
+--- a/apps/web/src/i18n/translations/pt-BR.json
++++ b/apps/web/src/i18n/translations/pt-BR.json
+@@ -12977,9 +12977,7 @@
+   "3ee30a50b70fffab": "Retirada por {by}: {reason}",
+   "92e129bf413a1220": "retirada",
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13034,5 +13032,30 @@
+   "b7670f25c58e1951": "Speed mode",
+   "f1a40a6668b555d8": "speed",
+   "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
+-  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "2796dafc8c101aff": "Reset {metric} to default",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "75ff29ab6278438a": "partial",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "57f684d52fc9e328": "Usage limits to show",
++  "141f235c64ef4b39": "All providers",
++  "5dcc87e26d4dc762": "Current provider",
++  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
++  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
++  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
++  "77aeb1520122e429": "Show stats",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "74659304f79806ca": "The line shows each provider's window closest to running out.",
++  "21a392236b8f4581": "This thread"
+ }
+diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
+index d1380f807a..f58db2aa7c 100644
+--- a/apps/web/src/i18n/translations/ru.json
++++ b/apps/web/src/i18n/translations/ru.json
+@@ -12977,9 +12977,7 @@
+   "3ee30a50b70fffab": "Отозван ({by}): {reason}",
+   "92e129bf413a1220": "отозван",
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13034,5 +13032,30 @@
+   "b7670f25c58e1951": "Speed mode",
+   "f1a40a6668b555d8": "speed",
+   "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
+-  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "2796dafc8c101aff": "Reset {metric} to default",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "75ff29ab6278438a": "partial",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "57f684d52fc9e328": "Usage limits to show",
++  "141f235c64ef4b39": "All providers",
++  "5dcc87e26d4dc762": "Current provider",
++  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
++  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
++  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
++  "77aeb1520122e429": "Show stats",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "74659304f79806ca": "The line shows each provider's window closest to running out.",
++  "21a392236b8f4581": "This thread"
+ }
+diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
+index 54391039f8..1bc7c9e32d 100644
+--- a/apps/web/src/i18n/translations/sv.json
++++ b/apps/web/src/i18n/translations/sv.json
+@@ -12984,9 +12984,7 @@
+   "3ee30a50b70fffab": "Återkallad av {by}: {reason}",
+   "92e129bf413a1220": "återkallad",
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13041,5 +13039,30 @@
+   "b7670f25c58e1951": "Speed mode",
+   "f1a40a6668b555d8": "speed",
+   "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
+-  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "2796dafc8c101aff": "Reset {metric} to default",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "75ff29ab6278438a": "partial",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "57f684d52fc9e328": "Usage limits to show",
++  "141f235c64ef4b39": "All providers",
++  "5dcc87e26d4dc762": "Current provider",
++  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
++  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
++  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
++  "77aeb1520122e429": "Show stats",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "74659304f79806ca": "The line shows each provider's window closest to running out.",
++  "21a392236b8f4581": "This thread"
+ }
+diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
+index 59ffc1574b..ada441db08 100644
+--- a/apps/web/src/i18n/translations/zh.json
++++ b/apps/web/src/i18n/translations/zh.json
+@@ -12991,9 +12991,7 @@
+   "3ee30a50b70fffab": "已由 {by} 撤回：{reason}",
+   "92e129bf413a1220": "已撤回",
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13048,5 +13046,30 @@
+   "b7670f25c58e1951": "Speed mode",
+   "f1a40a6668b555d8": "speed",
+   "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
+-  "bcab471e96704da1": "Response rate"
++  "bcab471e96704da1": "Response rate",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "2796dafc8c101aff": "Reset {metric} to default",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "75ff29ab6278438a": "partial",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "57f684d52fc9e328": "Usage limits to show",
++  "141f235c64ef4b39": "All providers",
++  "5dcc87e26d4dc762": "Current provider",
++  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
++  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
++  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
++  "77aeb1520122e429": "Show stats",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "74659304f79806ca": "The line shows each provider's window closest to running out.",
++  "21a392236b8f4581": "This thread"
+ }
+diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
+index 8440e495b2..b35c9e6320 100644
+--- a/packages/contracts/src/settings.ts
++++ b/packages/contracts/src/settings.ts
+@@ -536,8 +536,14 @@ export const ClientSettingsSchema = Schema.Struct({
+   statsForNerdsHiddenMetrics: Schema.Array(Schema.String).pipe(
+     Schema.withDecodingDefault(Effect.succeed([])),
+   ),
+-  statsForNerdsShowInComposer: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
++  statsForNerdsShowInComposer: Schema.Boolean.pipe(
++    Schema.withDecodingDefault(Effect.succeed(true)),
++  ),
+   statsForNerdsShowPerReply: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
++  // Usage limits in Stats for nerds: the thread's provider only, or every provider that reports them.
++  statsForNerdsUsageLimitsScope: Schema.Literals(["current", "all"]).pipe(
++    Schema.withDecodingDefault(Effect.succeed("all" as const)),
++  ),
+ 
+   composerRichTextEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+   sendShortcut: Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"]).pipe(
+@@ -2164,6 +2170,7 @@ export const ClientSettingsPatch = Schema.Struct({
+   statsForNerdsHiddenMetrics: Schema.optionalKey(Schema.Array(Schema.String)),
+   statsForNerdsShowInComposer: Schema.optionalKey(Schema.Boolean),
+   statsForNerdsShowPerReply: Schema.optionalKey(Schema.Boolean),
++  statsForNerdsUsageLimitsScope: Schema.optionalKey(Schema.Literals(["current", "all"])),
+   composerRichTextEnabled: Schema.optionalKey(Schema.Boolean),
+   sendShortcut: Schema.optionalKey(Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"])),
+   followUpBehavior: Schema.optionalKey(Schema.Literals(["queue", "steer"])),

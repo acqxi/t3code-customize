@@ -213,7 +213,7 @@ $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
 if ($running.Count -gt 0) {
   $other = @($running | Where-Object { $_.Path -ine $target })
   if ($other.Count -gt 0) {
-    Notify ('T3 Code is already running from ' + $other[0].Path + '. Quit it fully (tray icon > Quit), then open T3 Code (Customized) again.')
+    Notify ('T3 Code is already running from ' + $other[0].Path + '. Close all its windows and wait until it no longer appears in Task Manager, then open T3 Code (Customized) again.')
     exit 1
   }
 }

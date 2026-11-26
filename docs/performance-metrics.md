@@ -135,6 +135,7 @@ duration and whatever usage they report. Timing metrics are unavailable (`—`).
 
 ## Settings
 
-**Settings → General → Stats for nerds** turns the feature on. Below it, each
-metric has its own switch, plus where stats appear: under the composer
-(current and previous turn) and under each reply (that turn's history).
+**Settings → Appearance → Stats for nerds** turns the feature on. Below it, each
+metric has its own switch, plus where stats appear, in any combination: under
+each reply (that turn's history), under the composer (current and previous
+turn) and in the Thread details panel.

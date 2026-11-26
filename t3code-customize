@@ -1023,7 +1023,7 @@ def build(args):
         say(f'Customization is switched off. Run {NAME} on to use it.')
     else:
         say(f'Quit T3 Code fully, then open "{LAUNCHER_NAME}" from your app launcher.')
-        say('First time? Turn on Settings > General > Stats for nerds.')
+        say('First time? Turn on Settings > Appearance > Stats for nerds.')
 
 
 def export_patches(target):

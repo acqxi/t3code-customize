@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: acqxi <kacqxi@gmail.com>
-Date: Thu, 26 Nov 2026 18:07:55 +0800
-Subject: [PATCH 6/6] Performance metrics: composer, per-reply history and
- settings
+Date: Fri, 27 Nov 2026 01:35:59 +0800
+Subject: [PATCH 6/8] Performance metrics: composer, per-reply history
 
 Stats for nerds turn performance in the web UI, coded against the
 OrchestrationV2TurnPerformance contract.
@@ -14,44 +13,44 @@ OrchestrationV2TurnPerformance contract.
   (exact only for provider_exact), legacy responseThroughput only under
   its own label. Client-side live tokens/s sampler (2 s window, keyed by
   thread + provider turn).
-- Composer: a line under the stats line with the running turn (elapsed,
-  live tok/s, TTFT/TTFA) and the previous completed turn, each with a
-  full breakdown on hover. The stats line hands its tok/s and cache chips
-  to this line when it is shown.
+- Composer: one footer line while it fits, usage limits on the left and
+  the running turn (elapsed, live tok/s, TTFT/TTFA), the previous
+  completed turn and context on the right, each with a full breakdown on
+  hover. Each side is a clipped line in priority order, so a narrow
+  window drops the lowest-priority items before the right side wraps.
+  The stats line hands its tok/s and cache chips to the turn summaries
+  when they are shown.
 - Timeline: a one-line footer under each reply for the provider turn that
   produced it, with the breakdown on hover.
-- Settings: Stats for nerds moves to General, with switches for composer,
-  per-reply and each metric (statsForNerdsHiddenMetrics), reset buttons
-  and search entries. New catalog keys in every web locale.
+- Both follow the composer and per-reply settings and the hidden metric
+  list (all shown by default). New catalog keys in every web locale.
 ---
- apps/web/src/components/ChatView.tsx          | 269 +++---
- .../web/src/components/chat/ComposerStats.tsx |   7 +-
+ apps/web/src/components/ChatView.tsx          | 273 +++---
+ .../web/src/components/chat/ComposerStats.tsx |  63 +-
  .../components/chat/TimelineAssistantRows.tsx |  11 +
  .../chat/TurnPerformance.catalog.ts           |  97 +++
- .../chat/TurnPerformance.logic.test.ts        | 671 +++++++++++++++
- .../components/chat/TurnPerformance.logic.ts  | 778 ++++++++++++++++++
- .../src/components/chat/TurnPerformance.tsx   | 455 ++++++++++
- .../components/settings/SettingsPanels.tsx    | 179 +++-
- .../src/components/settings/settingsSearch.ts |  28 +-
- apps/web/src/i18n/translations/de.json        |  65 +-
- apps/web/src/i18n/translations/en.json        |  65 +-
- apps/web/src/i18n/translations/es.json        |  65 +-
- apps/web/src/i18n/translations/fr.json        |  65 +-
- apps/web/src/i18n/translations/ja.json        |  65 +-
- apps/web/src/i18n/translations/ko.json        |  65 +-
- apps/web/src/i18n/translations/pt-BR.json     |  65 +-
- apps/web/src/i18n/translations/ru.json        |  65 +-
- apps/web/src/i18n/translations/sv.json        |  65 +-
- apps/web/src/i18n/translations/zh.json        |  65 +-
+ .../chat/TurnPerformance.logic.test.ts        | 709 ++++++++++++++++
+ .../components/chat/TurnPerformance.logic.ts  | 787 ++++++++++++++++++
+ .../src/components/chat/TurnPerformance.tsx   | 459 ++++++++++
+ apps/web/src/i18n/translations/de.json        |  51 +-
+ apps/web/src/i18n/translations/en.json        |  51 +-
+ apps/web/src/i18n/translations/es.json        |  51 +-
+ apps/web/src/i18n/translations/fr.json        |  51 +-
+ apps/web/src/i18n/translations/ja.json        |  51 +-
+ apps/web/src/i18n/translations/ko.json        |  51 +-
+ apps/web/src/i18n/translations/pt-BR.json     |  51 +-
+ apps/web/src/i18n/translations/ru.json        |  51 +-
+ apps/web/src/i18n/translations/sv.json        |  51 +-
+ apps/web/src/i18n/translations/zh.json        |  51 +-
  apps/web/src/state/entities.ts                |   5 +
- 20 files changed, 2978 insertions(+), 172 deletions(-)
+ 18 files changed, 2776 insertions(+), 138 deletions(-)
  create mode 100644 apps/web/src/components/chat/TurnPerformance.catalog.ts
  create mode 100644 apps/web/src/components/chat/TurnPerformance.logic.test.ts
  create mode 100644 apps/web/src/components/chat/TurnPerformance.logic.ts
  create mode 100644 apps/web/src/components/chat/TurnPerformance.tsx
 
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index 0884d63683..e8a67d6c5a 100644
+index 0884d63683..f468f6841a 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
 @@ -359,6 +359,17 @@ import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEn
@@ -336,44 +335,84 @@ index 0884d63683..e8a67d6c5a 100644
                </WorkspaceMutationIdContext>
  
                {showScrollToBottom && !isThreadFindActive && (
-@@ -4187,6 +4233,15 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4187,6 +4233,19 @@ export default function ChatView(props: ChatViewProps) {
                              getDisabledReason: getModelDisabledReason,
                              onSwitch: onProviderModelSelectStable,
                            }}
 +                          showTurnChips={turnPerformance?.composer == null}
-+                        />
-+                      )}
-+                      {composerStats !== null && turnPerformance?.composer != null && (
-+                        <ComposerTurnPerformance
-+                          threadRef={routeThreadDetailRef}
-+                          current={turnPerformance.composer.current}
-+                          previous={turnPerformance.composer.previous}
-+                          hiddenMetrics={turnPerformance.hiddenMetrics}
++                          performance={
++                            turnPerformance?.composer != null &&
++                            (turnPerformance.composer.current !== null ||
++                              turnPerformance.composer.previous !== null) ? (
++                              <ComposerTurnPerformance
++                                threadRef={routeThreadDetailRef}
++                                current={turnPerformance.composer.current}
++                                previous={turnPerformance.composer.previous}
++                                hiddenMetrics={turnPerformance.hiddenMetrics}
++                              />
++                            ) : null
++                          }
                          />
                        )}
                        <div
 diff --git a/apps/web/src/components/chat/ComposerStats.tsx b/apps/web/src/components/chat/ComposerStats.tsx
-index b81c19079d..04ffcb8a28 100644
+index b81c19079d..4273e4ef05 100644
 --- a/apps/web/src/components/chat/ComposerStats.tsx
 +++ b/apps/web/src/components/chat/ComposerStats.tsx
-@@ -353,6 +353,7 @@ export function ComposerStats({
+@@ -240,7 +240,7 @@ function UsageLimitsSummary({
+           <button
+             type="button"
+             aria-label="Usage limit details"
+-            className="inline-flex flex-wrap items-center gap-x-4 rounded-sm text-left -outline-offset-2"
++            className="flex h-4 min-w-0 flex-wrap items-center gap-x-4 overflow-hidden rounded-sm text-left -outline-offset-2"
+           />
+         }
+       >
+@@ -319,13 +319,13 @@ function SubscriptionSwitchChip({
+             onClick={() => {
+               if (disabledReason === null) onSwitch(suggestion.instanceId, suggestion.model);
+             }}
+-            className={`inline-flex items-center gap-1 rounded-sm border px-1.5 -outline-offset-2 ${tone} ${
++            className={`inline-flex min-w-0 max-w-56 shrink-0 items-center gap-1 rounded-sm border px-1.5 -outline-offset-2 ${tone} ${
+               disabledReason !== null ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+             }`}
+           />
+         }
+       >
+-        <span>
++        <span className="truncate">
+           {suggestion.modelName} on {suggestion.providerName}
+         </span>
+         <span aria-hidden="true">→</span>
+@@ -353,6 +353,8 @@ export function ComposerStats({
    compactDisabledReason,
    isCompacting,
    subscriptionSwitch = null,
 +  showTurnChips = true,
++  performance = null,
  }: {
    context: ContextWindowSnapshot | null;
    turn: OrchestrationV2ProviderTurn | null;
-@@ -365,6 +366,8 @@ export function ComposerStats({
+@@ -365,6 +367,10 @@ export function ComposerStats({
    compactDisabledReason: string | null;
    isCompacting: boolean;
    subscriptionSwitch?: SubscriptionSwitchInput | null;
-+  /** False when the turn performance line below shows this turn's rate and cache instead. */
++  /** False when the turn performance in this line shows this turn's rate and cache instead. */
 +  showTurnChips?: boolean;
++  /** Turn performance, placed on the right next to context. */
++  performance?: ReactNode;
  }) {
    const compaction = deriveContextCompaction(context, contextDriver, configuredClaudeThreshold);
    const responseRate = deriveResponseRate(turn);
-@@ -399,7 +402,7 @@ export function ComposerStats({
+@@ -386,6 +392,7 @@ export function ComposerStats({
+     compactions.length === 0 &&
+     selectComposerLimitWindows(usageLimits?.limits).length === 0 &&
+     subscriptionSwitch === null &&
++    performance === null &&
+     compactDisabled
+   )
+     return null;
+@@ -399,7 +406,7 @@ export function ComposerStats({
        : `${estimated ? "≈" : ""}${responseRate.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
    // T3 already shows turn time inline in the timeline, so the line shows tok/s and
    // keeps elapsed time in the details popover.
@@ -382,7 +421,7 @@ index b81c19079d..04ffcb8a28 100644
      stats.push({
        key: "turn",
        node: (
-@@ -468,7 +471,7 @@ export function ComposerStats({
+@@ -468,7 +475,7 @@ export function ComposerStats({
        ),
      });
    }
@@ -391,6 +430,66 @@ index b81c19079d..04ffcb8a28 100644
      stats.push({
        key: "cache",
        node: (
+@@ -637,29 +644,43 @@ export function ComposerStats({
+     });
+   }
+ 
++  // One line while it fits: limits on the left, turn performance and context on the right. Each
++  // side drops its lowest-priority items before the right side wraps below.
+   return (
+     <div
+       data-composer-stats="true"
+       aria-label="Stats for nerds"
+       className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 pt-1.5 text-2xs leading-4 text-muted-foreground tabular-nums"
+     >
+-      {usageLimits && (
+-        <UsageLimitsSummary limits={usageLimits.limits} providerName={usageLimits.providerName} />
++      {(usageLimits || subscriptionSwitch) && (
++        <div className="flex min-w-0 max-w-max flex-[1_1_0%] items-center gap-x-3">
++          {usageLimits && (
++            <UsageLimitsSummary
++              limits={usageLimits.limits}
++              providerName={usageLimits.providerName}
++            />
++          )}
++          {subscriptionSwitch && <SubscriptionSwitchChip {...subscriptionSwitch} />}
++        </div>
+       )}
+-      {subscriptionSwitch && <SubscriptionSwitchChip {...subscriptionSwitch} />}
+-      {stats.length > 0 && (
+-        <span className="ms-auto inline-flex flex-wrap items-center gap-x-2.5">
+-          {stats.map(({ key, node }, index) => (
+-            <Fragment key={key}>
+-              {index > 0 && (
+-                <span aria-hidden="true" className="text-muted-foreground/40">
+-                  ·
+-                </span>
+-              )}
+-              {node}
+-            </Fragment>
+-          ))}
+-        </span>
++      {(performance !== null || stats.length > 0) && (
++        <div className="ms-auto flex min-w-0 flex-[1_1_14rem] items-center justify-end gap-x-4">
++          {performance}
++          {stats.length > 0 && (
++            <span className="inline-flex shrink-0 items-center gap-x-2.5">
++              {stats.map(({ key, node }, index) => (
++                <Fragment key={key}>
++                  {index > 0 && (
++                    <span aria-hidden="true" className="text-muted-foreground/40">
++                      ·
++                    </span>
++                  )}
++                  {node}
++                </Fragment>
++              ))}
++            </span>
++          )}
++        </div>
+       )}
+     </div>
+   );
 diff --git a/apps/web/src/components/chat/TimelineAssistantRows.tsx b/apps/web/src/components/chat/TimelineAssistantRows.tsx
 index 9692bbedad..a729ca3137 100644
 --- a/apps/web/src/components/chat/TimelineAssistantRows.tsx
@@ -532,10 +631,10 @@ index 0000000000..96007c9792
 +export const LEGACY_RESPONSE_RATE_LABEL = msg("Response rate");
 diff --git a/apps/web/src/components/chat/TurnPerformance.logic.test.ts b/apps/web/src/components/chat/TurnPerformance.logic.test.ts
 new file mode 100644
-index 0000000000..4e6c5363e7
+index 0000000000..9257e01f3e
 --- /dev/null
 +++ b/apps/web/src/components/chat/TurnPerformance.logic.test.ts
-@@ -0,0 +1,671 @@
+@@ -0,0 +1,709 @@
 +import {
 +  NodeId,
 +  ProviderInstanceId,
@@ -549,6 +648,7 @@ index 0000000000..4e6c5363e7
 +import { describe, expect, it } from "vite-plus/test";
 +
 +import {
++  COMPOSER_INLINE_PRIORITY,
 +  TURN_PERFORMANCE_METRIC_IDS,
 +  countTurnStreamedChars,
 +  createLiveRateSampler,
@@ -1157,6 +1257,43 @@ index 0000000000..4e6c5363e7
 +  });
 +});
 +
++describe("composer footer priority", () => {
++  it("orders each composer summary by drop priority and lists only real metrics", () => {
++    for (const ids of Object.values(COMPOSER_INLINE_PRIORITY)) {
++      expect(new Set(ids).size).toBe(ids.length);
++      for (const id of ids) expect(TURN_PERFORMANCE_METRIC_IDS).toContain(id);
++    }
++    // Rate and latency stay longest; peak and TTFA are dropped first on a narrow window.
++    expect(COMPOSER_INLINE_PRIORITY.previous.slice(0, 2)).toEqual(["avgTps", "ttft"]);
++    expect(COMPOSER_INLINE_PRIORITY.previous.slice(-2)).toEqual(["peakTps", "ttfa"]);
++    expect(COMPOSER_INLINE_PRIORITY.current[0]).toBe("turnTime");
++  });
++
++  it("keeps priority order after hidden and unavailable metrics drop out", () => {
++    const rows = filterVisibleMetrics(
++      metrics({
++        turn: turn({
++          performance: perf({ firstTokenMs: 900, firstAnswerMs: 1_200 }),
++          turnTokenUsage: {
++            usageScope: "main_agent",
++            usageStatus: "complete",
++            inputTokens: 1_000,
++            cachedInputTokens: 900,
++            outputTokens: 400,
++            hasSubagents: false,
++          },
++        }),
++      }),
++      hiddenMetricSet(["ttft"]),
++    );
++    const ids = pickInlineMetrics(rows, COMPOSER_INLINE_PRIORITY.previous).map((row) => row.id);
++    expect(ids).not.toContain("ttft");
++    const order = COMPOSER_INLINE_PRIORITY.previous.filter((id) => ids.includes(id));
++    expect(ids).toEqual(order);
++    expect(ids).toEqual(expect.arrayContaining(["cacheHitRate", "turnTime", "ttfa"]));
++  });
++});
++
 +describe("turn selection", () => {
 +  it("splits the running turn from the previous completed one", () => {
 +    const first = turn({ id: ProviderTurnId.make("t1"), ordinal: 1 });
@@ -1209,10 +1346,10 @@ index 0000000000..4e6c5363e7
 +});
 diff --git a/apps/web/src/components/chat/TurnPerformance.logic.ts b/apps/web/src/components/chat/TurnPerformance.logic.ts
 new file mode 100644
-index 0000000000..27f2eaff3a
+index 0000000000..1f09bedf3a
 --- /dev/null
 +++ b/apps/web/src/components/chat/TurnPerformance.logic.ts
-@@ -0,0 +1,778 @@
+@@ -0,0 +1,787 @@
 +import type {
 +  ModelSelection,
 +  OrchestrationV2ProviderTurn,
@@ -1840,6 +1977,15 @@ index 0000000000..27f2eaff3a
 +}
 +
 +/** Picks rows by id in the given order, skipping hidden and (optionally) unavailable ones. */
++/**
++ * Inline metrics of the composer footer, most important first. The footer is one clipped line, so
++ * metrics are dropped from the end when the window narrows: this order is the drop order.
++ */
++export const COMPOSER_INLINE_PRIORITY = {
++  current: ["turnTime", "liveTps", "ttft", "ttfa"],
++  previous: ["avgTps", "ttft", "cacheHitRate", "turnTime", "outputTokens", "peakTps", "ttfa"],
++} as const satisfies Record<"current" | "previous", ReadonlyArray<TurnPerformanceMetricId>>;
++
 +export function pickInlineMetrics(
 +  rows: ReadonlyArray<TurnPerformanceMetric>,
 +  ids: ReadonlyArray<TurnPerformanceMetricId>,
@@ -1993,13 +2139,13 @@ index 0000000000..27f2eaff3a
 +}
 diff --git a/apps/web/src/components/chat/TurnPerformance.tsx b/apps/web/src/components/chat/TurnPerformance.tsx
 new file mode 100644
-index 0000000000..d026368371
+index 0000000000..8d90dcc78a
 --- /dev/null
 +++ b/apps/web/src/components/chat/TurnPerformance.tsx
-@@ -0,0 +1,455 @@
+@@ -0,0 +1,459 @@
 +import type { ProviderTurnId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 +import { useMessages } from "gt-react";
-+import { createContext, Fragment, use, useEffect, useRef, useState, type ReactNode } from "react";
++import { createContext, use, useEffect, useRef, useState, type ReactNode } from "react";
 +
 +import { readThreadStreamedTurnItems } from "../../state/entities";
 +import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
@@ -2010,6 +2156,7 @@ index 0000000000..d026368371
 +  TURN_PERFORMANCE_METRIC_LABELS,
 +} from "./TurnPerformance.catalog";
 +import {
++  COMPOSER_INLINE_PRIORITY,
 +  countTurnStreamedChars,
 +  createLiveRateSampler,
 +  deriveTurnPerformanceMetrics,
@@ -2116,16 +2263,17 @@ index 0000000000..d026368371
 +  );
 +}
 +
++/** Each separator travels with its metric, so a metric that wraps out of a clipped line takes it along. */
 +function InlineMetrics({ metrics }: { metrics: ReadonlyArray<TurnPerformanceMetric> }) {
 +  return metrics.map((metric, index) => (
-+    <Fragment key={metric.id}>
++    <span key={metric.id} className="inline-flex items-baseline gap-x-1.5 whitespace-nowrap">
 +      {index > 0 && (
 +        <span aria-hidden="true" className="text-muted-foreground/40">
 +          ·
 +        </span>
 +      )}
 +      <InlineMetric metric={metric} />
-+    </Fragment>
++    </span>
 +  ));
 +}
 +
@@ -2194,6 +2342,7 @@ index 0000000000..d026368371
 +  title,
 +  subtitle,
 +  ariaLabel,
++  className,
 +}: {
 +  label: ReactNode;
 +  live: boolean;
@@ -2202,6 +2351,7 @@ index 0000000000..d026368371
 +  title: string;
 +  subtitle: string;
 +  ariaLabel: string;
++  className?: string;
 +}) {
 +  return (
 +    <Popover>
@@ -2210,14 +2360,15 @@ index 0000000000..d026368371
 +        delay={150}
 +        closeDelay={150}
 +        render={
++          // One clipped line: metrics that do not fit wrap out of view, lowest priority first.
 +          <button
 +            type="button"
 +            aria-label={ariaLabel}
-+            className="inline-flex min-w-0 flex-wrap items-baseline gap-x-1.5 rounded-sm text-left -outline-offset-2"
++            className={`flex h-4 min-w-0 flex-wrap items-baseline gap-x-1.5 overflow-hidden rounded-sm text-left -outline-offset-2 ${className ?? ""}`}
 +          />
 +        }
 +      >
-+        <span className="inline-flex items-center gap-1 text-muted-foreground/70">
++        <span className="inline-flex shrink-0 items-center gap-1 text-muted-foreground/70">
 +          {live && (
 +            <span aria-hidden="true" className="size-1.5 animate-pulse rounded-full bg-success" />
 +          )}
@@ -2232,21 +2383,6 @@ index 0000000000..d026368371
 +  );
 +}
 +
-+const CURRENT_INLINE: ReadonlyArray<TurnPerformanceMetricId> = [
-+  "turnTime",
-+  "liveTps",
-+  "ttft",
-+  "ttfa",
-+];
-+const PREVIOUS_INLINE: ReadonlyArray<TurnPerformanceMetricId> = [
-+  "avgTps",
-+  "peakTps",
-+  "ttft",
-+  "ttfa",
-+  "cacheHitRate",
-+  "outputTokens",
-+  "turnTime",
-+];
 +const REPLY_INLINE: ReadonlyArray<TurnPerformanceMetricId> = [
 +  "avgTps",
 +  "ttft",
@@ -2262,6 +2398,26 @@ index 0000000000..d026368371
 +  return usage === undefined ? null : { usedTokens: usage.usedTokens, maxTokens: usage.maxTokens };
 +}
 +
++/** A running turn's metrics, ticking and sampling live tokens/s while it runs. */
++function useTurnMetrics(
++  threadRef: ScopedThreadRef | null,
++  source: TurnPerformanceSource,
++  hidden: ReadonlySet<string>,
++): ReadonlyArray<TurnPerformanceMetric> {
++  const running = isTurnRunning(source.turn);
++  const now = useNow(running, 1000);
++  const liveRate = useLiveTokensPerSecond(running ? threadRef : null, source.turn.id);
++  return filterVisibleMetrics(
++    deriveTurnPerformanceMetrics({
++      ...source,
++      context: contextOf(source),
++      liveTokensPerSecond: running ? liveRate : null,
++      nowMs: now,
++    }),
++    hidden,
++  );
++}
++
 +function CurrentTurnSummary({
 +  threadRef,
 +  source,
@@ -2272,18 +2428,8 @@ index 0000000000..d026368371
 +  hidden: ReadonlySet<string>;
 +}) {
 +  const running = isTurnRunning(source.turn);
-+  const now = useNow(running, 1000);
-+  const liveRate = useLiveTokensPerSecond(running ? threadRef : null, source.turn.id);
-+  const metrics = filterVisibleMetrics(
-+    deriveTurnPerformanceMetrics({
-+      ...source,
-+      context: contextOf(source),
-+      liveTokensPerSecond: liveRate,
-+      nowMs: now,
-+    }),
-+    hidden,
-+  );
-+  const inline = pickInlineMetrics(metrics, CURRENT_INLINE);
++  const metrics = useTurnMetrics(threadRef, source, hidden);
++  const inline = pickInlineMetrics(metrics, COMPOSER_INLINE_PRIORITY.current);
 +  return (
 +    <TurnPerformanceSummary
 +      label="Now"
@@ -2293,6 +2439,7 @@ index 0000000000..d026368371
 +      title="Current turn"
 +      subtitle={source.providerName}
 +      ariaLabel="Current turn performance details"
++      className="shrink"
 +    />
 +  );
 +}
@@ -2313,7 +2460,7 @@ index 0000000000..d026368371
 +    }),
 +    hidden,
 +  );
-+  const inline = pickInlineMetrics(metrics, PREVIOUS_INLINE);
++  const inline = pickInlineMetrics(metrics, COMPOSER_INLINE_PRIORITY.previous);
 +  if (inline.length === 0 && metrics.length === 0) return null;
 +  return (
 +    <TurnPerformanceSummary
@@ -2324,11 +2471,16 @@ index 0000000000..d026368371
 +      title={`Previous turn · ${source.turn.status}`}
 +      subtitle={source.providerName}
 +      ariaLabel="Previous turn performance details"
++      className="shrink-[8]"
 +    />
 +  );
 +}
 +
-+/** Under the composer: the running turn (live) and the last completed turn of this thread. */
++/**
++ * The composer footer's turn performance: the running turn (live) and the last completed turn of
++ * this thread, inline so they share one line with the limits and context. The last turn gives up
++ * room first.
++ */
 +export function ComposerTurnPerformance({
 +  threadRef,
 +  current,
@@ -2343,10 +2495,10 @@ index 0000000000..d026368371
 +  if (current === null && previous === null) return null;
 +  const threadKey = threadRef === null ? "" : `${threadRef.environmentId}:${threadRef.threadId}`;
 +  return (
-+    <div
++    <span
 +      data-composer-turn-performance="true"
 +      aria-label="Turn performance"
-+      className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 pt-1 text-2xs leading-4 text-muted-foreground tabular-nums"
++      className="flex min-w-0 flex-1 items-center justify-end gap-x-4"
 +    >
 +      {current !== null && (
 +        <CurrentTurnSummary
@@ -2357,15 +2509,13 @@ index 0000000000..d026368371
 +        />
 +      )}
 +      {previous !== null && (
-+        <span className="ms-auto inline-flex min-w-0">
-+          <PreviousTurnSummary
-+            key={`${threadKey}:${previous.turn.id}`}
-+            source={previous}
-+            hidden={hiddenMetrics}
-+          />
-+        </span>
++        <PreviousTurnSummary
++          key={`${threadKey}:${previous.turn.id}`}
++          source={previous}
++          hidden={hiddenMetrics}
++        />
 +      )}
-+    </div>
++    </span>
 +  );
 +}
 +
@@ -2452,290 +2602,11 @@ index 0000000000..d026368371
 +    </div>
 +  );
 +}
-diff --git a/apps/web/src/components/settings/SettingsPanels.tsx b/apps/web/src/components/settings/SettingsPanels.tsx
-index e0d23512bf..b7d705dead 100644
---- a/apps/web/src/components/settings/SettingsPanels.tsx
-+++ b/apps/web/src/components/settings/SettingsPanels.tsx
-@@ -52,6 +52,8 @@ import {
- } from "../../components/desktopUpdate.logic";
- import { ProviderModelPicker } from "../chat/ProviderModelPicker";
- import { TraitsPicker } from "../chat/TraitsPicker";
-+import { TURN_PERFORMANCE_METRIC_LABELS } from "../chat/TurnPerformance.catalog";
-+import { TURN_PERFORMANCE_METRIC_IDS, toggleHiddenMetric } from "../chat/TurnPerformance.logic";
- import { isElectron } from "../../env";
- import { buildHostedChannelSelectionUrl, type HostedAppChannel } from "../../hostedPairing";
- import {
-@@ -597,6 +599,14 @@ export function useSettingsRestore(onRestored?: () => void) {
-     ...(settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled
-       ? [gt("Stats for nerds")]
-       : []),
-+    ...(settings.statsForNerdsShowInComposer !==
-+    DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowInComposer
-+      ? [gt("Show stats under the composer")]
-+      : []),
-+    ...(settings.statsForNerdsShowPerReply !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowPerReply
-+      ? [gt("Show stats under each reply")]
-+      : []),
-+    ...(settings.statsForNerdsHiddenMetrics.length > 0 ? [gt("Stats for nerds metrics")] : []),
-     ...(settings.sideThreadOpenTarget !== DEFAULT_UNIFIED_SETTINGS.sideThreadOpenTarget
-       ? [gt("Open subagents and side chats in")]
-       : []),
-@@ -733,6 +743,9 @@ export function useSettingsRestore(onRestored?: () => void) {
-       sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut,
-       followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
-       statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
-+      statsForNerdsShowInComposer: DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowInComposer,
-+      statsForNerdsShowPerReply: DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowPerReply,
-+      statsForNerdsHiddenMetrics: DEFAULT_UNIFIED_SETTINGS.statsForNerdsHiddenMetrics,
-       sideThreadOpenTarget: DEFAULT_UNIFIED_SETTINGS.sideThreadOpenTarget,
-       toolCallVisibility: DEFAULT_UNIFIED_SETTINGS.toolCallVisibility,
-       screenReaderAnnouncements: DEFAULT_UNIFIED_SETTINGS.screenReaderAnnouncements,
-@@ -847,6 +860,143 @@ function AutoSettleDaysInput({
-   );
- }
- 
-+function StatsForNerdsSettingsSection() {
-+  const gt = useGT();
-+  const m = useMessages();
-+  const setting = useSearchableSetting();
-+  const settings = useScopedSettings();
-+  const updateSettings = useUpdateScopedSettings();
-+  const hidden = settings.statsForNerdsHiddenMetrics;
-+
-+  return (
-+    <SettingsSection id="stats-for-nerds-section" title={gt("Stats for nerds")}>
-+      <SettingsRow
-+        {...setting("stats-for-nerds")}
-+        description={gt(
-+          "Show turn speed, latency, tokens, cache and context below the composer and under replies. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+        )}
-+        resetAction={
-+          settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled ? (
-+            <SettingResetButton
-+              ariaLabel={gt("Reset stats for nerds to default")}
-+              onClick={() =>
-+                updateSettings({
-+                  statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
-+                })
-+              }
-+            />
-+          ) : null
-+        }
-+        control={
-+          <Switch
-+            checked={settings.statsForNerdsEnabled}
-+            onCheckedChange={(checked) =>
-+              updateSettings({ statsForNerdsEnabled: Boolean(checked) })
-+            }
-+            aria-label={gt("Stats for nerds")}
-+          />
-+        }
-+      />
-+      {settings.statsForNerdsEnabled && (
-+        <>
-+          <SettingsRow
-+            {...setting("stats-for-nerds-composer")}
-+            description={gt("The running turn live, and the previous turn, below the composer.")}
-+            resetAction={
-+              settings.statsForNerdsShowInComposer !==
-+              DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowInComposer ? (
-+                <SettingResetButton
-+                  ariaLabel={gt("Reset show stats under the composer to default")}
-+                  onClick={() =>
-+                    updateSettings({
-+                      statsForNerdsShowInComposer:
-+                        DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowInComposer,
-+                    })
-+                  }
-+                />
-+              ) : null
-+            }
-+            control={
-+              <Switch
-+                checked={settings.statsForNerdsShowInComposer}
-+                onCheckedChange={(checked) =>
-+                  updateSettings({ statsForNerdsShowInComposer: Boolean(checked) })
-+                }
-+                aria-label={gt("Show stats under the composer")}
-+              />
-+            }
-+          />
-+          <SettingsRow
-+            {...setting("stats-for-nerds-per-reply")}
-+            description={gt("One line under each reply with the turn that produced it.")}
-+            resetAction={
-+              settings.statsForNerdsShowPerReply !==
-+              DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowPerReply ? (
-+                <SettingResetButton
-+                  ariaLabel={gt("Reset show stats under each reply to default")}
-+                  onClick={() =>
-+                    updateSettings({
-+                      statsForNerdsShowPerReply: DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowPerReply,
-+                    })
-+                  }
-+                />
-+              ) : null
-+            }
-+            control={
-+              <Switch
-+                checked={settings.statsForNerdsShowPerReply}
-+                onCheckedChange={(checked) =>
-+                  updateSettings({ statsForNerdsShowPerReply: Boolean(checked) })
-+                }
-+                aria-label={gt("Show stats under each reply")}
-+              />
-+            }
-+          />
-+          {TURN_PERFORMANCE_METRIC_IDS.map((id) => {
-+            const { label, description } = TURN_PERFORMANCE_METRIC_LABELS[id];
-+            const visible = !hidden.includes(id);
-+            return (
-+              <SettingsRow
-+                key={id}
-+                id={`stats-for-nerds-metric-${id}`}
-+                title={m(label)}
-+                description={m(description)}
-+                resetAction={
-+                  visible ? null : (
-+                    <SettingResetButton
-+                      ariaLabel={gt("Reset {metric} to default", { metric: m(label) })}
-+                      onClick={() =>
-+                        updateSettings({
-+                          statsForNerdsHiddenMetrics: toggleHiddenMetric(hidden, id, true),
-+                        })
-+                      }
-+                    />
-+                  )
-+                }
-+                control={
-+                  <Switch
-+                    checked={visible}
-+                    onCheckedChange={(checked) =>
-+                      updateSettings({
-+                        statsForNerdsHiddenMetrics: toggleHiddenMetric(
-+                          hidden,
-+                          id,
-+                          Boolean(checked),
-+                        ),
-+                      })
-+                    }
-+                    aria-label={m(label)}
-+                  />
-+                }
-+              />
-+            );
-+          })}
-+        </>
-+      )}
-+    </SettingsSection>
-+  );
-+}
-+
- export function GeneralSettingsPanel() {
-   const gt = useGT();
-   const m = useMessages();
-@@ -1139,6 +1289,8 @@ export function GeneralSettingsPanel() {
-         ) : null}
-       </SettingsSection>
- 
-+      <StatsForNerdsSettingsSection />
-+
-       <SettingsSection id="display" title={gt("Display")}>
-         <SettingsRow
-           {...setting("language")}
-@@ -1278,33 +1430,6 @@ export function ChatSettingsPanel() {
-             />
-           }
-         />
--        <SettingsRow
--          {...setting("stats-for-nerds")}
--          description={gt(
--            "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
--          )}
--          resetAction={
--            settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled ? (
--              <SettingResetButton
--                ariaLabel={gt("Reset stats for nerds to default")}
--                onClick={() =>
--                  updateSettings({
--                    statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
--                  })
--                }
--              />
--            ) : null
--          }
--          control={
--            <Switch
--              checked={settings.statsForNerdsEnabled}
--              onCheckedChange={(checked) =>
--                updateSettings({ statsForNerdsEnabled: Boolean(checked) })
--              }
--              aria-label={gt("Stats for nerds")}
--            />
--          }
--        />
-         <SettingsRow
-           {...setting("send-shortcut")}
-           description={gt("Choose when Enter sends a prompt or inserts a new line")}
-diff --git a/apps/web/src/components/settings/settingsSearch.ts b/apps/web/src/components/settings/settingsSearch.ts
-index 4fc38779ca..9d48f8a94d 100644
---- a/apps/web/src/components/settings/settingsSearch.ts
-+++ b/apps/web/src/components/settings/settingsSearch.ts
-@@ -762,6 +762,28 @@ export const SETTINGS_SEARCH_ITEMS = [
-     to: "/settings/general",
-     searchTerms: [msg("notification sound alert completion input approval desktop")],
-   },
-+  {
-+    id: "stats-for-nerds",
-+    title: msg("Stats for nerds"),
-+    to: "/settings/general",
-+    searchTerms: [
-+      msg(
-+        "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
-+      ),
-+    ],
-+  },
-+  {
-+    id: "stats-for-nerds-composer",
-+    title: msg("Show stats under the composer"),
-+    to: "/settings/general",
-+    searchTerms: [msg("stats for nerds composer current previous turn live tokens per second")],
-+  },
-+  {
-+    id: "stats-for-nerds-per-reply",
-+    title: msg("Show stats under each reply"),
-+    to: "/settings/general",
-+    searchTerms: [msg("stats for nerds reply message footer history per turn performance")],
-+  },
-   {
-     id: "in-app-notifications",
-     title: msg("In-app notifications"),
-@@ -829,12 +851,6 @@ export const SETTINGS_SEARCH_ITEMS = [
-     to: "/settings/chat",
-     searchTerms: [msg("composer rich text tiptap bold italic markdown styled wysiwyg")],
-   },
--  {
--    id: "stats-for-nerds",
--    title: msg("Stats for nerds"),
--    to: "/settings/chat",
--    searchTerms: [msg("context tokens cache elapsed telemetry composer usage")],
--  },
-   {
-     id: "send-shortcut",
-     title: msg("Send shortcut"),
 diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
-index 087a421021..7ed56b8b24 100644
+index 087a421021..52c80c94e4 100644
 --- a/apps/web/src/i18n/translations/de.json
 +++ b/apps/web/src/i18n/translations/de.json
-@@ -12977,13 +12977,72 @@
-   "3ee30a50b70fffab": "Zurückgezogen von {by}: {reason}",
-   "92e129bf413a1220": "zurückgezogen",
-   "01ff459d89a7efb4": "Stats for nerds",
--  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
-   "3b779e627048205a": "Reset stats for nerds to default",
--  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
-   "f3e82ffb3e22c609": "Choose a project before compacting",
-   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+@@ -12985,5 +12985,54 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -2789,33 +2660,13 @@ index 087a421021..7ed56b8b24 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate",
-+  "159faaa8a113109b": "Show stats under the composer",
-+  "20c2e69c1dec192f": "Show stats under each reply",
-+  "f2d09db544ce6b03": "Stats for nerds metrics",
-+  "3e713673cde65a55": "Show turn speed, latency, tokens, cache and context below the composer and under replies. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "8fdc6e76f3b00541": "The running turn live, and the previous turn, below the composer.",
-+  "403dfad90eacd9cb": "Reset show stats under the composer to default",
-+  "f14a7559c4e07ff6": "One line under each reply with the turn that produced it.",
-+  "38d742b84dd88b73": "Reset show stats under each reply to default",
-+  "2796dafc8c101aff": "Reset {metric} to default",
-+  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
-+  "b1147f417895bc1f": "stats for nerds composer current previous turn live tokens per second",
-+  "ca8fbce4387a4e77": "stats for nerds reply message footer history per turn performance"
++  "bcab471e96704da1": "Response rate"
  }
 diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
-index c958bf348d..144993ce26 100644
+index c958bf348d..7d0c74efc5 100644
 --- a/apps/web/src/i18n/translations/en.json
 +++ b/apps/web/src/i18n/translations/en.json
-@@ -12986,13 +12986,72 @@
-   "3ee30a50b70fffab": "Withdrawn by {by}: {reason}",
-   "92e129bf413a1220": "withdrawn",
-   "01ff459d89a7efb4": "Stats for nerds",
--  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
-   "3b779e627048205a": "Reset stats for nerds to default",
--  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
-   "f3e82ffb3e22c609": "Choose a project before compacting",
-   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+@@ -12994,5 +12994,54 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -2869,33 +2720,13 @@ index c958bf348d..144993ce26 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate",
-+  "159faaa8a113109b": "Show stats under the composer",
-+  "20c2e69c1dec192f": "Show stats under each reply",
-+  "f2d09db544ce6b03": "Stats for nerds metrics",
-+  "3e713673cde65a55": "Show turn speed, latency, tokens, cache and context below the composer and under replies. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "8fdc6e76f3b00541": "The running turn live, and the previous turn, below the composer.",
-+  "403dfad90eacd9cb": "Reset show stats under the composer to default",
-+  "f14a7559c4e07ff6": "One line under each reply with the turn that produced it.",
-+  "38d742b84dd88b73": "Reset show stats under each reply to default",
-+  "2796dafc8c101aff": "Reset {metric} to default",
-+  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
-+  "b1147f417895bc1f": "stats for nerds composer current previous turn live tokens per second",
-+  "ca8fbce4387a4e77": "stats for nerds reply message footer history per turn performance"
++  "bcab471e96704da1": "Response rate"
  }
 diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
-index 497db0cdb5..f2cf21d176 100644
+index 497db0cdb5..37069f070d 100644
 --- a/apps/web/src/i18n/translations/es.json
 +++ b/apps/web/src/i18n/translations/es.json
-@@ -12972,13 +12972,72 @@
-   "3ee30a50b70fffab": "Retirada por {by}: {reason}",
-   "92e129bf413a1220": "retirada",
-   "01ff459d89a7efb4": "Stats for nerds",
--  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
-   "3b779e627048205a": "Reset stats for nerds to default",
--  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
-   "f3e82ffb3e22c609": "Choose a project before compacting",
-   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+@@ -12980,5 +12980,54 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -2949,33 +2780,13 @@ index 497db0cdb5..f2cf21d176 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate",
-+  "159faaa8a113109b": "Show stats under the composer",
-+  "20c2e69c1dec192f": "Show stats under each reply",
-+  "f2d09db544ce6b03": "Stats for nerds metrics",
-+  "3e713673cde65a55": "Show turn speed, latency, tokens, cache and context below the composer and under replies. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "8fdc6e76f3b00541": "The running turn live, and the previous turn, below the composer.",
-+  "403dfad90eacd9cb": "Reset show stats under the composer to default",
-+  "f14a7559c4e07ff6": "One line under each reply with the turn that produced it.",
-+  "38d742b84dd88b73": "Reset show stats under each reply to default",
-+  "2796dafc8c101aff": "Reset {metric} to default",
-+  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
-+  "b1147f417895bc1f": "stats for nerds composer current previous turn live tokens per second",
-+  "ca8fbce4387a4e77": "stats for nerds reply message footer history per turn performance"
++  "bcab471e96704da1": "Response rate"
  }
 diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
-index 273889e103..a6a53cd8b2 100644
+index 273889e103..465dc82606 100644
 --- a/apps/web/src/i18n/translations/fr.json
 +++ b/apps/web/src/i18n/translations/fr.json
-@@ -12977,13 +12977,72 @@
-   "3ee30a50b70fffab": "Retirée par {by} : {reason}",
-   "92e129bf413a1220": "retirée",
-   "01ff459d89a7efb4": "Stats for nerds",
--  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
-   "3b779e627048205a": "Reset stats for nerds to default",
--  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
-   "f3e82ffb3e22c609": "Choose a project before compacting",
-   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+@@ -12985,5 +12985,54 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -3029,33 +2840,13 @@ index 273889e103..a6a53cd8b2 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate",
-+  "159faaa8a113109b": "Show stats under the composer",
-+  "20c2e69c1dec192f": "Show stats under each reply",
-+  "f2d09db544ce6b03": "Stats for nerds metrics",
-+  "3e713673cde65a55": "Show turn speed, latency, tokens, cache and context below the composer and under replies. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "8fdc6e76f3b00541": "The running turn live, and the previous turn, below the composer.",
-+  "403dfad90eacd9cb": "Reset show stats under the composer to default",
-+  "f14a7559c4e07ff6": "One line under each reply with the turn that produced it.",
-+  "38d742b84dd88b73": "Reset show stats under each reply to default",
-+  "2796dafc8c101aff": "Reset {metric} to default",
-+  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
-+  "b1147f417895bc1f": "stats for nerds composer current previous turn live tokens per second",
-+  "ca8fbce4387a4e77": "stats for nerds reply message footer history per turn performance"
++  "bcab471e96704da1": "Response rate"
  }
 diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
-index cc3160c4d6..4fe0bef984 100644
+index cc3160c4d6..4466e1991b 100644
 --- a/apps/web/src/i18n/translations/ja.json
 +++ b/apps/web/src/i18n/translations/ja.json
-@@ -12913,13 +12913,72 @@
-   "3ee30a50b70fffab": "{by} が取り下げました: {reason}",
-   "92e129bf413a1220": "取り下げ済み",
-   "01ff459d89a7efb4": "Stats for nerds",
--  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
-   "3b779e627048205a": "Reset stats for nerds to default",
--  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
-   "f3e82ffb3e22c609": "Choose a project before compacting",
-   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+@@ -12921,5 +12921,54 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -3109,33 +2900,13 @@ index cc3160c4d6..4fe0bef984 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate",
-+  "159faaa8a113109b": "Show stats under the composer",
-+  "20c2e69c1dec192f": "Show stats under each reply",
-+  "f2d09db544ce6b03": "Stats for nerds metrics",
-+  "3e713673cde65a55": "Show turn speed, latency, tokens, cache and context below the composer and under replies. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "8fdc6e76f3b00541": "The running turn live, and the previous turn, below the composer.",
-+  "403dfad90eacd9cb": "Reset show stats under the composer to default",
-+  "f14a7559c4e07ff6": "One line under each reply with the turn that produced it.",
-+  "38d742b84dd88b73": "Reset show stats under each reply to default",
-+  "2796dafc8c101aff": "Reset {metric} to default",
-+  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
-+  "b1147f417895bc1f": "stats for nerds composer current previous turn live tokens per second",
-+  "ca8fbce4387a4e77": "stats for nerds reply message footer history per turn performance"
++  "bcab471e96704da1": "Response rate"
  }
 diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
-index a49d7ab8a4..ae862c70d2 100644
+index a49d7ab8a4..59a516f79a 100644
 --- a/apps/web/src/i18n/translations/ko.json
 +++ b/apps/web/src/i18n/translations/ko.json
-@@ -12910,13 +12910,72 @@
-   "3ee30a50b70fffab": "{by}에서 철회했습니다: {reason}",
-   "92e129bf413a1220": "철회됨",
-   "01ff459d89a7efb4": "Stats for nerds",
--  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
-   "3b779e627048205a": "Reset stats for nerds to default",
--  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
-   "f3e82ffb3e22c609": "Choose a project before compacting",
-   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+@@ -12918,5 +12918,54 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -3189,33 +2960,13 @@ index a49d7ab8a4..ae862c70d2 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate",
-+  "159faaa8a113109b": "Show stats under the composer",
-+  "20c2e69c1dec192f": "Show stats under each reply",
-+  "f2d09db544ce6b03": "Stats for nerds metrics",
-+  "3e713673cde65a55": "Show turn speed, latency, tokens, cache and context below the composer and under replies. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "8fdc6e76f3b00541": "The running turn live, and the previous turn, below the composer.",
-+  "403dfad90eacd9cb": "Reset show stats under the composer to default",
-+  "f14a7559c4e07ff6": "One line under each reply with the turn that produced it.",
-+  "38d742b84dd88b73": "Reset show stats under each reply to default",
-+  "2796dafc8c101aff": "Reset {metric} to default",
-+  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
-+  "b1147f417895bc1f": "stats for nerds composer current previous turn live tokens per second",
-+  "ca8fbce4387a4e77": "stats for nerds reply message footer history per turn performance"
++  "bcab471e96704da1": "Response rate"
  }
 diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
-index f9807ad230..91b81f20e9 100644
+index f9807ad230..6d3027d045 100644
 --- a/apps/web/src/i18n/translations/pt-BR.json
 +++ b/apps/web/src/i18n/translations/pt-BR.json
-@@ -12977,13 +12977,72 @@
-   "3ee30a50b70fffab": "Retirada por {by}: {reason}",
-   "92e129bf413a1220": "retirada",
-   "01ff459d89a7efb4": "Stats for nerds",
--  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
-   "3b779e627048205a": "Reset stats for nerds to default",
--  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
-   "f3e82ffb3e22c609": "Choose a project before compacting",
-   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+@@ -12985,5 +12985,54 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -3269,33 +3020,13 @@ index f9807ad230..91b81f20e9 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate",
-+  "159faaa8a113109b": "Show stats under the composer",
-+  "20c2e69c1dec192f": "Show stats under each reply",
-+  "f2d09db544ce6b03": "Stats for nerds metrics",
-+  "3e713673cde65a55": "Show turn speed, latency, tokens, cache and context below the composer and under replies. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "8fdc6e76f3b00541": "The running turn live, and the previous turn, below the composer.",
-+  "403dfad90eacd9cb": "Reset show stats under the composer to default",
-+  "f14a7559c4e07ff6": "One line under each reply with the turn that produced it.",
-+  "38d742b84dd88b73": "Reset show stats under each reply to default",
-+  "2796dafc8c101aff": "Reset {metric} to default",
-+  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
-+  "b1147f417895bc1f": "stats for nerds composer current previous turn live tokens per second",
-+  "ca8fbce4387a4e77": "stats for nerds reply message footer history per turn performance"
++  "bcab471e96704da1": "Response rate"
  }
 diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
-index 7a6c2d8617..118c60198b 100644
+index 7a6c2d8617..d1380f807a 100644
 --- a/apps/web/src/i18n/translations/ru.json
 +++ b/apps/web/src/i18n/translations/ru.json
-@@ -12977,13 +12977,72 @@
-   "3ee30a50b70fffab": "Отозван ({by}): {reason}",
-   "92e129bf413a1220": "отозван",
-   "01ff459d89a7efb4": "Stats for nerds",
--  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
-   "3b779e627048205a": "Reset stats for nerds to default",
--  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
-   "f3e82ffb3e22c609": "Choose a project before compacting",
-   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+@@ -12985,5 +12985,54 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -3349,33 +3080,13 @@ index 7a6c2d8617..118c60198b 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate",
-+  "159faaa8a113109b": "Show stats under the composer",
-+  "20c2e69c1dec192f": "Show stats under each reply",
-+  "f2d09db544ce6b03": "Stats for nerds metrics",
-+  "3e713673cde65a55": "Show turn speed, latency, tokens, cache and context below the composer and under replies. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "8fdc6e76f3b00541": "The running turn live, and the previous turn, below the composer.",
-+  "403dfad90eacd9cb": "Reset show stats under the composer to default",
-+  "f14a7559c4e07ff6": "One line under each reply with the turn that produced it.",
-+  "38d742b84dd88b73": "Reset show stats under each reply to default",
-+  "2796dafc8c101aff": "Reset {metric} to default",
-+  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
-+  "b1147f417895bc1f": "stats for nerds composer current previous turn live tokens per second",
-+  "ca8fbce4387a4e77": "stats for nerds reply message footer history per turn performance"
++  "bcab471e96704da1": "Response rate"
  }
 diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
-index 51f36f89f1..b7f29d1f27 100644
+index 51f36f89f1..54391039f8 100644
 --- a/apps/web/src/i18n/translations/sv.json
 +++ b/apps/web/src/i18n/translations/sv.json
-@@ -12984,13 +12984,72 @@
-   "3ee30a50b70fffab": "Återkallad av {by}: {reason}",
-   "92e129bf413a1220": "återkallad",
-   "01ff459d89a7efb4": "Stats for nerds",
--  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
-   "3b779e627048205a": "Reset stats for nerds to default",
--  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
-   "f3e82ffb3e22c609": "Choose a project before compacting",
-   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+@@ -12992,5 +12992,54 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -3429,33 +3140,13 @@ index 51f36f89f1..b7f29d1f27 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate",
-+  "159faaa8a113109b": "Show stats under the composer",
-+  "20c2e69c1dec192f": "Show stats under each reply",
-+  "f2d09db544ce6b03": "Stats for nerds metrics",
-+  "3e713673cde65a55": "Show turn speed, latency, tokens, cache and context below the composer and under replies. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "8fdc6e76f3b00541": "The running turn live, and the previous turn, below the composer.",
-+  "403dfad90eacd9cb": "Reset show stats under the composer to default",
-+  "f14a7559c4e07ff6": "One line under each reply with the turn that produced it.",
-+  "38d742b84dd88b73": "Reset show stats under each reply to default",
-+  "2796dafc8c101aff": "Reset {metric} to default",
-+  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
-+  "b1147f417895bc1f": "stats for nerds composer current previous turn live tokens per second",
-+  "ca8fbce4387a4e77": "stats for nerds reply message footer history per turn performance"
++  "bcab471e96704da1": "Response rate"
  }
 diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
-index c869bd1240..614f4b9e21 100644
+index c869bd1240..59ffc1574b 100644
 --- a/apps/web/src/i18n/translations/zh.json
 +++ b/apps/web/src/i18n/translations/zh.json
-@@ -12991,13 +12991,72 @@
-   "3ee30a50b70fffab": "已由 {by} 撤回：{reason}",
-   "92e129bf413a1220": "已撤回",
-   "01ff459d89a7efb4": "Stats for nerds",
--  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
-   "3b779e627048205a": "Reset stats for nerds to default",
--  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
-   "f3e82ffb3e22c609": "Choose a project before compacting",
-   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+@@ -12999,5 +12999,54 @@
    "d35c2d635ba3a859": "Compacting is unavailable right now",
    "9b2ef56a4b9002a4": "Resolve the pending approval first.",
    "61177a366aed53ed": "Answer the pending question first.",
@@ -3509,19 +3200,7 @@ index c869bd1240..614f4b9e21 100644
 +  "b7670f25c58e1951": "Speed mode",
 +  "f1a40a6668b555d8": "speed",
 +  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
-+  "bcab471e96704da1": "Response rate",
-+  "159faaa8a113109b": "Show stats under the composer",
-+  "20c2e69c1dec192f": "Show stats under each reply",
-+  "f2d09db544ce6b03": "Stats for nerds metrics",
-+  "3e713673cde65a55": "Show turn speed, latency, tokens, cache and context below the composer and under replies. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "8fdc6e76f3b00541": "The running turn live, and the previous turn, below the composer.",
-+  "403dfad90eacd9cb": "Reset show stats under the composer to default",
-+  "f14a7559c4e07ff6": "One line under each reply with the turn that produced it.",
-+  "38d742b84dd88b73": "Reset show stats under each reply to default",
-+  "2796dafc8c101aff": "Reset {metric} to default",
-+  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
-+  "b1147f417895bc1f": "stats for nerds composer current previous turn live tokens per second",
-+  "ca8fbce4387a4e77": "stats for nerds reply message footer history per turn performance"
++  "bcab471e96704da1": "Response rate"
  }
 diff --git a/apps/web/src/state/entities.ts b/apps/web/src/state/entities.ts
 index e2205c7c2d..91d7722987 100644

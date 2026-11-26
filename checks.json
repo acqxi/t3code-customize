@@ -19,10 +19,16 @@
     "packages/provider-core/src/server/TurnPerformance.test.ts",
     "apps/server/src/orchestration-v2/Adapters/ClaudeTurnPerformance.test.ts",
     "apps/server/src/orchestration-v2/Adapters/AcpAdapterV2.test.ts",
-    "apps/web/src/components/chat/TurnPerformance.logic.test.ts"
+    "apps/web/src/components/chat/TurnPerformance.logic.test.ts",
+    "apps/web/src/components/chat/statsForNerdsPlacement.test.ts",
+    "apps/web/src/components/chat/threadDetailsItems.test.ts",
+    "apps/web/src/components/settings/settingsSearch.test.ts",
+    "apps/web/src/components/chat/ThreadDetailsUsage.logic.test.ts",
+    "packages/provider-cursor/src/server/usageLimits.test.ts"
   ],
   "typecheck": [
     "apps/server",
+    "apps/desktop",
     "apps/web",
     "packages/contracts",
     "packages/client-runtime",

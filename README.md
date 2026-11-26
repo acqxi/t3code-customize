@@ -8,11 +8,11 @@ Unofficial. Not affiliated with T3 Tools. For T3 Code (Nightly, Beta or Release)
 
 ## What you get
 
-- **Usage meters** for your 5 hour and weekly limits, from the limits T3 already gets from your providers.
+- **Usage meters** for your 5 hour and weekly limits, from the limits T3 already gets from your providers. Every provider that reports limits is shown with its icon and accent color, the current thread's first; or only the current one, if you prefer.
 - **Context** used in the thread. Hover it for the window size, the auto-compaction threshold and a Compact now button.
 - **Tokens per second** for the last response, with turn time and token details on hover.
 - **Cache rate** for the last turn.
-- **Performance metrics**: time to first token and to first answer, live, average and peak tokens/s, token and cache usage, tool time and turn time, plus the provider, model, effort and speed of each turn. The composer shows the current and previous turn, and each reply keeps its own line. Estimated values show `≈` and unavailable ones `—`; which metrics exist depends on the provider. Codex, Claude Code and ACP agents such as Antigravity are timed from their streams. See [docs/performance-metrics.md](docs/performance-metrics.md).
+- **Performance metrics**: time to first token and to first answer, live, average and peak tokens/s, token and cache usage, tool time and turn time, plus the provider, model, effort and speed of each turn. Show them under each reply, under the composer (current and previous turn, on one line), in the Thread details panel, or any combination. Estimated values show `≈` and unavailable ones `—`; which metrics exist depends on the provider. Codex, Claude Code and ACP agents such as Antigravity are timed from their streams. See [docs/performance-metrics.md](docs/performance-metrics.md).
 - **Subscription switch** when you have more than one signed-in subscription that offers your model. If the current one is on pace to run out before its 5 hour or weekly window resets, a chip like **Opus 5.5 on Personal →** switches the thread to the same model on the one with the most room. It also points out a subscription whose weekly allowance resets within a day mostly unused. Hover it for the reasoning.
 
 The official app's native dependencies and public T3 Connect configuration are
@@ -91,14 +91,15 @@ are discovered automatically. For other paths, pass
 
 After the build succeeds, **quit T3 Code fully**. Open **T3 Code (Customized)**
 from the Windows Start menu, the Linux app launcher or Spotlight on macOS.
-Enable **Settings > General > Stats for nerds**.
+Enable **Settings > Appearance > Stats for nerds**.
 
 The customized app opens the normal T3 Code main screen; it does not show a
 separate setup wizard. Open Settings manually and search for **Stats for nerds**
 if you cannot find the switch. It is off by default. Once enabled, the stats
 appear below the chat composer and under each reply; which values are available
 depends on the provider and the conversation. The same settings section has a
-switch for each metric and for each place it appears.
+switch for each metric and for each place it appears. The customized app's
+window title ends with "(Customized)", so you can tell it from stock.
 
 The command wrapper lives in `~/.local/bin` on Linux, or
 `%LOCALAPPDATA%\t3code-customize\bin` on Windows. If it is not on PATH, add that
@@ -130,8 +131,8 @@ Your current T3 Code keeps working the whole time.
 
 ## How it works
 
-T3 Code is open source (MIT). This repo holds six feature patches and one script. The
-script:
+T3 Code is open source (MIT). This repo holds seven feature patches, one that marks the customized
+build's window title, and one script. The script:
 
 1. reads your installed application: its exact upstream commit and the public config T3 Connect needs,
 2. applies the patches to that commit and runs their tests,
