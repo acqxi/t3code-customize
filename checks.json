@@ -15,7 +15,11 @@
     "packages/provider-core/src/server/managedProvider.test.ts",
     "apps/server/src/provider/ClaudeCapabilitiesProbe.test.ts",
     "apps/web/src/lib/contextWindow.test.ts",
-    "apps/server/src/provider/codexUsageLimits.test.ts"
+    "apps/server/src/provider/codexUsageLimits.test.ts",
+    "packages/provider-core/src/server/TurnPerformance.test.ts",
+    "apps/server/src/orchestration-v2/Adapters/ClaudeTurnPerformance.test.ts",
+    "apps/server/src/orchestration-v2/Adapters/AcpAdapterV2.test.ts",
+    "apps/web/src/components/chat/TurnPerformance.logic.test.ts"
   ],
   "typecheck": [
     "apps/server",
@@ -25,6 +29,7 @@
     "packages/provider-core",
     "packages/provider-cursor",
     "packages/provider-grok",
-    "packages/provider-opencode"
+    "packages/provider-opencode",
+    "packages/provider-acp"
   ]
 }
