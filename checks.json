@@ -34,6 +34,8 @@
     "apps/desktop/src/settings/DesktopAppSettings.test.ts",
     "apps/desktop/src/app/DesktopApp.test.ts",
     "apps/web/src/components/settings/LocalHostBridge.logic.test.ts",
+    "apps/web/src/state/hostBridge.test.ts",
+    "apps/web/src/components/settings/environmentsMap.logic.test.ts",
     "apps/desktop/src/window/DesktopWindow.test.ts",
     "apps/desktop/src/wsl/DesktopWslRuntimeStatus.test.ts",
     "apps/web/src/components/settings/wslRuntimeStatus.logic.test.ts"

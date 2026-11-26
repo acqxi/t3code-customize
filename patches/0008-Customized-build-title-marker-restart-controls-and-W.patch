@@ -38,9 +38,9 @@ second while the runtime comes up and every 10 s otherwise. A failed
 start offers Retry, which re-runs the existing WSL reconcile, or points
 to Restart in wsl-only mode.
 ---
- apps/desktop/src/app/DesktopLifecycle.ts      |  33 +++-
- apps/desktop/src/app/DesktopRestart.test.ts   |  91 +++++++++++
- apps/desktop/src/app/DesktopRestart.ts        | 149 ++++++++++++++++++
+ apps/desktop/src/app/DesktopLifecycle.ts      |  34 +++-
+ apps/desktop/src/app/DesktopRestart.test.ts   |  99 ++++++++++++
+ apps/desktop/src/app/DesktopRestart.ts        | 142 +++++++++++++++++
  .../backend/DesktopBackendConfiguration.ts    |  13 ++
  .../src/backend/DesktopBackendManager.ts      |   2 +
  apps/desktop/src/ipc/DesktopIpcHandlers.ts    |  11 +-
@@ -59,23 +59,23 @@ to Restart in wsl-only mode.
  .../settings/EnvironmentsMapDetails.tsx       |  16 ++
  .../components/settings/RestartSettings.tsx   |  62 ++++++++
  .../components/settings/SettingsPanels.tsx    |   3 +
- .../components/settings/WslRuntimeStatus.tsx  | 147 +++++++++++++++++
+ .../components/settings/WslRuntimeStatus.tsx  | 147 ++++++++++++++++++
  .../src/components/settings/settingsSearch.ts |  20 +++
  .../settings/wslRuntimeStatus.logic.test.ts   |  92 +++++++++++
  .../settings/wslRuntimeStatus.logic.ts        |  56 +++++++
- apps/web/src/i18n/translations/de.json        |  26 ++-
- apps/web/src/i18n/translations/en.json        |  26 ++-
- apps/web/src/i18n/translations/es.json        |  26 ++-
- apps/web/src/i18n/translations/fr.json        |  26 ++-
- apps/web/src/i18n/translations/ja.json        |  26 ++-
- apps/web/src/i18n/translations/ko.json        |  26 ++-
- apps/web/src/i18n/translations/pt-BR.json     |  26 ++-
- apps/web/src/i18n/translations/ru.json        |  26 ++-
- apps/web/src/i18n/translations/sv.json        |  26 ++-
- apps/web/src/i18n/translations/zh.json        |  26 ++-
+ apps/web/src/i18n/translations/de.json        |  24 +++
+ apps/web/src/i18n/translations/en.json        |  24 +++
+ apps/web/src/i18n/translations/es.json        |  24 +++
+ apps/web/src/i18n/translations/fr.json        |  24 +++
+ apps/web/src/i18n/translations/ja.json        |  24 +++
+ apps/web/src/i18n/translations/ko.json        |  24 +++
+ apps/web/src/i18n/translations/pt-BR.json     |  24 +++
+ apps/web/src/i18n/translations/ru.json        |  24 +++
+ apps/web/src/i18n/translations/sv.json        |  24 +++
+ apps/web/src/i18n/translations/zh.json        |  24 +++
  apps/web/src/state/desktopWslRuntimeStatus.ts |  67 ++++++++
  packages/contracts/src/ipc.ts                 |  32 ++++
- 37 files changed, 1376 insertions(+), 35 deletions(-)
+ 37 files changed, 1368 insertions(+), 25 deletions(-)
  create mode 100644 apps/desktop/src/app/DesktopRestart.test.ts
  create mode 100644 apps/desktop/src/app/DesktopRestart.ts
  create mode 100644 apps/desktop/src/ipc/methods/restart.ts
@@ -88,14 +88,14 @@ to Restart in wsl-only mode.
  create mode 100644 apps/web/src/state/desktopWslRuntimeStatus.ts
 
 diff --git a/apps/desktop/src/app/DesktopLifecycle.ts b/apps/desktop/src/app/DesktopLifecycle.ts
-index 9568e72dde..4c7d510498 100644
+index 9568e72dde..110254d41a 100644
 --- a/apps/desktop/src/app/DesktopLifecycle.ts
 +++ b/apps/desktop/src/app/DesktopLifecycle.ts
 @@ -13,6 +13,7 @@ import type * as Electron from "electron";
  import * as HostProcess from "@t3tools/shared/HostProcess";
  
  import * as DesktopEnvironment from "./DesktopEnvironment.ts";
-+import { currentRelaunchCommand, spawnLauncher } from "./DesktopRestart.ts";
++import { currentRelaunchCommand } from "./DesktopRestart.ts";
  import { stopChildProcessesBeforeExit, stopZygotesBeforeExit } from "./DesktopExitChildren.ts";
  import { makeComponentLogger } from "./DesktopObservability.ts";
  import * as DesktopShutdown from "./DesktopShutdown.ts";
@@ -128,7 +128,7 @@ index 9568e72dde..4c7d510498 100644
      const electronApp = yield* ElectronApp.ElectronApp;
      const environment = yield* DesktopEnvironment.DesktopEnvironment;
      const state = yield* DesktopState.DesktopState;
-@@ -226,11 +233,33 @@ export const make = DesktopLifecycle.of({
+@@ -226,11 +233,34 @@ export const make = DesktopLifecycle.of({
      yield* Effect.gen(function* () {
        yield* Effect.yieldNow;
        yield* Ref.set(state.quitting, true);
@@ -156,7 +156,8 @@ index 9568e72dde..4c7d510498 100644
 +      if (launcher.kind === "launcher") {
 +        // The customization launcher waits for this process, then opens the current build.
 +        yield* logLifecycleInfo("relaunching through the customization launcher", { reason });
-+        yield* Effect.sync(() => spawnLauncher(launcher));
++        // Electron's own relauncher outlives this process; a child spawned here does not.
++        yield* electronApp.relaunch({ execPath: launcher.command, args: [...launcher.args] });
 +        yield* electronApp.exit(0);
 +        return;
 +      }
@@ -165,10 +166,10 @@ index 9568e72dde..4c7d510498 100644
        const args = yield* HostProcess.Arguments;
 diff --git a/apps/desktop/src/app/DesktopRestart.test.ts b/apps/desktop/src/app/DesktopRestart.test.ts
 new file mode 100644
-index 0000000000..358283626a
+index 0000000000..79c7924fae
 --- /dev/null
 +++ b/apps/desktop/src/app/DesktopRestart.test.ts
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,99 @@
 +import { assert, describe, it } from "@effect/vitest";
 +
 +import {
@@ -192,7 +193,7 @@ index 0000000000..358283626a
 +  it("relaunches through the customization launcher, which waits for this process", () => {
 +    assert.deepStrictEqual(resolve(), {
 +      kind: "launcher",
-+      command: "powershell.exe",
++      command: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
 +      args: [
 +        "-NoProfile",
 +        "-NonInteractive",
@@ -206,6 +207,14 @@ index 0000000000..358283626a
 +        "4242",
 +      ],
 +    });
++  });
++
++  it("uses an absolute PowerShell path under SystemRoot, since Electron starts it directly", () => {
++    const launcher = resolve({ env: { [CUSTOMIZE_RELAUNCH_ENV]: script, SystemRoot: "D:\\Win" } });
++    assert.strictEqual(
++      launcher.kind === "launcher" ? launcher.command : undefined,
++      "D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
++    );
 +  });
 +
 +  it("falls back to Electron's relaunch without the launcher variable", () => {
@@ -262,10 +271,10 @@ index 0000000000..358283626a
 +});
 diff --git a/apps/desktop/src/app/DesktopRestart.ts b/apps/desktop/src/app/DesktopRestart.ts
 new file mode 100644
-index 0000000000..2111b93472
+index 0000000000..74b5b4b7c1
 --- /dev/null
 +++ b/apps/desktop/src/app/DesktopRestart.ts
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,142 @@
 +// @effect-diagnostics nodeBuiltinImport:off - Detached launcher spawn and synchronous tree kills on the way out.
 +import * as NodeChildProcess from "node:child_process";
 +import * as NodeFS from "node:fs";
@@ -288,9 +297,11 @@ index 0000000000..2111b93472
 +  if (input.platform !== "win32" || !script || !input.fileExists(script)) {
 +    return { kind: "electron" };
 +  }
++  // Electron's relauncher starts this path directly, so it must be absolute.
++  const systemRoot = input.env.SystemRoot?.trim() || input.env.SYSTEMROOT?.trim() || "C:\\Windows";
 +  return {
 +    kind: "launcher",
-+    command: "powershell.exe",
++    command: `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
 +    args: [
 +      "-NoProfile",
 +      "-NonInteractive",
@@ -313,15 +324,6 @@ index 0000000000..2111b93472
 +    pid: process.pid,
 +    fileExists: (path) => NodeFS.existsSync(path),
 +  });
-+
-+/** The launcher waits for this process to exit, so it must outlive it. */
-+export function spawnLauncher(command: Extract<RelaunchCommand, { kind: "launcher" }>): void {
-+  NodeChildProcess.spawn(command.command, [...command.args], {
-+    detached: true,
-+    stdio: "ignore",
-+    windowsHide: true,
-+  }).unref();
-+}
 +
 +const isAlive = (pid: number): boolean => {
 +  try {
@@ -1387,10 +1389,10 @@ index 0000000000..0c62471597
 +  };
 +}
 diff --git a/apps/web/src/components/settings/settingsSearch.ts b/apps/web/src/components/settings/settingsSearch.ts
-index 10f5a2b7ff..2febc7bb41 100644
+index b3232e3f13..0a7cf8f930 100644
 --- a/apps/web/src/components/settings/settingsSearch.ts
 +++ b/apps/web/src/components/settings/settingsSearch.ts
-@@ -1005,6 +1005,26 @@ export const SETTINGS_SEARCH_ITEMS = [
+@@ -1016,6 +1016,26 @@ export const SETTINGS_SEARCH_ITEMS = [
      scope: "project-defaults",
      searchTerms: [msg("generated thread titles prompt custom style naming rename regenerate")],
    },
@@ -1578,15 +1580,13 @@ index 0000000000..5a33a68a50
 +  return backendId !== null && status?.instanceId === backendId;
 +}
 diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
-index a302abfdde..7ee5415654 100644
+index fb061706a6..eb6445200d 100644
 --- a/apps/web/src/i18n/translations/de.json
 +++ b/apps/web/src/i18n/translations/de.json
-@@ -13088,5 +13088,29 @@
-   "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
+@@ -13084,6 +13084,30 @@
    "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
    "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
--  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
 +  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
 +  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
 +  "91486e2aef3c35a6": "Restart",
@@ -1610,18 +1610,18 @@ index a302abfdde..7ee5415654 100644
 +  "d25c50db08889926": "Restart T3 Code",
 +  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
 +  "c3e2bb1210758027": "Hard restart",
-+  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process"
- }
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
-index 794caa14cb..374e56d0ef 100644
+index 1b5e27d442..15f72e9952 100644
 --- a/apps/web/src/i18n/translations/en.json
 +++ b/apps/web/src/i18n/translations/en.json
-@@ -13097,5 +13097,29 @@
-   "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
+@@ -13093,6 +13093,30 @@
    "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
    "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
--  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
 +  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
 +  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
 +  "91486e2aef3c35a6": "Restart",
@@ -1645,18 +1645,18 @@ index 794caa14cb..374e56d0ef 100644
 +  "d25c50db08889926": "Restart T3 Code",
 +  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
 +  "c3e2bb1210758027": "Hard restart",
-+  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process"
- }
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
-index b99facf4d8..8aabcc1a00 100644
+index a779e60abf..afeb72a7cf 100644
 --- a/apps/web/src/i18n/translations/es.json
 +++ b/apps/web/src/i18n/translations/es.json
-@@ -13083,5 +13083,29 @@
-   "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
+@@ -13079,6 +13079,30 @@
    "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
    "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
--  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
 +  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
 +  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
 +  "91486e2aef3c35a6": "Restart",
@@ -1680,18 +1680,18 @@ index b99facf4d8..8aabcc1a00 100644
 +  "d25c50db08889926": "Restart T3 Code",
 +  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
 +  "c3e2bb1210758027": "Hard restart",
-+  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process"
- }
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
-index 177b035dd1..9596b3fc7e 100644
+index e9ec2b6622..819bdf649f 100644
 --- a/apps/web/src/i18n/translations/fr.json
 +++ b/apps/web/src/i18n/translations/fr.json
-@@ -13088,5 +13088,29 @@
-   "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
+@@ -13084,6 +13084,30 @@
    "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
    "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
--  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
 +  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
 +  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
 +  "91486e2aef3c35a6": "Restart",
@@ -1715,18 +1715,18 @@ index 177b035dd1..9596b3fc7e 100644
 +  "d25c50db08889926": "Restart T3 Code",
 +  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
 +  "c3e2bb1210758027": "Hard restart",
-+  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process"
- }
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
-index 77ef50b83e..277c20541b 100644
+index fc854997ed..eded30efc6 100644
 --- a/apps/web/src/i18n/translations/ja.json
 +++ b/apps/web/src/i18n/translations/ja.json
-@@ -13024,5 +13024,29 @@
-   "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
+@@ -13020,6 +13020,30 @@
    "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
    "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
--  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
 +  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
 +  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
 +  "91486e2aef3c35a6": "Restart",
@@ -1750,18 +1750,18 @@ index 77ef50b83e..277c20541b 100644
 +  "d25c50db08889926": "Restart T3 Code",
 +  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
 +  "c3e2bb1210758027": "Hard restart",
-+  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process"
- }
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
-index ceaba31dd5..a267cfe1e6 100644
+index 3317693330..33a3acf777 100644
 --- a/apps/web/src/i18n/translations/ko.json
 +++ b/apps/web/src/i18n/translations/ko.json
-@@ -13021,5 +13021,29 @@
-   "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
+@@ -13017,6 +13017,30 @@
    "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
    "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
--  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
 +  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
 +  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
 +  "91486e2aef3c35a6": "Restart",
@@ -1785,18 +1785,18 @@ index ceaba31dd5..a267cfe1e6 100644
 +  "d25c50db08889926": "Restart T3 Code",
 +  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
 +  "c3e2bb1210758027": "Hard restart",
-+  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process"
- }
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
-index b3dedabf64..fe013065f4 100644
+index f82279ee5d..f58e005721 100644
 --- a/apps/web/src/i18n/translations/pt-BR.json
 +++ b/apps/web/src/i18n/translations/pt-BR.json
-@@ -13088,5 +13088,29 @@
-   "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
+@@ -13084,6 +13084,30 @@
    "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
    "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
--  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
 +  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
 +  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
 +  "91486e2aef3c35a6": "Restart",
@@ -1820,18 +1820,18 @@ index b3dedabf64..fe013065f4 100644
 +  "d25c50db08889926": "Restart T3 Code",
 +  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
 +  "c3e2bb1210758027": "Hard restart",
-+  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process"
- }
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
-index 1fe3d45f30..8a7f6b84f4 100644
+index a795afc55f..36d37fa1a0 100644
 --- a/apps/web/src/i18n/translations/ru.json
 +++ b/apps/web/src/i18n/translations/ru.json
-@@ -13088,5 +13088,29 @@
-   "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
+@@ -13084,6 +13084,30 @@
    "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
    "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
--  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
 +  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
 +  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
 +  "91486e2aef3c35a6": "Restart",
@@ -1855,18 +1855,18 @@ index 1fe3d45f30..8a7f6b84f4 100644
 +  "d25c50db08889926": "Restart T3 Code",
 +  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
 +  "c3e2bb1210758027": "Hard restart",
-+  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process"
- }
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
-index 6398ff5e2b..68a00beb4e 100644
+index 9b8ee838ff..092258b886 100644
 --- a/apps/web/src/i18n/translations/sv.json
 +++ b/apps/web/src/i18n/translations/sv.json
-@@ -13095,5 +13095,29 @@
-   "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
+@@ -13091,6 +13091,30 @@
    "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
    "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
--  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
 +  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
 +  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
 +  "91486e2aef3c35a6": "Restart",
@@ -1890,18 +1890,18 @@ index 6398ff5e2b..68a00beb4e 100644
 +  "d25c50db08889926": "Restart T3 Code",
 +  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
 +  "c3e2bb1210758027": "Hard restart",
-+  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process"
- }
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
-index 7585847d7b..e5b471a7f1 100644
+index f736b02c65..b6d30a3d45 100644
 --- a/apps/web/src/i18n/translations/zh.json
 +++ b/apps/web/src/i18n/translations/zh.json
-@@ -13102,5 +13102,29 @@
-   "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
+@@ -13098,6 +13098,30 @@
    "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
    "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
--  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
 +  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
 +  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
 +  "91486e2aef3c35a6": "Restart",
@@ -1925,8 +1925,10 @@ index 7585847d7b..e5b471a7f1 100644
 +  "d25c50db08889926": "Restart T3 Code",
 +  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
 +  "c3e2bb1210758027": "Hard restart",
-+  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process"
- }
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/state/desktopWslRuntimeStatus.ts b/apps/web/src/state/desktopWslRuntimeStatus.ts
 new file mode 100644
 index 0000000000..6ee542c597

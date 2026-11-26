@@ -14,7 +14,7 @@
 - **快取命中率**：上一輪的快取命中率。
 - **效能指標**：首個 token 時間、首段回答時間，即時、平均與峰值 tokens/s，token 與快取用量，工具耗時與整輪耗時，以及每一輪的模型供應商、模型、推理強度與速度模式。可以顯示在每則回覆下方、輸入框下方（本輪與上一輪，排成一行）、Thread details 側欄，或任意組合。估計值標示 `≈`，無法取得的值顯示 `—`；有哪些指標取決於模型供應商。Codex、Claude Code 與 Antigravity 等 ACP 代理都依串流內容計時。定義見 [docs/performance-metrics.md](docs/performance-metrics.md)。
 - **訂閱切換**：同一個模型有多個已登入的訂閱可用時，若目前的訂閱照這個速度會在 5 小時或每週額度重置前用完，會出現像 **Opus 5.5 on Personal →** 的標籤，點一下就把對話串切到額度最充裕的那個訂閱上的同一個模型。每週額度將在一天內重置、卻還剩很多的訂閱也會提示。滑鼠移上去可以看到判斷依據。
-- **WSL 主機橋接**（使用 WSL 後端的 Windows Desktop）：WSL 中的代理可以透過 T3 原生的 Linked environments，把需要 Windows 的工作（瀏覽器、Computer Use、GUI 程式或 PowerShell）交給同一台電腦上的 Windows 後端。Desktop 經由 `wsl.exe` 的 stdio 轉送，Windows 後端不必開放網路存取。在 **Settings > Connections > Local host bridge** 開啟。說明見 [docs/wsl-host-bridge.md](docs/wsl-host-bridge.md)。
+- **WSL 主機橋接**（使用 WSL 後端的 Windows Desktop）：WSL 中的代理可以透過 T3 原生的 Linked environments，把需要 Windows 的工作（瀏覽器、Computer Use、GUI 程式或 PowerShell）交給同一台電腦上的 Windows 後端。Desktop 經由 `wsl.exe` 的 stdio 轉送，Windows 後端不必開放網路存取。可在 Environments 地圖上的 **Host bridge** 連線，或在 **Settings > Connections > Local host bridge** 開啟。說明見 [docs/wsl-host-bridge.md](docs/wsl-host-bridge.md)。
 
 客製版沿用官方 App 的原生相依套件與 T3 Connect 公開設定。Windows 簽章變動與平台限制說明如下。
 

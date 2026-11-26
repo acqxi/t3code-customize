@@ -10,9 +10,10 @@ Content-Transfer-Encoding: 8bit
 - Settings: Stats for nerds moves from Chat to Appearance, with its
   master switch, a "Where stats show" checkbox menu (under each reply,
   under the composer, in thread details; each backed by its own setting,
-  the last by the thread details item), the usage limits scope, a switch
-  per metric (statsForNerdsHiddenMetrics), reset buttons and search
-  entries.
+  the last by the thread details item), the usage limits scope, and one
+  "Metrics" checkbox menu for every metric by full name and short label
+  (statsForNerdsHiddenMetrics), with reset buttons, one-line descriptions
+  and search entries (a metric's name finds the Metrics row).
 - Thread details: a "Turn performance" item (id "performance", off by
   default, offered while Stats for nerds is on) with the current or last
   turn's metrics in the same compact grid as the composer popover.
@@ -29,49 +30,53 @@ Content-Transfer-Encoding: 8bit
   old its newest reading is.
 - New catalog keys in every web locale.
 ---
- apps/web/src/components/ChatView.tsx          |  38 +-
- .../chat/ComposerStats.logic.test.ts          | 234 ++++++++++++
- .../components/chat/ComposerStats.logic.ts    | 160 +++++++-
- .../web/src/components/chat/ComposerStats.tsx | 352 +++++++++++++-----
+ apps/web/src/components/ChatView.tsx          |  51 ++-
+ .../chat/ComposerStats.logic.test.ts          | 408 ++++++++++++++++++
+ .../components/chat/ComposerStats.logic.ts    | 292 ++++++++++++-
+ .../web/src/components/chat/ComposerStats.tsx | 355 ++++++++++-----
  .../chat/ThreadDetailsItemsMenu.tsx           |   5 +-
  .../components/chat/ThreadDetailsPanel.tsx    |  10 +
- .../components/chat/ThreadDetailsUsage.tsx    | 225 +++++++++--
+ .../chat/ThreadDetailsUsage.logic.test.ts     |  38 ++
+ .../chat/ThreadDetailsUsage.logic.ts          |  36 ++
+ .../components/chat/ThreadDetailsUsage.tsx    | 239 ++++++++--
  .../src/components/chat/TurnPerformance.tsx   |  56 +++
  .../chat/statsForNerdsPlacement.test.ts       |  72 ++++
  .../components/chat/statsForNerdsPlacement.ts |  82 ++++
  .../chat/threadDetailsItems.test.ts           |  12 +
  .../src/components/chat/threadDetailsItems.ts |   6 +
  .../settings/AppearanceSettingsPanel.tsx      |   3 +
- .../components/settings/SettingsPanels.tsx    |  46 +--
- .../settings/StatsForNerdsSettings.tsx        | 310 +++++++++++++++
+ .../components/settings/SettingsPanels.tsx    |  46 +-
+ .../settings/StatsForNerdsSettings.tsx        | 337 +++++++++++++++
  .../settings/ThreadDetailsItemsRow.tsx        |  11 +-
- .../src/components/settings/settingsSearch.ts |  42 ++-
- apps/web/src/i18n/translations/de.json        |  37 +-
- apps/web/src/i18n/translations/en.json        |  37 +-
- apps/web/src/i18n/translations/es.json        |  37 +-
- apps/web/src/i18n/translations/fr.json        |  37 +-
- apps/web/src/i18n/translations/ja.json        |  37 +-
- apps/web/src/i18n/translations/ko.json        |  37 +-
- apps/web/src/i18n/translations/pt-BR.json     |  37 +-
- apps/web/src/i18n/translations/ru.json        |  37 +-
- apps/web/src/i18n/translations/sv.json        |  37 +-
- apps/web/src/i18n/translations/zh.json        |  37 +-
+ .../settings/settingsSearch.test.ts           |  10 +
+ .../src/components/settings/settingsSearch.ts |  53 ++-
+ apps/web/src/i18n/translations/de.json        |  41 +-
+ apps/web/src/i18n/translations/en.json        |  41 +-
+ apps/web/src/i18n/translations/es.json        |  41 +-
+ apps/web/src/i18n/translations/fr.json        |  41 +-
+ apps/web/src/i18n/translations/ja.json        |  41 +-
+ apps/web/src/i18n/translations/ko.json        |  41 +-
+ apps/web/src/i18n/translations/pt-BR.json     |  41 +-
+ apps/web/src/i18n/translations/ru.json        |  41 +-
+ apps/web/src/i18n/translations/sv.json        |  41 +-
+ apps/web/src/i18n/translations/zh.json        |  41 +-
  packages/contracts/src/settings.ts            |  14 +-
- 28 files changed, 1828 insertions(+), 220 deletions(-)
+ 31 files changed, 2324 insertions(+), 222 deletions(-)
  create mode 100644 apps/web/src/components/chat/statsForNerdsPlacement.test.ts
  create mode 100644 apps/web/src/components/chat/statsForNerdsPlacement.ts
  create mode 100644 apps/web/src/components/settings/StatsForNerdsSettings.tsx
 
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index 30d5fa25c6..01f36a6a36 100644
+index 30d5fa25c6..9f6366e3b3 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
-@@ -358,7 +358,12 @@ import { useProactivePanels } from "../hooks/useProactivePanels";
+@@ -358,7 +358,13 @@ import { useProactivePanels } from "../hooks/useProactivePanels";
  import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEntries";
  import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
  import { ComposerStats } from "./chat/ComposerStats";
 -import { selectComposerStatsTurns, selectRecordedCompactions } from "./chat/ComposerStats.logic";
 +import {
++  lastModelsByProviderInstance,
 +  selectComposerStatsTurns,
 +  selectRecordedCompactions,
 +  selectUsageLimitProviders,
@@ -80,7 +85,24 @@ index 30d5fa25c6..01f36a6a36 100644
  import {
    ComposerTurnPerformance,
    TurnPerformanceTimelineCtx,
-@@ -1612,7 +1617,6 @@ export default function ChatView(props: ChatViewProps) {
+@@ -1468,6 +1474,16 @@ export default function ChatView(props: ChatViewProps) {
+       composerModelSelectionApplies ? composerSelectedModelSelection : null,
+       activeThread?.modelSelection,
+     ].find((selection) => selection?.instanceId === activeProviderInstanceId)?.model ?? null;
++  // Usage limits show each provider's pools for the model it runs (or last ran) in this thread.
++  const threadUsageModels = (() => {
++    const models = new Map(
++      serverProjection === null ? [] : lastModelsByProviderInstance(serverProjection),
++    );
++    if (activeProviderInstanceId !== null && activeUsageModel !== null) {
++      models.set(activeProviderInstanceId, activeUsageModel);
++    }
++    return models;
++  })();
+   const conversationProviderStatus =
+     providerStatuses.find((status) => status.instanceId === activeRuntime?.providerInstanceId) ??
+     activeProviderStatus;
+@@ -1612,7 +1628,6 @@ export default function ChatView(props: ChatViewProps) {
      activeThreadLiveTokenUsage,
      activeProviderThread,
    );
@@ -88,7 +110,7 @@ index 30d5fa25c6..01f36a6a36 100644
    // The model the composer shows, so the switch keeps it while changing subscription.
    const subscriptionSwitchDraft = useComposerDraftModelState(composerDraftTarget);
    const { selectedModel: subscriptionSwitchModel } = deriveEffectiveComposerModelState({
-@@ -1625,13 +1629,18 @@ export default function ChatView(props: ChatViewProps) {
+@@ -1625,13 +1640,19 @@ export default function ChatView(props: ChatViewProps) {
      projectModelSelection: activeProjectDefaultModelSelection,
      settings,
    });
@@ -108,11 +130,12 @@ index 30d5fa25c6..01f36a6a36 100644
 +      ),
 +      activeProviderInstanceId,
 +      settings.statsForNerdsUsageLimitsScope,
++      threadUsageModels,
 +    );
      if (!serverProjection)
        return {
          turn: null,
-@@ -1684,11 +1693,13 @@ export default function ChatView(props: ChatViewProps) {
+@@ -1684,11 +1705,13 @@ export default function ChatView(props: ChatViewProps) {
      const { current, previous } = selectComposerPerformanceTurns(
        selectComposerStatsTurns(serverProjection),
      );
@@ -131,7 +154,7 @@ index 30d5fa25c6..01f36a6a36 100644
        : null;
      const timeline: TurnPerformanceTimelineValue | null = settings.statsForNerdsShowPerReply
        ? {
-@@ -1702,7 +1713,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -1702,7 +1725,7 @@ export default function ChatView(props: ChatViewProps) {
            hiddenMetrics,
          }
        : null;
@@ -140,7 +163,12 @@ index 30d5fa25c6..01f36a6a36 100644
    })();
    const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection);
    const activeWorkStartedAt =
-@@ -4352,6 +4363,7 @@ export default function ChatView(props: ChatViewProps) {
+@@ -4348,10 +4371,12 @@ export default function ChatView(props: ChatViewProps) {
+                   usage={{
+                     providerInstanceId: activeProviderInstanceId,
+                     model: activeUsageModel,
++                    models: threadUsageModels,
+                     providers: providerStatuses,
                      sources: serverConfig?.usageLimitSources ?? EMPTY_USAGE_LIMIT_SOURCES,
                      contextWindow: activeContextWindow,
                    }}
@@ -149,7 +177,7 @@ index 30d5fa25c6..01f36a6a36 100644
  
                  <PullRequestThreadDialogHost
 diff --git a/apps/web/src/components/chat/ComposerStats.logic.test.ts b/apps/web/src/components/chat/ComposerStats.logic.test.ts
-index 79b01fd80e..d39366857c 100644
+index 79b01fd80e..8edc6d935d 100644
 --- a/apps/web/src/components/chat/ComposerStats.logic.test.ts
 +++ b/apps/web/src/components/chat/ComposerStats.logic.test.ts
 @@ -1,6 +1,9 @@
@@ -176,16 +204,20 @@ index 79b01fd80e..d39366857c 100644
    composerLimitsFreshness,
    deriveContextCompaction,
    deriveResponseRate,
-@@ -22,6 +31,8 @@ import {
+@@ -22,6 +31,12 @@ import {
    selectComposerLimitWindows,
    selectComposerStatsTurns,
    selectRecordedCompactions,
 +  selectTightestLimitWindow,
 +  selectUsageLimitProviders,
++  lastModelsByProviderInstance,
++  limitWindowModelScope,
++  shortLimitLabel,
++  type UsageLimitProviderEntry,
  } from "./ComposerStats.logic";
  
  const start = DateTime.makeUnsafe("2026-10-03T10:00:00Z");
-@@ -533,3 +544,226 @@ describe("context compaction pressure", () => {
+@@ -533,3 +548,396 @@ describe("context compaction pressure", () => {
      ).toMatchObject({ remainingTokens: 220_000, pressurePercentage: 90 });
    });
  });
@@ -324,6 +356,176 @@ index 79b01fd80e..d39366857c 100644
 +  });
 +});
 +
++describe("usage limits for the thread's models", () => {
++  const now = Date.parse("2026-11-27T12:00:00.000Z");
++  const checkedAt = new Date(now - 60_000).toISOString();
++  const longAgo = new Date(now - 2 * 60 * 60_000).toISOString();
++  const window = (
++    id: string,
++    kind: ServerProviderUsageWindow["kind"],
++    label: string,
++    usedPercent: number,
++    overrides: Partial<ServerProviderUsageWindow> = {},
++  ): ServerProviderUsageWindow => ({
++    id,
++    kind,
++    label,
++    usedPercent,
++    windowDurationMins: kind === "session" ? 300 : 10_080,
++    ...overrides,
++  });
++  const provider = (
++    instanceId: string,
++    driver: string,
++    windows: ReadonlyArray<ServerProviderUsageWindow>,
++  ) =>
++    ({
++      instanceId: ProviderInstanceId.make(instanceId),
++      driver: ProviderDriverKind.make(driver),
++      enabled: true,
++      installed: true,
++      usageLimits: { checkedAt, windows: [...windows] },
++    }) as unknown as ServerProvider;
++  // The reported case: Claude's Fable pool has no reading, and of Antigravity's pools only the
++  // Gemini ones cover gemini-4-neon.
++  const claude = provider("claude", "claudeAgent", [
++    window("seven_day", "weekly", "Weekly", 49),
++    window("seven_day_fable", "weekly", "Weekly · Fable", 0, { checkedAt: longAgo }),
++  ]);
++  const codex = provider("codex", "codex", [window("seven_day", "weekly", "Weekly", 51)]);
++  const antigravity = provider("antigravity", "antigravity", [
++    window("3p-5h", "session", "Claude & GPT (shared) · 5-hour", 20),
++    window("gemini-5h", "session", "Gemini · 5-hour", 10, { checkedAt: longAgo }),
++    window("3p-weekly", "weekly", "Claude & GPT (shared) · Weekly", 30),
++    window("gemini-weekly", "weekly", "Gemini · Weekly", 40),
++    window("gemini-argon-weekly", "weekly", "Gemini Argon · Weekly", 95),
++  ]);
++  const shown = (entries: ReadonlyArray<{ entry: UsageLimitProviderEntry }>) =>
++    entries.map(({ entry }) => [entry.provider.instanceId, entry.limits.windows.map((w) => w.id)]);
++  const antigravityThread = new Map([[ProviderInstanceId.make("antigravity"), "gemini-4-neon"]]);
++
++  it("shows only the pools covering the thread's model, with a reading", () => {
++    const entries = selectUsageLimitProviders(
++      [claude, codex, antigravity],
++      ProviderInstanceId.make("antigravity"),
++      "all",
++      antigravityThread,
++    );
++    expect(shown(composerLimitChips(entries, now))).toEqual([
++      ["antigravity", ["gemini-weekly"]],
++      ["claude", ["seven_day"]],
++      ["codex", ["seven_day"]],
++    ]);
++  });
++
++  it("picks the tightest chip from the same pools", () => {
++    const entries = selectUsageLimitProviders(
++      [antigravity, codex],
++      ProviderInstanceId.make("antigravity"),
++      "all",
++      antigravityThread,
++    );
++    // Argon's 95% does not meter gemini-4-neon, so it never becomes the chip.
++    expect(
++      composerLimitChips(entries, now).map(({ chips }) => chips.map((chip) => chip.window.id)),
++    ).toEqual([["gemini-weekly"], ["seven_day"]]);
++  });
++
++  it("drops a provider whose windows have no reading, heading and all", () => {
++    const stale = provider("antigravity", "antigravity", [
++      window("3p-5h", "session", "Claude & GPT (shared) · 5-hour", 0, { checkedAt: longAgo }),
++      window("gemini-5h", "session", "Gemini · 5-hour", 0, { checkedAt: longAgo }),
++      window("3p-weekly", "weekly", "Claude & GPT (shared) · Weekly", 0, { checkedAt: longAgo }),
++      window("gemini-weekly", "weekly", "Gemini · Weekly", 0, { checkedAt: longAgo }),
++    ]);
++    const entries = selectUsageLimitProviders(
++      [claude, codex, stale],
++      ProviderInstanceId.make("antigravity"),
++      "all",
++      antigravityThread,
++    );
++    expect(shown(composerLimitChips(entries, now))).toEqual([
++      ["claude", ["seven_day"]],
++      ["codex", ["seven_day"]],
++    ]);
++  });
++
++  it("keeps a model's pool when the thread ran that model", () => {
++    const fresh = provider("claude", "claudeAgent", [
++      window("seven_day", "weekly", "Weekly", 49),
++      window("seven_day_fable", "weekly", "Weekly · Fable", 12),
++    ]);
++    const ids = (model: string | null) =>
++      selectUsageLimitProviders(
++        [fresh],
++        ProviderInstanceId.make("claude"),
++        "all",
++        model === null ? new Map() : new Map([[ProviderInstanceId.make("claude"), model]]),
++      )[0]!.limits.windows.map((w) => w.id);
++    expect(ids("claude-fable-5-2")).toEqual(["seven_day", "seven_day_fable"]);
++    expect(ids("claude-opus-5-5")).toEqual(["seven_day"]);
++    expect(ids(null)).toEqual(["seven_day"]);
++  });
++
++  it("reads pool membership from model ids, Claude's names and Antigravity's buckets", () => {
++    const covers = (driver: string, w: ServerProviderUsageWindow, model: string) =>
++      limitWindowModelScope(ProviderDriverKind.make(driver), w)?.(model) ?? "general";
++    const listed = window("pool", "weekly", "Pool", 1, { modelIds: ["gpt-5.5"] });
++    expect(covers("codex", listed, "gpt-5.5")).toBe(true);
++    expect(covers("codex", listed, "hub/gpt-5.5")).toBe(true);
++    expect(covers("codex", listed, "gpt-5.5-mini")).toBe(false);
++    expect(covers("antigravity", window("3p-weekly", "weekly", "", 1), "claude-opus-5")).toBe(true);
++    expect(covers("antigravity", window("3p-weekly", "weekly", "", 1), "gemini-4-neon")).toBe(
++      false,
++    );
++    expect(
++      covers("antigravity", window("gemini-argon-weekly", "weekly", "", 1), "gemini-4-argon"),
++    ).toBe(true);
++    // Unknown membership counts as general.
++    expect(covers("antigravity", window("credits", "other", "", 1), "gemini-4-neon")).toBe(
++      "general",
++    );
++    expect(covers("codex", window("seven_day", "weekly", "", 1), "gpt-5.5")).toBe("general");
++  });
++
++  it("remembers the model each provider last ran in the thread", () => {
++    const at = (iso: string) => DateTime.makeUnsafe(iso);
++    const models = lastModelsByProviderInstance({
++      providerThreads: [
++        { id: ProviderThreadId.make("a"), providerInstanceId: ProviderInstanceId.make("claude") },
++        { id: ProviderThreadId.make("b"), providerInstanceId: ProviderInstanceId.make("codex") },
++      ],
++      providerTurns: [
++        {
++          providerThreadId: ProviderThreadId.make("a"),
++          ordinal: 2,
++          startedAt: at("2026-11-27T10:05:00Z"),
++          model: "claude-fable-5-2",
++        },
++        {
++          providerThreadId: ProviderThreadId.make("a"),
++          ordinal: 1,
++          startedAt: at("2026-11-27T10:00:00Z"),
++          model: "claude-opus-5-5",
++        },
++        { providerThreadId: ProviderThreadId.make("b"), ordinal: 1, startedAt: null },
++      ],
++    });
++    expect([...models]).toEqual([["claude", "claude-fable-5-2"]]);
++  });
++
++  it.each([
++    ["Claude & GPT (shared) · 5-hour", "Claude & GPT · 5h"],
++    ["Gemini · Weekly", "Gemini · Week"],
++    ["Weekly · Fable", "Week · Fable"],
++    ["Session", "Session"],
++    ["Monthly spend", "Monthly spend"],
++    ["Gemini Argon · 7-day", "Gemini Argon · 7d"],
++  ])("shortens %s to %s", (label, short) => {
++    expect(shortLimitLabel(label)).toBe(short);
++  });
++});
++
 +describe("limit countdown", () => {
 +  const s = 1_000;
 +  const m = 60 * s;
@@ -413,10 +615,10 @@ index 79b01fd80e..d39366857c 100644
 +  });
 +});
 diff --git a/apps/web/src/components/chat/ComposerStats.logic.ts b/apps/web/src/components/chat/ComposerStats.logic.ts
-index 7d344f7d90..fec178c07c 100644
+index 7d344f7d90..9a3838966b 100644
 --- a/apps/web/src/components/chat/ComposerStats.logic.ts
 +++ b/apps/web/src/components/chat/ComposerStats.logic.ts
-@@ -2,6 +2,8 @@ import type {
+@@ -2,11 +2,14 @@ import type {
    OrchestrationV2ProviderTurn,
    OrchestrationV2ThreadProjection,
    OrchestrationV2TurnItem,
@@ -425,7 +627,13 @@ index 7d344f7d90..fec178c07c 100644
    ServerProviderUsageLimits,
    ServerProviderUsageWindow,
    TurnTokenUsage,
-@@ -166,6 +168,87 @@ export function selectComposerLimitWindows(
+ } from "@t3tools/contracts";
+ import * as DateTime from "effect/DateTime";
++import { antigravityWindowLimitsModel } from "@t3tools/shared/usageLimits";
+ import type { ThreadStructureTurnItem } from "@t3tools/client-runtime/state/shell";
+ import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
+ 
+@@ -166,6 +169,218 @@ export function selectComposerLimitWindows(
    });
  }
  
@@ -437,19 +645,95 @@ index 7d344f7d90..fec178c07c 100644
 +  readonly current: boolean;
 +}
 +
++const slugOf = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "_");
++
++/**
++ * Which models a window meters when it meters only some of them; null when it covers every model,
++ * or when its membership cannot be told, so it shows as a general window.
++ */
++export function limitWindowModelScope(
++  driver: ServerProvider["driver"],
++  window: Pick<ServerProviderUsageWindow, "id" | "modelIds">,
++): ((model: string) => boolean) | null {
++  if (window.modelIds !== undefined && window.modelIds.length > 0) {
++    const ids = window.modelIds;
++    // A hub can prefix model ids, such as "ag/gemini-3.1-pro".
++    return (model) => ids.includes(model) || ids.includes(model.slice(model.lastIndexOf("/") + 1));
++  }
++  // Claude names its per-model weeklies after the model: seven_day_opus, seven_day_fable.
++  const scope = /^seven_day_(.+)$/.exec(window.id)?.[1];
++  if (scope !== undefined) return (model) => slugOf(model).includes(slugOf(scope));
++  // Antigravity buckets meter one model family each; other bucket ids say nothing about models.
++  if (driver === "antigravity" && /^(gemini|3p-|claude|gpt)/.test(window.id)) {
++    return (model) => antigravityWindowLimitsModel(window, model);
++  }
++  return null;
++}
++
++/** A provider's windows that apply to `model`; with no model known, only its general windows. */
++export function windowsForThreadModel(
++  driver: ServerProvider["driver"],
++  windows: ReadonlyArray<ServerProviderUsageWindow>,
++  model: string | null,
++): ReadonlyArray<ServerProviderUsageWindow> {
++  return windows.filter((window) => {
++    const covers = limitWindowModelScope(driver, window);
++    return covers === null || (model !== null && covers(model));
++  });
++}
++
++/** The model each provider instance last ran in this thread, from its turns' reported models. */
++export function lastModelsByProviderInstance(projection: {
++  readonly providerThreads: ReadonlyArray<
++    Pick<OrchestrationV2ThreadProjection["providerThreads"][number], "id" | "providerInstanceId">
++  >;
++  readonly providerTurns: ReadonlyArray<
++    Pick<OrchestrationV2ProviderTurn, "providerThreadId" | "startedAt" | "ordinal" | "model">
++  >;
++}): ReadonlyMap<ProviderInstanceId, string> {
++  const instanceOf = new Map(
++    projection.providerThreads.map((thread) => [thread.id, thread.providerInstanceId]),
++  );
++  const startOf = (turn: (typeof projection.providerTurns)[number]) =>
++    turn.startedAt === null ? Number.NEGATIVE_INFINITY : DateTime.toEpochMillis(turn.startedAt);
++  const models = new Map<ProviderInstanceId, string>();
++  for (const turn of projection.providerTurns.toSorted(
++    (a, b) => startOf(a) - startOf(b) || a.ordinal - b.ordinal,
++  )) {
++    const instanceId = instanceOf.get(turn.providerThreadId);
++    if (instanceId !== undefined && turn.model !== undefined) models.set(instanceId, turn.model);
++  }
++  return models;
++}
++
 +/**
 + * Providers whose limits Stats for nerds shows: the thread's provider first, then every other
-+ * enabled provider that reports limit windows, in the configured order.
++ * enabled provider that reports limit windows, in the configured order. Each keeps only the
++ * windows that apply to its model in this thread (`models`), so pools for other models stay out.
 + */
 +export function selectUsageLimitProviders(
 +  providers: ReadonlyArray<ServerProvider>,
 +  currentInstanceId: ProviderInstanceId | null,
 +  scope: UsageLimitsScope,
++  models: ReadonlyMap<ProviderInstanceId, string> = new Map(),
 +): ReadonlyArray<UsageLimitProviderEntry> {
++  const entryOf = (provider: ServerProvider, limits: ServerProviderUsageLimits) => ({
++    provider,
++    limits: {
++      ...limits,
++      windows: [
++        ...windowsForThreadModel(
++          provider.driver,
++          limits.windows,
++          models.get(provider.instanceId) ?? null,
++        ),
++      ],
++    },
++  });
 +  const current = providers.find((provider) => provider.instanceId === currentInstanceId);
 +  const entries: UsageLimitProviderEntry[] =
 +    current?.usageLimits !== undefined
-+      ? [{ provider: current, limits: current.usageLimits, current: true }]
++      ? [{ ...entryOf(current, current.usageLimits), current: true }]
 +      : [];
 +  if (scope === "current") return entries;
 +  for (const provider of providers) {
@@ -458,12 +742,63 @@ index 7d344f7d90..fec178c07c 100644
 +      !provider.enabled ||
 +      !provider.installed ||
 +      provider.availability === "unavailable" ||
-+      selectComposerLimitWindows(provider.usageLimits).length === 0
++      provider.usageLimits === undefined
 +    )
 +      continue;
-+    entries.push({ provider, limits: provider.usageLimits!, current: false });
++    const entry = entryOf(provider, provider.usageLimits);
++    if (selectComposerLimitWindows(entry.limits).length === 0) continue;
++    entries.push({ ...entry, current: false });
 +  }
 +  return entries;
++}
++
++/** Windows with a figure to show: a reading recent enough to trust, or a passed reset. */
++export function readableLimitWindows(
++  limits: ServerProviderUsageLimits,
++  nowMs: number,
++): ReadonlyArray<ServerProviderUsageWindow> {
++  return limits.windows.filter(
++    (window) => composerLimitDisplay(window, limits.checkedAt, nowMs).displayPercent !== null,
++  );
++}
++
++/** Entries reduced to their readable windows; a provider left with none drops out entirely. */
++export function readableUsageLimitEntries(
++  entries: ReadonlyArray<UsageLimitProviderEntry>,
++  nowMs: number,
++): ReadonlyArray<UsageLimitProviderEntry> {
++  return entries.flatMap((entry) => {
++    const windows = readableLimitWindows(entry.limits, nowMs);
++    return windows.length === 0
++      ? []
++      : [{ ...entry, limits: { ...entry.limits, windows: [...windows] } }];
++  });
++}
++
++const PERIOD_WORDS: Readonly<Record<string, string>> = {
++  Weekly: "Week",
++  Monthly: "Month",
++  Daily: "Day",
++  Hourly: "Hour",
++};
++
++/**
++ * "Claude & GPT (shared) · 5-hour" reads "Claude & GPT · 5h": each part of a pool label loses its
++ * parenthetical and a period word shortens. The full label stays in the tooltip.
++ */
++export function shortLimitLabel(label: string): string {
++  const short = label
++    .split(" · ")
++    .map((part) => {
++      const bare = part.replace(/\s*\([^)]*\)/g, "").trim();
++      const span = /^(\d+)[- ]?(hour|day|minute)s?$/i.exec(bare);
++      if (span)
++        return `${span[1]}${span[2]!.toLowerCase() === "minute" ? "m" : span[2]![0]!.toLowerCase()}`;
++      return PERIOD_WORDS[bare] ?? bare;
++    })
++    .filter((part) => part.length > 0)
++    .join(" · ");
++  return short.length > 0 ? short : label;
 +}
 +
 +/**
@@ -490,7 +825,10 @@ index 7d344f7d90..fec178c07c 100644
 +  return best?.chip ?? null;
 +}
 +
-+/** One provider keeps every account-wide window; several show only each one's tightest. */
++/**
++ * One provider keeps every account-wide window; several show only each one's tightest. Both pick
++ * from the readable windows alone, which the popover lists too.
++ */
 +export function composerLimitChips(
 +  entries: ReadonlyArray<UsageLimitProviderEntry>,
 +  nowMs: number,
@@ -501,9 +839,10 @@ index 7d344f7d90..fec178c07c 100644
 +    readonly shortLabel: string;
 +  }>;
 +}> {
-+  return entries.flatMap((entry) => {
++  const readable = readableUsageLimitEntries(entries, nowMs);
++  return readable.flatMap((entry) => {
 +    const chips =
-+      entries.length === 1
++      readable.length === 1
 +        ? selectComposerLimitWindows(entry.limits)
 +        : [selectTightestLimitWindow(entry.limits, nowMs)].filter((chip) => chip !== null);
 +    return chips.length === 0 ? [] : [{ entry, chips }];
@@ -513,7 +852,7 @@ index 7d344f7d90..fec178c07c 100644
  export const COMPOSER_STATS_CLOCK_MS = 30_000;
  
  /** Age of the newest valid fetch among the displayed windows. */
-@@ -210,10 +293,78 @@ export function composerLimitSourceLabel(
+@@ -210,10 +425,78 @@ export function composerLimitSourceLabel(
    return source === "account" ? "account" : source === "turn" ? "turn" : "CLI estimate";
  }
  
@@ -592,7 +931,7 @@ index 7d344f7d90..fec178c07c 100644
  ): {
    readonly freshness: ReturnType<typeof composerLimitsFreshness>;
    readonly resetPending: boolean;
-@@ -227,8 +378,8 @@ export function composerLimitDisplay(
+@@ -227,8 +510,8 @@ export function composerLimitDisplay(
      return {
        freshness,
        resetPending: true,
@@ -603,7 +942,7 @@ index 7d344f7d90..fec178c07c 100644
        dimmed: true,
      };
    }
-@@ -243,11 +394,12 @@ export function composerLimitDisplay(
+@@ -243,11 +526,12 @@ export function composerLimitDisplay(
    }
    const age =
      freshness.status === "stale" && freshness.ageMins !== null ? ` · ${freshness.ageMins}m` : "";
@@ -619,7 +958,7 @@ index 7d344f7d90..fec178c07c 100644
    };
  }
 diff --git a/apps/web/src/components/chat/ComposerStats.tsx b/apps/web/src/components/chat/ComposerStats.tsx
-index 4273e4ef05..906f9fb7bc 100644
+index 4273e4ef05..a093fc2146 100644
 --- a/apps/web/src/components/chat/ComposerStats.tsx
 +++ b/apps/web/src/components/chat/ComposerStats.tsx
 @@ -3,12 +3,16 @@ import type {
@@ -655,10 +994,11 @@ index 4273e4ef05..906f9fb7bc 100644
    composerLimitsFreshness,
    deriveContextCompaction,
    deriveResponseRate,
-@@ -28,7 +37,11 @@ import {
+@@ -28,7 +37,12 @@ import {
    formatCachePercentage,
    deriveTurnElapsedMs,
    selectComposerLimitWindows,
++  shortLimitLabel,
 +  type UsageLimitProviderEntry,
 +  type UsageLimitsDisplay,
  } from "./ComposerStats.logic";
@@ -667,7 +1007,7 @@ index 4273e4ef05..906f9fb7bc 100644
  import { recommendSubscriptionSwitch } from "./SubscriptionSwitch.logic";
  
  function ElapsedTime({ turn }: { turn: OrchestrationV2ProviderTurn }) {
-@@ -101,29 +114,76 @@ function Meter({
+@@ -101,29 +115,76 @@ function Meter({
    displayPercent,
    percentText,
    dimmed,
@@ -752,7 +1092,7 @@ index 4273e4ef05..906f9fb7bc 100644
      </span>
    );
  }
-@@ -140,96 +200,145 @@ function formatUsageTimestamp(value: string | undefined): string {
+@@ -140,96 +201,147 @@ function formatUsageTimestamp(value: string | undefined): string {
    }).format(new Date(timeMs));
  }
  
@@ -838,7 +1178,9 @@ index 4273e4ef05..906f9fb7bc 100644
 +                />
 +              }
 +            >
-+              <span className="max-w-32 truncate text-muted-foreground">{window.label}</span>
++              <span className="whitespace-nowrap text-muted-foreground">
++                {shortLimitLabel(window.label)}
++              </span>
 +              <LimitBar
 +                fill={expired ? null : display.displayPercent}
 +                tick={display.dimmed ? null : limitPaceTick(window, now, mode)}
@@ -961,7 +1303,7 @@ index 4273e4ef05..906f9fb7bc 100644
    return (
      <Popover>
        <PopoverTrigger
-@@ -240,34 +349,79 @@ function UsageLimitsSummary({
+@@ -240,34 +352,79 @@ function UsageLimitsSummary({
            <button
              type="button"
              aria-label="Usage limit details"
@@ -1060,7 +1402,7 @@ index 4273e4ef05..906f9fb7bc 100644
              {freshness.ageMins === null
                ? " Check time unavailable."
                : ` Checked ${freshness.ageMins === 0 ? "just now" : `${freshness.ageMins} min ago`}.`}
-@@ -359,7 +513,8 @@ export function ComposerStats({
+@@ -359,7 +516,8 @@ export function ComposerStats({
    context: ContextWindowSnapshot | null;
    turn: OrchestrationV2ProviderTurn | null;
    compactions: ReadonlyArray<Extract<OrchestrationV2TurnItem, { type: "compaction" }>>;
@@ -1070,7 +1412,7 @@ index 4273e4ef05..906f9fb7bc 100644
    contextDriver: string | undefined;
    configuredClaudeThreshold: unknown;
    onCompact: () => void;
-@@ -390,7 +545,7 @@ export function ComposerStats({
+@@ -390,7 +548,7 @@ export function ComposerStats({
      !hasTokens &&
      responseRate === null &&
      compactions.length === 0 &&
@@ -1079,7 +1421,7 @@ index 4273e4ef05..906f9fb7bc 100644
      subscriptionSwitch === null &&
      performance === null &&
      compactDisabled
-@@ -652,14 +807,9 @@ export function ComposerStats({
+@@ -652,14 +810,9 @@ export function ComposerStats({
        aria-label="Stats for nerds"
        className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 pt-1.5 text-2xs leading-4 text-muted-foreground tabular-nums"
      >
@@ -1162,8 +1504,115 @@ index 69c3cd7133..3638814dfb 100644
                {/* Shown only when no section above has content, so an emptied card can be refilled. */}
                <div className="p-2 group-has-[>section>:last-child:not(:empty)]/details-items:hidden">
                  <ThreadDetailsControl
+diff --git a/apps/web/src/components/chat/ThreadDetailsUsage.logic.test.ts b/apps/web/src/components/chat/ThreadDetailsUsage.logic.test.ts
+index ed65bf14cd..21f90de940 100644
+--- a/apps/web/src/components/chat/ThreadDetailsUsage.logic.test.ts
++++ b/apps/web/src/components/chat/ThreadDetailsUsage.logic.test.ts
+@@ -12,6 +12,7 @@ import {
+   poolSources,
+   resolveThreadDetailsLimits,
+   resolveThreadHttpQuotas,
++  selectThreadDetailsWindows,
+ } from "./ThreadDetailsUsage.logic";
+ 
+ const now = Date.parse("2026-10-30T12:00:00.000Z");
+@@ -176,3 +177,40 @@ describe("resolveThreadHttpQuotas", () => {
+     expect(resolveThreadHttpQuotas(null, [source])).toEqual([]);
+   });
+ });
++
++describe("selectThreadDetailsWindows", () => {
++  const antigravity = ProviderDriverKind.make("antigravity");
++  const old = "2026-10-30T09:00:00.000Z";
++  const limits: ServerProviderUsageLimits = {
++    checkedAt,
++    windows: [
++      { id: "3p-weekly", kind: "weekly", label: "Claude & GPT (shared) · Weekly", usedPercent: 30 },
++      {
++        id: "gemini-5h",
++        kind: "session",
++        label: "Gemini · 5-hour",
++        usedPercent: 5,
++        checkedAt: old,
++      },
++      { id: "gemini-weekly", kind: "weekly", label: "Gemini · Weekly", usedPercent: 40 },
++    ],
++  };
++  const ids = (resolved: ReturnType<typeof selectThreadDetailsWindows>) =>
++    resolved?.kind === "instance" ? resolved.limits.windows.map((window) => window.id) : resolved;
++
++  it("keeps the readable pools that cover the thread's model", () => {
++    expect(
++      ids(
++        selectThreadDetailsWindows({ kind: "instance", limits }, antigravity, "gemini-4-neon", now),
++      ),
++    ).toEqual(["gemini-weekly"]);
++  });
++
++  it("drops the provider when nothing is left, but keeps a notice", () => {
++    expect(
++      selectThreadDetailsWindows({ kind: "instance", limits }, antigravity, null, now),
++    ).toBeNull();
++    const notice = { kind: "instance", limits: unsupported } as const;
++    expect(selectThreadDetailsWindows(notice, claude, null, now)).toBe(notice);
++  });
++});
+diff --git a/apps/web/src/components/chat/ThreadDetailsUsage.logic.ts b/apps/web/src/components/chat/ThreadDetailsUsage.logic.ts
+index d968638ed6..727fa20098 100644
+--- a/apps/web/src/components/chat/ThreadDetailsUsage.logic.ts
++++ b/apps/web/src/components/chat/ThreadDetailsUsage.logic.ts
+@@ -17,6 +17,12 @@ import {
+ } from "@t3tools/shared/usageLimits";
+ import { limitsNotice } from "@t3tools/shared/usageLimitsCopy";
+ 
++import {
++  limitWindowModelScope,
++  readableLimitWindows,
++  windowsForThreadModel,
++} from "./ComposerStats.logic";
++
+ export type ThreadDetailsLimits =
+   | { readonly kind: "instance"; readonly limits: ServerProviderUsageLimits }
+   | { readonly kind: "pool"; readonly windows: readonly LimitPoolWindow[] };
+@@ -46,6 +52,36 @@ export function resolveThreadDetailsLimits(
+   return hubPool(provider.driver, model, providers, hubs, now) ?? { kind: "instance", limits: own };
+ }
+ 
++/**
++ * The windows a provider's group shows: those that apply to its model in this thread and have a
++ * reading. Null when none are left, so the provider drops out; a notice (signed out, unsupported)
++ * still shows as one row.
++ */
++export function selectThreadDetailsWindows(
++  resolved: ThreadDetailsLimits | null,
++  driver: ServerProvider["driver"],
++  model: string | null,
++  now: number,
++): ThreadDetailsLimits | null {
++  if (resolved === null) return null;
++  if (resolved.kind === "pool") {
++    const windows = resolved.windows.filter((window) => {
++      const covers = limitWindowModelScope(driver, window);
++      return covers === null || (model !== null && covers(model));
++    });
++    return windows.length === 0 ? null : { kind: "pool", windows };
++  }
++  if (limitsNotice(resolved.limits) !== null) return resolved;
++  const limits = {
++    ...resolved.limits,
++    windows: [...windowsForThreadModel(driver, resolved.limits.windows, model)],
++  };
++  const windows = readableLimitWindows(limits, now);
++  return windows.length === 0
++    ? null
++    : { kind: "instance", limits: { ...limits, windows: [...windows] } };
++}
++
+ export function resolveThreadHttpQuotas(
+   providerInstanceId: ProviderInstanceId | null,
+   sources: UsageLimitSourceSnapshots,
 diff --git a/apps/web/src/components/chat/ThreadDetailsUsage.tsx b/apps/web/src/components/chat/ThreadDetailsUsage.tsx
-index 3eac602eb5..6a7c7cdc37 100644
+index 3eac602eb5..84b437433d 100644
 --- a/apps/web/src/components/chat/ThreadDetailsUsage.tsx
 +++ b/apps/web/src/components/chat/ThreadDetailsUsage.tsx
 @@ -15,9 +15,13 @@ import {
@@ -1182,7 +1631,7 @@ index 3eac602eb5..6a7c7cdc37 100644
  import { useNowMinute } from "../../hooks/useNowMinute";
  import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
  import { formatContextWindowTokens } from "../../lib/contextWindow";
-@@ -25,6 +29,18 @@ import { cn } from "../../lib/utils";
+@@ -25,12 +29,26 @@ import { cn } from "../../lib/utils";
  import { formatUpcomingTimestamp } from "../../timestampFormat";
  import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
  import { formatContextWindowCompactionMessage } from "./compaction.logic";
@@ -1195,13 +1644,30 @@ index 3eac602eb5..6a7c7cdc37 100644
 +  limitPaceTick,
 +  newestReadingAgeMs,
 +  selectUsageLimitProviders,
++  shortLimitLabel,
 +} from "./ComposerStats.logic";
 +import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 +import { UNAVAILABLE_TEXT } from "./TurnPerformance.logic";
  import { ThreadDetailsSection } from "./ThreadDetailsSection";
  import {
    nextPoolReset,
-@@ -49,13 +65,33 @@ export interface ThreadDetailsUsageInput {
+   poolSources,
+   resolveThreadDetailsLimits,
+   resolveThreadHttpQuotas,
++  selectThreadDetailsWindows,
+ } from "./ThreadDetailsUsage.logic";
+ 
+ const PACE_LABEL: Record<LimitPace, string> = {
+@@ -42,6 +60,8 @@ const PACE_LABEL: Record<LimitPace, string> = {
+ export interface ThreadDetailsUsageInput {
+   readonly providerInstanceId: ProviderInstanceId | null;
+   readonly model: string | null;
++  /** The model each other provider last ran in this thread, to pick its model-scoped pools. */
++  readonly models?: ReadonlyMap<ProviderInstanceId, string>;
+   readonly providers: readonly ServerProvider[];
+   readonly sources: UsageLimitSourceSnapshots;
+   readonly contextWindow: ContextWindowSnapshot | null;
+@@ -49,25 +69,66 @@ export interface ThreadDetailsUsageInput {
  
  type UsageTone = "error" | "warning" | null;
  
@@ -1238,7 +1704,10 @@ index 3eac602eb5..6a7c7cdc37 100644
  export function ThreadDetailsUsage({
    providerInstanceId,
    model,
-@@ -65,9 +101,24 @@ export function ThreadDetailsUsage({
++  models,
+   providers,
+   sources,
+ }: Omit<ThreadDetailsUsageInput, "contextWindow">) {
    const gt = useGT();
    const nowMinute = useNowMinute();
    const now = Date.parse(`${nowMinute}:00Z`);
@@ -1246,16 +1715,21 @@ index 3eac602eb5..6a7c7cdc37 100644
 -  const quotas = resolveThreadHttpQuotas(providerInstanceId, sources);
 -  if (!resolved && quotas.length === 0) return null;
 +  const scope = useClientSettings((settings) => settings.statsForNerdsUsageLimitsScope);
-+  const others = selectUsageLimitProviders(providers, providerInstanceId, scope).flatMap((entry) =>
-+    entry.current ? [] : [entry.provider],
-+  );
++  const threadModels = new Map(models);
++  if (providerInstanceId !== null && model !== null) threadModels.set(providerInstanceId, model);
++  const others = selectUsageLimitProviders(
++    providers,
++    providerInstanceId,
++    scope,
++    threadModels,
++  ).flatMap((entry) => (entry.current ? [] : [entry.provider]));
 +  const current = providers.find((provider) => provider.instanceId === providerInstanceId);
 +  const groups = [...(current ? [current] : []), ...others].flatMap((provider) => {
-+    const resolved = resolveThreadDetailsLimits(
-+      provider.instanceId,
-+      provider === current ? model : null,
-+      providers,
-+      sources,
++    const providerModel = threadModels.get(provider.instanceId) ?? null;
++    const resolved = selectThreadDetailsWindows(
++      resolveThreadDetailsLimits(provider.instanceId, providerModel, providers, sources, now),
++      provider.driver,
++      providerModel,
 +      now,
 +    );
 +    const quotas = resolveThreadHttpQuotas(provider.instanceId, sources);
@@ -1266,7 +1740,7 @@ index 3eac602eb5..6a7c7cdc37 100644
  
    return (
      <ThreadDetailsSection
-@@ -76,26 +127,92 @@ export function ThreadDetailsUsage({
+@@ -76,26 +137,92 @@ export function ThreadDetailsUsage({
        showHeading={false}
      >
        <div className="grid grid-cols-[auto_minmax(3rem,1fr)_auto] gap-x-3 text-xs">
@@ -1368,7 +1842,7 @@ index 3eac602eb5..6a7c7cdc37 100644
  }) {
    const gt = useGT();
    const m = useMessages();
-@@ -112,7 +229,9 @@ function InstanceRows({
+@@ -112,7 +239,9 @@ function InstanceRows({
        />
      );
    }
@@ -1379,7 +1853,7 @@ index 3eac602eb5..6a7c7cdc37 100644
  }
  
  /** The thread's context window. The bar fills as context is used; the tick marks auto-compaction. */
-@@ -186,32 +305,55 @@ function LimitRow({
+@@ -186,32 +315,55 @@ function LimitRow({
    window,
    now,
    accountLabel,
@@ -1442,7 +1916,7 @@ index 3eac602eb5..6a7c7cdc37 100644
            {accountLabel ? <span className="text-muted-foreground">{accountLabel}</span> : null}
            {pace && timeLeft !== null ? (
              <span className="text-muted-foreground">
-@@ -232,10 +374,19 @@ function LimitRow({
+@@ -232,10 +384,19 @@ function LimitRow({
    );
  }
  
@@ -1463,7 +1937,7 @@ index 3eac602eb5..6a7c7cdc37 100644
    const left = window.remainingPercent;
    const accounts = window.members.length;
    const from = poolSources(window);
-@@ -252,10 +403,10 @@ function PoolRow({ window, now }: { readonly window: LimitPoolWindow; readonly n
+@@ -252,10 +413,10 @@ function PoolRow({ window, now }: { readonly window: LimitPoolWindow; readonly n
    return (
      <UsageRow
        label={window.label}
@@ -1478,7 +1952,7 @@ index 3eac602eb5..6a7c7cdc37 100644
        opensUsage
        tooltip={
          <>
-@@ -297,6 +448,7 @@ function UsageRow({
+@@ -297,6 +458,7 @@ function UsageRow({
    label,
    fill,
    tone,
@@ -1486,7 +1960,7 @@ index 3eac602eb5..6a7c7cdc37 100644
    tick = null,
    value,
    ariaValue = value,
-@@ -308,6 +460,8 @@ function UsageRow({
+@@ -308,6 +470,8 @@ function UsageRow({
    /** Bar fill from 0 to 100. Null hides the bar. */
    readonly fill: number | null;
    readonly tone: UsageTone;
@@ -1495,7 +1969,18 @@ index 3eac602eb5..6a7c7cdc37 100644
    /** A marker on the bar, from 0 to 100. */
    readonly tick?: number | null;
    readonly value: string;
-@@ -348,9 +502,16 @@ function UsageRow({
+@@ -333,8 +497,8 @@ function UsageRow({
+           opensUsage ? <Link to="/usage" {...rowProps} /> : <div tabIndex={0} {...rowProps} />
+         }
+       >
+-        <span className="max-w-28 truncate text-muted-foreground group-hover:text-foreground">
+-          {label}
++        <span className="whitespace-nowrap text-muted-foreground group-hover:text-foreground">
++          {shortLimitLabel(label)}
+         </span>
+         {fill !== null ? (
+           <span className="relative h-[3px] rounded-full bg-muted-foreground/30 dark:bg-muted-foreground/20">
+@@ -348,9 +512,16 @@ function UsageRow({
                        ? "bg-warning"
                        : muted
                          ? "bg-muted-foreground"
@@ -1900,10 +2385,10 @@ index e0d23512bf..a7c7ca2822 100644
            description={gt("Choose when Enter sends a prompt or inserts a new line")}
 diff --git a/apps/web/src/components/settings/StatsForNerdsSettings.tsx b/apps/web/src/components/settings/StatsForNerdsSettings.tsx
 new file mode 100644
-index 0000000000..9469d9460d
+index 0000000000..7c75d797a8
 --- /dev/null
 +++ b/apps/web/src/components/settings/StatsForNerdsSettings.tsx
-@@ -0,0 +1,310 @@
+@@ -0,0 +1,337 @@
 +import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 +import { msg, T, useGT, useMessages, Var } from "gt-react";
 +import { ChevronDownIcon } from "lucide-react";
@@ -1953,9 +2438,7 @@ index 0000000000..9469d9460d
 +  return (
 +    <SettingsRow
 +      {...setting("stats-for-nerds-placement")}
-+      description={gt(
-+        "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
-+      )}
++      description={gt("Under replies, below the composer, or in thread details.")}
 +      resetAction={
 +        isDefault ? null : (
 +          <SettingResetButton
@@ -2028,9 +2511,7 @@ index 0000000000..9469d9460d
 +  return (
 +    <SettingsRow
 +      {...setting("stats-for-nerds-usage-limits")}
-+      description={gt(
-+        "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
-+      )}
++      description={gt("The thread's provider only, or every provider that reports limits.")}
 +      resetAction={
 +        scope !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsUsageLimitsScope ? (
 +          <SettingResetButton
@@ -2087,9 +2568,7 @@ index 0000000000..9469d9460d
 +  return (
 +    <SettingsRow
 +      {...setting("stats-for-nerds-usage-limits-display")}
-+      description={gt(
-+        "Show each limit as the share left or the share used. Warning colors still mean close to running out.",
-+      )}
++      description={gt("The share of each limit left, or the share used.")}
 +      resetAction={
 +        display !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsUsageLimitsDisplay ? (
 +          <SettingResetButton
@@ -2128,20 +2607,91 @@ index 0000000000..9469d9460d
 +  );
 +}
 +
-+export function StatsForNerdsSettingsSection() {
++/** Which turn metrics show, as one checkbox menu instead of a row per metric. */
++function StatsForNerdsMetricsRow() {
 +  const gt = useGT();
 +  const m = useMessages();
 +  const setting = useSearchableSetting();
++  const hidden = useScopedSettings((settings) => settings.statsForNerdsHiddenMetrics);
++  const updateSettings = useUpdateScopedSettings();
++  const shown = TURN_PERFORMANCE_METRIC_IDS.filter((id) => !hidden.includes(id)).length;
++  const total = TURN_PERFORMANCE_METRIC_IDS.length;
++  const reset = () =>
++    updateSettings({
++      statsForNerdsHiddenMetrics: DEFAULT_UNIFIED_SETTINGS.statsForNerdsHiddenMetrics,
++    });
++  return (
++    <SettingsRow
++      {...setting("stats-for-nerds-metrics")}
++      description={gt("Choose which turn metrics show.")}
++      resetAction={
++        hidden.length === 0 ? null : (
++          <SettingResetButton ariaLabel={gt("Reset metrics to default")} onClick={reset} />
++        )
++      }
++      control={
++        <Menu>
++          <MenuTrigger
++            render={
++              <Button
++                variant="outline"
++                size="sm"
++                className="w-full justify-between sm:w-40"
++                aria-label={gt("Metrics: {enabled} of {total} on", { enabled: shown, total })}
++              />
++            }
++          >
++            <T>
++              <Var>{shown}</Var> of <Var>{total}</Var> on
++            </T>
++            <ChevronDownIcon aria-hidden />
++          </MenuTrigger>
++          <MenuPopup align="end">
++            <MenuGroup>
++              <MenuGroupLabel>
++                <T>Show metrics</T>
++              </MenuGroupLabel>
++              {TURN_PERFORMANCE_METRIC_IDS.map((id) => {
++                const { label, abbr } = TURN_PERFORMANCE_METRIC_LABELS[id];
++                return (
++                  <MenuCheckboxItem
++                    key={id}
++                    checked={!hidden.includes(id)}
++                    onCheckedChange={(checked) =>
++                      updateSettings({
++                        statsForNerdsHiddenMetrics: toggleHiddenMetric(hidden, id, checked),
++                      })
++                    }
++                  >
++                    {m(label)}
++                    <span className="ms-auto ps-3 text-muted-foreground">{m(abbr)}</span>
++                  </MenuCheckboxItem>
++                );
++              })}
++            </MenuGroup>
++            <MenuSeparator />
++            <MenuItem disabled={hidden.length === 0} onClick={reset}>
++              <T>Reset to default</T>
++            </MenuItem>
++          </MenuPopup>
++        </Menu>
++      }
++    />
++  );
++}
++
++export function StatsForNerdsSettingsSection() {
++  const gt = useGT();
++  const setting = useSearchableSetting();
 +  const settings = useScopedSettings();
 +  const updateSettings = useUpdateScopedSettings();
-+  const hidden = settings.statsForNerdsHiddenMetrics;
 +
 +  return (
 +    <SettingsSection id="stats-for-nerds-section" title={gt("Stats for nerds")}>
 +      <SettingsRow
 +        {...setting("stats-for-nerds")}
 +        description={gt(
-+          "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
++          "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
 +        )}
 +        resetAction={
 +          settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled ? (
@@ -2170,45 +2720,7 @@ index 0000000000..9469d9460d
 +          <StatsForNerdsPlacementRow />
 +          <StatsForNerdsUsageLimitsRow />
 +          <StatsForNerdsUsageLimitsDisplayRow />
-+          {TURN_PERFORMANCE_METRIC_IDS.map((id) => {
-+            const { label, description } = TURN_PERFORMANCE_METRIC_LABELS[id];
-+            const visible = !hidden.includes(id);
-+            return (
-+              <SettingsRow
-+                key={id}
-+                id={`stats-for-nerds-metric-${id}`}
-+                title={m(label)}
-+                description={m(description)}
-+                resetAction={
-+                  visible ? null : (
-+                    <SettingResetButton
-+                      ariaLabel={gt("Reset {metric} to default", { metric: m(label) })}
-+                      onClick={() =>
-+                        updateSettings({
-+                          statsForNerdsHiddenMetrics: toggleHiddenMetric(hidden, id, true),
-+                        })
-+                      }
-+                    />
-+                  )
-+                }
-+                control={
-+                  <Switch
-+                    checked={visible}
-+                    onCheckedChange={(checked) =>
-+                      updateSettings({
-+                        statsForNerdsHiddenMetrics: toggleHiddenMetric(
-+                          hidden,
-+                          id,
-+                          Boolean(checked),
-+                        ),
-+                      })
-+                    }
-+                    aria-label={m(label)}
-+                  />
-+                }
-+              />
-+            );
-+          })}
++          <StatsForNerdsMetricsRow />
 +        </>
 +      )}
 +    </SettingsSection>
@@ -2257,11 +2769,37 @@ index f8da21718c..91eb5042be 100644
              </T>
              <ChevronDownIcon aria-hidden />
            </MenuTrigger>
+diff --git a/apps/web/src/components/settings/settingsSearch.test.ts b/apps/web/src/components/settings/settingsSearch.test.ts
+index 3249b67624..c0fa32677b 100644
+--- a/apps/web/src/components/settings/settingsSearch.test.ts
++++ b/apps/web/src/components/settings/settingsSearch.test.ts
+@@ -415,3 +415,13 @@ describe("movedSettingsPath", () => {
+     expect(movedSettingsPath("/settings/appearance", "theme")).toBeNull();
+   });
+ });
++
++describe("stats for nerds metrics search", () => {
++  it("lands a metric's full name or short label on the one Metrics row", () => {
++    for (const query of ["time to first token", "TTFA", "reasoning tokens"]) {
++      expect(searchSettings(query, SETTINGS_SEARCH_ITEMS).map((item) => item.id)).toContain(
++        "stats-for-nerds-metrics",
++      );
++    }
++  });
++});
 diff --git a/apps/web/src/components/settings/settingsSearch.ts b/apps/web/src/components/settings/settingsSearch.ts
-index 4fc38779ca..10f5a2b7ff 100644
+index 4fc38779ca..b3232e3f13 100644
 --- a/apps/web/src/components/settings/settingsSearch.ts
 +++ b/apps/web/src/components/settings/settingsSearch.ts
-@@ -396,6 +396,42 @@ export const SETTINGS_SEARCH_ITEMS = [
+@@ -16,6 +16,7 @@ import { writeLocalStorageValue } from "../../hooks/useLocalStorage";
+ import type { MessageResolver } from "../../i18n/messages";
+ import { commandLabel } from "./KeybindingsSettings.logic";
+ import type { ResolvedSettingsScope } from "./settingsScope";
++import { TURN_PERFORMANCE_METRIC_LABELS } from "../chat/TurnPerformance.catalog";
+ 
+ export type SettingsPath =
+   | "/settings/projects"
+@@ -396,6 +397,52 @@ export const SETTINGS_SEARCH_ITEMS = [
        ),
      ],
    },
@@ -2286,6 +2824,16 @@ index 4fc38779ca..10f5a2b7ff 100644
 +    ],
 +  },
 +  {
++    id: "stats-for-nerds-metrics",
++    title: msg("Metrics", { $context: "stats for nerds: which turn metrics show" }),
++    to: "/settings/appearance",
++    // Each metric's full name and short label, so searching one lands on this row.
++    searchTerms: Object.values(TURN_PERFORMANCE_METRIC_LABELS).flatMap(({ label, abbr }) => [
++      label,
++      abbr,
++    ]),
++  },
++  {
 +    id: "stats-for-nerds-usage-limits-display",
 +    title: msg("Show limits as"),
 +    to: "/settings/appearance",
@@ -2304,7 +2852,7 @@ index 4fc38779ca..10f5a2b7ff 100644
    {
      id: "effort-display",
      title: msg("Effort display"),
-@@ -829,12 +865,6 @@ export const SETTINGS_SEARCH_ITEMS = [
+@@ -829,12 +876,6 @@ export const SETTINGS_SEARCH_ITEMS = [
      to: "/settings/chat",
      searchTerms: [msg("composer rich text tiptap bold italic markdown styled wysiwyg")],
    },
@@ -2318,7 +2866,7 @@ index 4fc38779ca..10f5a2b7ff 100644
      id: "send-shortcut",
      title: msg("Send shortcut"),
 diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
-index 356eada387..a302abfdde 100644
+index 356eada387..fb061706a6 100644
 --- a/apps/web/src/i18n/translations/de.json
 +++ b/apps/web/src/i18n/translations/de.json
 @@ -12977,9 +12977,7 @@
@@ -2331,7 +2879,7 @@ index 356eada387..a302abfdde 100644
    "f3e82ffb3e22c609": "Choose a project before compacting",
    "38baeebc3b47b857": "Compaction is unavailable for this provider",
    "d35c2d635ba3a859": "Compacting is unavailable right now",
-@@ -13057,5 +13055,38 @@
+@@ -13057,5 +13055,42 @@
    "dbab44016b8171e5": "Not reported by this provider",
    "112e6f4e8b9d3b4d": "Rate",
    "077433dde44c0bdb": "Partial: measured from incomplete data.",
@@ -2356,23 +2904,27 @@ index 356eada387..a302abfdde 100644
 +  "5dcc87e26d4dc762": "Current provider",
 +  "9b27f25d7340ed67": "Left",
 +  "7c5f4a2569845929": "Used",
-+  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
 +  "3ed184bf2a1cebd8": "Reset where stats show to default",
 +  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
-+  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
 +  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
-+  "c8349436b3f36678": "Show each limit as the share left or the share used. Warning colors still mean close to running out.",
 +  "33cfca4835c9cda2": "Reset show limits as to default",
-+  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "2796dafc8c101aff": "Reset {metric} to default",
 +  "77aeb1520122e429": "Show stats",
 +  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
 +  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
 +  "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
++  "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
  }
 diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
-index 5b37e71095..794caa14cb 100644
+index 5b37e71095..1b5e27d442 100644
 --- a/apps/web/src/i18n/translations/en.json
 +++ b/apps/web/src/i18n/translations/en.json
 @@ -12986,9 +12986,7 @@
@@ -2385,7 +2937,7 @@ index 5b37e71095..794caa14cb 100644
    "f3e82ffb3e22c609": "Choose a project before compacting",
    "38baeebc3b47b857": "Compaction is unavailable for this provider",
    "d35c2d635ba3a859": "Compacting is unavailable right now",
-@@ -13066,5 +13064,38 @@
+@@ -13066,5 +13064,42 @@
    "dbab44016b8171e5": "Not reported by this provider",
    "112e6f4e8b9d3b4d": "Rate",
    "077433dde44c0bdb": "Partial: measured from incomplete data.",
@@ -2410,23 +2962,27 @@ index 5b37e71095..794caa14cb 100644
 +  "5dcc87e26d4dc762": "Current provider",
 +  "9b27f25d7340ed67": "Left",
 +  "7c5f4a2569845929": "Used",
-+  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
 +  "3ed184bf2a1cebd8": "Reset where stats show to default",
 +  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
-+  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
 +  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
-+  "c8349436b3f36678": "Show each limit as the share left or the share used. Warning colors still mean close to running out.",
 +  "33cfca4835c9cda2": "Reset show limits as to default",
-+  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "2796dafc8c101aff": "Reset {metric} to default",
 +  "77aeb1520122e429": "Show stats",
 +  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
 +  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
 +  "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
++  "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
  }
 diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
-index 8ca2681742..b99facf4d8 100644
+index 8ca2681742..a779e60abf 100644
 --- a/apps/web/src/i18n/translations/es.json
 +++ b/apps/web/src/i18n/translations/es.json
 @@ -12972,9 +12972,7 @@
@@ -2439,7 +2995,7 @@ index 8ca2681742..b99facf4d8 100644
    "f3e82ffb3e22c609": "Choose a project before compacting",
    "38baeebc3b47b857": "Compaction is unavailable for this provider",
    "d35c2d635ba3a859": "Compacting is unavailable right now",
-@@ -13052,5 +13050,38 @@
+@@ -13052,5 +13050,42 @@
    "dbab44016b8171e5": "Not reported by this provider",
    "112e6f4e8b9d3b4d": "Rate",
    "077433dde44c0bdb": "Partial: measured from incomplete data.",
@@ -2464,23 +3020,27 @@ index 8ca2681742..b99facf4d8 100644
 +  "5dcc87e26d4dc762": "Current provider",
 +  "9b27f25d7340ed67": "Left",
 +  "7c5f4a2569845929": "Used",
-+  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
 +  "3ed184bf2a1cebd8": "Reset where stats show to default",
 +  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
-+  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
 +  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
-+  "c8349436b3f36678": "Show each limit as the share left or the share used. Warning colors still mean close to running out.",
 +  "33cfca4835c9cda2": "Reset show limits as to default",
-+  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "2796dafc8c101aff": "Reset {metric} to default",
 +  "77aeb1520122e429": "Show stats",
 +  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
 +  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
 +  "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
++  "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
  }
 diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
-index 64e6b68cb7..177b035dd1 100644
+index 64e6b68cb7..e9ec2b6622 100644
 --- a/apps/web/src/i18n/translations/fr.json
 +++ b/apps/web/src/i18n/translations/fr.json
 @@ -12977,9 +12977,7 @@
@@ -2493,7 +3053,7 @@ index 64e6b68cb7..177b035dd1 100644
    "f3e82ffb3e22c609": "Choose a project before compacting",
    "38baeebc3b47b857": "Compaction is unavailable for this provider",
    "d35c2d635ba3a859": "Compacting is unavailable right now",
-@@ -13057,5 +13055,38 @@
+@@ -13057,5 +13055,42 @@
    "dbab44016b8171e5": "Not reported by this provider",
    "112e6f4e8b9d3b4d": "Rate",
    "077433dde44c0bdb": "Partial: measured from incomplete data.",
@@ -2518,23 +3078,27 @@ index 64e6b68cb7..177b035dd1 100644
 +  "5dcc87e26d4dc762": "Current provider",
 +  "9b27f25d7340ed67": "Left",
 +  "7c5f4a2569845929": "Used",
-+  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
 +  "3ed184bf2a1cebd8": "Reset where stats show to default",
 +  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
-+  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
 +  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
-+  "c8349436b3f36678": "Show each limit as the share left or the share used. Warning colors still mean close to running out.",
 +  "33cfca4835c9cda2": "Reset show limits as to default",
-+  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "2796dafc8c101aff": "Reset {metric} to default",
 +  "77aeb1520122e429": "Show stats",
 +  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
 +  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
 +  "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
++  "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
  }
 diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
-index 7daeab7a6d..77ef50b83e 100644
+index 7daeab7a6d..fc854997ed 100644
 --- a/apps/web/src/i18n/translations/ja.json
 +++ b/apps/web/src/i18n/translations/ja.json
 @@ -12913,9 +12913,7 @@
@@ -2547,7 +3111,7 @@ index 7daeab7a6d..77ef50b83e 100644
    "f3e82ffb3e22c609": "Choose a project before compacting",
    "38baeebc3b47b857": "Compaction is unavailable for this provider",
    "d35c2d635ba3a859": "Compacting is unavailable right now",
-@@ -12993,5 +12991,38 @@
+@@ -12993,5 +12991,42 @@
    "dbab44016b8171e5": "Not reported by this provider",
    "112e6f4e8b9d3b4d": "Rate",
    "077433dde44c0bdb": "Partial: measured from incomplete data.",
@@ -2572,23 +3136,27 @@ index 7daeab7a6d..77ef50b83e 100644
 +  "5dcc87e26d4dc762": "Current provider",
 +  "9b27f25d7340ed67": "Left",
 +  "7c5f4a2569845929": "Used",
-+  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
 +  "3ed184bf2a1cebd8": "Reset where stats show to default",
 +  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
-+  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
 +  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
-+  "c8349436b3f36678": "Show each limit as the share left or the share used. Warning colors still mean close to running out.",
 +  "33cfca4835c9cda2": "Reset show limits as to default",
-+  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "2796dafc8c101aff": "Reset {metric} to default",
 +  "77aeb1520122e429": "Show stats",
 +  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
 +  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
 +  "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
++  "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
  }
 diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
-index 0c9efaa487..ceaba31dd5 100644
+index 0c9efaa487..3317693330 100644
 --- a/apps/web/src/i18n/translations/ko.json
 +++ b/apps/web/src/i18n/translations/ko.json
 @@ -12910,9 +12910,7 @@
@@ -2601,7 +3169,7 @@ index 0c9efaa487..ceaba31dd5 100644
    "f3e82ffb3e22c609": "Choose a project before compacting",
    "38baeebc3b47b857": "Compaction is unavailable for this provider",
    "d35c2d635ba3a859": "Compacting is unavailable right now",
-@@ -12990,5 +12988,38 @@
+@@ -12990,5 +12988,42 @@
    "dbab44016b8171e5": "Not reported by this provider",
    "112e6f4e8b9d3b4d": "Rate",
    "077433dde44c0bdb": "Partial: measured from incomplete data.",
@@ -2626,23 +3194,27 @@ index 0c9efaa487..ceaba31dd5 100644
 +  "5dcc87e26d4dc762": "Current provider",
 +  "9b27f25d7340ed67": "Left",
 +  "7c5f4a2569845929": "Used",
-+  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
 +  "3ed184bf2a1cebd8": "Reset where stats show to default",
 +  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
-+  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
 +  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
-+  "c8349436b3f36678": "Show each limit as the share left or the share used. Warning colors still mean close to running out.",
 +  "33cfca4835c9cda2": "Reset show limits as to default",
-+  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "2796dafc8c101aff": "Reset {metric} to default",
 +  "77aeb1520122e429": "Show stats",
 +  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
 +  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
 +  "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
++  "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
  }
 diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
-index 0fc7421cda..b3dedabf64 100644
+index 0fc7421cda..f82279ee5d 100644
 --- a/apps/web/src/i18n/translations/pt-BR.json
 +++ b/apps/web/src/i18n/translations/pt-BR.json
 @@ -12977,9 +12977,7 @@
@@ -2655,7 +3227,7 @@ index 0fc7421cda..b3dedabf64 100644
    "f3e82ffb3e22c609": "Choose a project before compacting",
    "38baeebc3b47b857": "Compaction is unavailable for this provider",
    "d35c2d635ba3a859": "Compacting is unavailable right now",
-@@ -13057,5 +13055,38 @@
+@@ -13057,5 +13055,42 @@
    "dbab44016b8171e5": "Not reported by this provider",
    "112e6f4e8b9d3b4d": "Rate",
    "077433dde44c0bdb": "Partial: measured from incomplete data.",
@@ -2680,23 +3252,27 @@ index 0fc7421cda..b3dedabf64 100644
 +  "5dcc87e26d4dc762": "Current provider",
 +  "9b27f25d7340ed67": "Left",
 +  "7c5f4a2569845929": "Used",
-+  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
 +  "3ed184bf2a1cebd8": "Reset where stats show to default",
 +  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
-+  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
 +  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
-+  "c8349436b3f36678": "Show each limit as the share left or the share used. Warning colors still mean close to running out.",
 +  "33cfca4835c9cda2": "Reset show limits as to default",
-+  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "2796dafc8c101aff": "Reset {metric} to default",
 +  "77aeb1520122e429": "Show stats",
 +  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
 +  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
 +  "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
++  "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
  }
 diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
-index e250442048..1fe3d45f30 100644
+index e250442048..a795afc55f 100644
 --- a/apps/web/src/i18n/translations/ru.json
 +++ b/apps/web/src/i18n/translations/ru.json
 @@ -12977,9 +12977,7 @@
@@ -2709,7 +3285,7 @@ index e250442048..1fe3d45f30 100644
    "f3e82ffb3e22c609": "Choose a project before compacting",
    "38baeebc3b47b857": "Compaction is unavailable for this provider",
    "d35c2d635ba3a859": "Compacting is unavailable right now",
-@@ -13057,5 +13055,38 @@
+@@ -13057,5 +13055,42 @@
    "dbab44016b8171e5": "Not reported by this provider",
    "112e6f4e8b9d3b4d": "Rate",
    "077433dde44c0bdb": "Partial: measured from incomplete data.",
@@ -2734,23 +3310,27 @@ index e250442048..1fe3d45f30 100644
 +  "5dcc87e26d4dc762": "Current provider",
 +  "9b27f25d7340ed67": "Left",
 +  "7c5f4a2569845929": "Used",
-+  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
 +  "3ed184bf2a1cebd8": "Reset where stats show to default",
 +  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
-+  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
 +  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
-+  "c8349436b3f36678": "Show each limit as the share left or the share used. Warning colors still mean close to running out.",
 +  "33cfca4835c9cda2": "Reset show limits as to default",
-+  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "2796dafc8c101aff": "Reset {metric} to default",
 +  "77aeb1520122e429": "Show stats",
 +  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
 +  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
 +  "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
++  "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
  }
 diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
-index 25bfeccda0..6398ff5e2b 100644
+index 25bfeccda0..9b8ee838ff 100644
 --- a/apps/web/src/i18n/translations/sv.json
 +++ b/apps/web/src/i18n/translations/sv.json
 @@ -12984,9 +12984,7 @@
@@ -2763,7 +3343,7 @@ index 25bfeccda0..6398ff5e2b 100644
    "f3e82ffb3e22c609": "Choose a project before compacting",
    "38baeebc3b47b857": "Compaction is unavailable for this provider",
    "d35c2d635ba3a859": "Compacting is unavailable right now",
-@@ -13064,5 +13062,38 @@
+@@ -13064,5 +13062,42 @@
    "dbab44016b8171e5": "Not reported by this provider",
    "112e6f4e8b9d3b4d": "Rate",
    "077433dde44c0bdb": "Partial: measured from incomplete data.",
@@ -2788,23 +3368,27 @@ index 25bfeccda0..6398ff5e2b 100644
 +  "5dcc87e26d4dc762": "Current provider",
 +  "9b27f25d7340ed67": "Left",
 +  "7c5f4a2569845929": "Used",
-+  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
 +  "3ed184bf2a1cebd8": "Reset where stats show to default",
 +  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
-+  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
 +  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
-+  "c8349436b3f36678": "Show each limit as the share left or the share used. Warning colors still mean close to running out.",
 +  "33cfca4835c9cda2": "Reset show limits as to default",
-+  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "2796dafc8c101aff": "Reset {metric} to default",
 +  "77aeb1520122e429": "Show stats",
 +  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
 +  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
 +  "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
++  "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
  }
 diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
-index cd1e31b102..7585847d7b 100644
+index cd1e31b102..f736b02c65 100644
 --- a/apps/web/src/i18n/translations/zh.json
 +++ b/apps/web/src/i18n/translations/zh.json
 @@ -12991,9 +12991,7 @@
@@ -2817,7 +3401,7 @@ index cd1e31b102..7585847d7b 100644
    "f3e82ffb3e22c609": "Choose a project before compacting",
    "38baeebc3b47b857": "Compaction is unavailable for this provider",
    "d35c2d635ba3a859": "Compacting is unavailable right now",
-@@ -13071,5 +13069,38 @@
+@@ -13071,5 +13069,42 @@
    "dbab44016b8171e5": "Not reported by this provider",
    "112e6f4e8b9d3b4d": "Rate",
    "077433dde44c0bdb": "Partial: measured from incomplete data.",
@@ -2842,20 +3426,24 @@ index cd1e31b102..7585847d7b 100644
 +  "5dcc87e26d4dc762": "Current provider",
 +  "9b27f25d7340ed67": "Left",
 +  "7c5f4a2569845929": "Used",
-+  "7154e4f8c83939ca": "Under each reply, below the composer, and as a section of the thread details card. The card's right-click menu changes the last one too.",
 +  "3ed184bf2a1cebd8": "Reset where stats show to default",
 +  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
-+  "4da1a8c5a327e0d8": "Limits below the composer and in thread details: the thread's provider only, or every provider that reports them, the thread's first.",
 +  "36c2f9e7ccf69bdb": "Reset usage limits to show to default",
-+  "c8349436b3f36678": "Show each limit as the share left or the share used. Warning colors still mean close to running out.",
 +  "33cfca4835c9cda2": "Reset show limits as to default",
-+  "e35777be147cd3c4": "Show turn speed, latency, tokens, cache, context and usage limits. Exact values are plain, estimates are marked ≈, and — means the provider does not expose it.",
-+  "2796dafc8c101aff": "Reset {metric} to default",
 +  "77aeb1520122e429": "Show stats",
 +  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
 +  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
 +  "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
-+  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity"
++  "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
++  "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
  }
 diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
 index 8440e495b2..ce74d20d25 100644

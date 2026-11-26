@@ -18,11 +18,14 @@ environment ID. The refusal of loopback for a picked machine is unchanged.
 The supervisor waits for both backends and backs off exponentially. It
 restarts the helper after WSL restarts and after resume, and pauses when the
 Windows environment ID differs from the one paired.
+
+The app reports why pairing failed, and the Desktop keeps it as the
+bridge's last error, also once the bridge is off.
 ---
  apps/desktop/src/app/DesktopApp.test.ts       |   4 +
  apps/desktop/src/app/DesktopApp.ts            |   3 +
- .../src/hostBridge/DesktopHostBridge.test.ts  | 317 ++++++++++++
- .../src/hostBridge/DesktopHostBridge.ts       | 479 ++++++++++++++++++
+ .../src/hostBridge/DesktopHostBridge.test.ts  | 331 ++++++++++++
+ .../src/hostBridge/DesktopHostBridge.ts       | 484 ++++++++++++++++++
  .../src/hostBridge/hostBridgePlan.test.ts     | 207 ++++++++
  apps/desktop/src/hostBridge/hostBridgePlan.ts | 157 ++++++
  apps/desktop/src/ipc/DesktopIpcHandlers.ts    |   3 +
@@ -41,12 +44,12 @@ Windows environment ID differs from the one paired.
  apps/server/src/peer/PeerLinks.test.ts        | 110 ++++
  apps/server/src/peer/PeerLinks.ts             |  76 ++-
  packages/contracts/src/environment.ts         |   2 +
- packages/contracts/src/ipc.ts                 |  57 +++
+ packages/contracts/src/ipc.ts                 |  59 +++
  packages/contracts/src/peerLink.ts            |   6 +
  packages/shared/package.json                  |   4 +
  packages/shared/src/hostBridgeMux.test.ts     | 214 ++++++++
  packages/shared/src/hostBridgeMux.ts          | 327 ++++++++++++
- 27 files changed, 2367 insertions(+), 5 deletions(-)
+ 27 files changed, 2388 insertions(+), 5 deletions(-)
  create mode 100644 apps/desktop/src/hostBridge/DesktopHostBridge.test.ts
  create mode 100644 apps/desktop/src/hostBridge/DesktopHostBridge.ts
  create mode 100644 apps/desktop/src/hostBridge/hostBridgePlan.test.ts
@@ -102,10 +105,10 @@ index e5d95fbaee..d65e0ead88 100644
  const startup = Effect.gen(function* () {
 diff --git a/apps/desktop/src/hostBridge/DesktopHostBridge.test.ts b/apps/desktop/src/hostBridge/DesktopHostBridge.test.ts
 new file mode 100644
-index 0000000000..c7bd25e323
+index 0000000000..114ac81e09
 --- /dev/null
 +++ b/apps/desktop/src/hostBridge/DesktopHostBridge.test.ts
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,331 @@
 +import { assert, describe, it } from "@effect/vitest";
 +import { encodeHello } from "@t3tools/shared/hostBridgeMux";
 +import * as Deferred from "effect/Deferred";
@@ -355,6 +358,20 @@ index 0000000000..c7bd25e323
 +    }).pipe(Effect.scoped, Effect.provide(layerFor(fx, {})));
 +  });
 +
++  it.effect("keeps a pairing failure the app reports as the last error, even once off", () => {
++    const fx = fixture();
++    return Effect.gen(function* () {
++      const bridge = yield* DesktopHostBridge.DesktopHostBridge;
++      yield* Effect.forkScoped(bridge.run);
++      const failed = yield* bridge.set({ enabled: true, failure: "Pairing: refused" });
++      assert.strictEqual(failed.lastError, "Pairing: refused");
++      const off = yield* bridge.set({ enabled: false });
++      assert.strictEqual(off.lastError, "Pairing: refused");
++      const cleared = yield* bridge.set({ enabled: true, failure: null });
++      assert.isNull(cleared.lastError);
++    }).pipe(Effect.scoped, Effect.provide(layerFor(fx, {})));
++  });
++
 +  it.effect("turning it off stops the helper and starts nothing more", () => {
 +    const fx = fixture();
 +    return Effect.gen(function* () {
@@ -425,10 +442,10 @@ index 0000000000..c7bd25e323
 +});
 diff --git a/apps/desktop/src/hostBridge/DesktopHostBridge.ts b/apps/desktop/src/hostBridge/DesktopHostBridge.ts
 new file mode 100644
-index 0000000000..e922a28b95
+index 0000000000..76ebb15ffc
 --- /dev/null
 +++ b/apps/desktop/src/hostBridge/DesktopHostBridge.ts
-@@ -0,0 +1,479 @@
+@@ -0,0 +1,484 @@
 +// @effect-diagnostics nodeBuiltinImport:off -- Bridged streams connect to the Windows backend over Windows loopback sockets.
 +import * as NodeNet from "node:net";
 +
@@ -824,10 +841,10 @@ index 0000000000..e922a28b95
 +        runtime.attempt = 0;
 +      }
 +    }
++    // Turning it off resets the backoff but keeps the last error for the diagnostics.
 +    if (!observation.enabled) {
 +      runtime.restarts = 0;
 +      runtime.attempt = 0;
-+      runtime.lastError = null;
 +      runtime.nextRetryAt = null;
 +    }
 +    if (runtime.mux !== null) runtime.streams = runtime.mux.stats;
@@ -883,7 +900,12 @@ index 0000000000..e922a28b95
 +  return DesktopHostBridge.of({
 +    state: Ref.get(stateRef),
 +    set: Effect.fn("desktop.hostBridge.set")(function* (input) {
-+      yield* appSettings.setHostBridge(input);
++      yield* appSettings.setHostBridge({
++        enabled: input.enabled,
++        ...(input.environmentId === undefined ? {} : { environmentId: input.environmentId }),
++      });
++      // Pairing runs in the app; its failures belong in the same diagnostics as the helper's.
++      if (input.failure !== undefined) runtime.lastError = input.failure;
 +      // Answer with the state the change leads to, not the one before it.
 +      return yield* tick.pipe(
 +        Effect.catchCause(() => Ref.get(stateRef)),
@@ -2148,10 +2170,10 @@ index b07eeb04f5..c23105a99d 100644
    mcpHostedApproval: Schema.optionalKey(Schema.Boolean),
    /** Server answers server.prepareTriage. */
 diff --git a/packages/contracts/src/ipc.ts b/packages/contracts/src/ipc.ts
-index 03a0541d4d..525d42fca5 100644
+index 03a0541d4d..fb31b76815 100644
 --- a/packages/contracts/src/ipc.ts
 +++ b/packages/contracts/src/ipc.ts
-@@ -614,6 +614,59 @@ export const DesktopWslRuntimeStatusSchema = Schema.Struct({
+@@ -614,6 +614,61 @@ export const DesktopWslRuntimeStatusSchema = Schema.Struct({
  });
  export type DesktopWslRuntimeStatus = typeof DesktopWslRuntimeStatusSchema.Type;
  
@@ -2205,13 +2227,15 @@ index 03a0541d4d..525d42fca5 100644
 +  enabled: Schema.Boolean,
 +  /** The Windows environment paired; absent keeps it, null forgets it. */
 +  environmentId: Schema.optionalKey(Schema.NullOr(Schema.String)),
++  /** Why pairing failed in the app, kept as the bridge's last error; null clears it. */
++  failure: Schema.optionalKey(Schema.NullOr(Schema.String)),
 +});
 +export type DesktopHostBridgeSetInput = typeof DesktopHostBridgeSetInputSchema.Type;
 +
  export type DesktopPreviewNavStatus =
    | { kind: "Idle" }
    | { kind: "Loading"; url: string; title: string }
-@@ -1225,6 +1278,10 @@ export interface DesktopBridge {
+@@ -1225,6 +1280,10 @@ export interface DesktopBridge {
    setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
    setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
    getWslRuntimeStatus?: () => Promise<DesktopWslRuntimeStatus>;
