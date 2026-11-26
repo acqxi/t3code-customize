@@ -1,32 +1,42 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler South <tsouth2@gmail.com>
 Date: Thu, 8 Oct 2026 22:05:19 -0400
-Subject: [PATCH 1/5] Stats for Nerds: response throughput and the composer
+Subject: [PATCH 1/6] Stats for Nerds: response throughput and the composer
  stats line
 
 ---
- .../Adapters/ClaudeAdapterV2.test.ts          | 200 +++++++
+ .../Adapters/ClaudeAdapterV2.test.ts          | 210 +++++++
  .../Adapters/ClaudeAdapterV2.ts               |  38 +-
  .../Adapters/ClaudeResponseThroughput.test.ts | 230 ++++++++
  .../Adapters/ClaudeResponseThroughput.ts      | 155 +++++
- .../Adapters/CodexAdapterV2.test.ts           | 222 +++++++
- .../Adapters/CodexAdapterV2.ts                | 150 +++--
+ .../Adapters/CodexAdapterV2.test.ts           | 243 ++++++++
+ .../Adapters/CodexAdapterV2.ts                | 149 +++--
  .../Adapters/CodexResponseThroughput.test.ts  | 203 +++++++
  .../Adapters/CodexResponseThroughput.ts       | 150 +++++
  .../orchestration-v2/ProjectionStore.test.ts  |  37 +-
  .../src/orchestration-v2/ProjectionStore.ts   |   6 +-
  apps/web/src/components/ChatView.tsx          |  39 +-
  .../chat/ComposerStats.logic.test.ts          | 439 ++++++++++++++
- .../components/chat/ComposerStats.logic.ts    | 250 ++++++++
- .../web/src/components/chat/ComposerStats.tsx | 541 ++++++++++++++++++
+ .../components/chat/ComposerStats.logic.ts    | 252 ++++++++
+ .../web/src/components/chat/ComposerStats.tsx | 542 ++++++++++++++++++
  .../components/settings/SettingsPanels.tsx    |  31 +
  .../src/components/settings/settingsSearch.ts |   6 +
+ apps/web/src/i18n/translations/de.json        |   6 +-
+ apps/web/src/i18n/translations/en.json        |   6 +-
+ apps/web/src/i18n/translations/es.json        |   6 +-
+ apps/web/src/i18n/translations/fr.json        |   6 +-
+ apps/web/src/i18n/translations/ja.json        |   6 +-
+ apps/web/src/i18n/translations/ko.json        |   6 +-
+ apps/web/src/i18n/translations/pt-BR.json     |   6 +-
+ apps/web/src/i18n/translations/ru.json        |   6 +-
+ apps/web/src/i18n/translations/sv.json        |   6 +-
+ apps/web/src/i18n/translations/zh.json        |   6 +-
  .../state/orchestrationV2Projection.test.ts   |  13 +
  .../src/state/orchestrationV2Projection.ts    |  15 +-
- .../contracts/src/orchestrationV2.test.ts     |  71 +++
+ .../contracts/src/orchestrationV2.test.ts     |  72 +++
  packages/contracts/src/orchestrationV2.ts     |  10 +
  packages/contracts/src/settings.ts            |   2 +
- 21 files changed, 2757 insertions(+), 51 deletions(-)
+ 31 files changed, 2840 insertions(+), 62 deletions(-)
  create mode 100644 apps/server/src/orchestration-v2/Adapters/ClaudeResponseThroughput.test.ts
  create mode 100644 apps/server/src/orchestration-v2/Adapters/ClaudeResponseThroughput.ts
  create mode 100644 apps/server/src/orchestration-v2/Adapters/CodexResponseThroughput.test.ts
@@ -36,19 +46,19 @@ Subject: [PATCH 1/5] Stats for Nerds: response throughput and the composer
  create mode 100644 apps/web/src/components/chat/ComposerStats.tsx
 
 diff --git a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.test.ts b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.test.ts
-index 868e7fa0b..a97e1a0bf 100644
+index a7b110e851..08172ffce2 100644
 --- a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.test.ts
 +++ b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.test.ts
-@@ -4,6 +4,7 @@ import * as NodeFS from "node:fs";
- import * as NodeOS from "node:os";
+@@ -3,6 +3,7 @@ import * as NodeEvents from "node:events";
+ import * as NodeFS from "node:fs";
  import * as NodePath from "node:path";
  import * as NodeStream from "node:stream";
 +import { observeClaudeFrame } from "./ClaudeResponseThroughput.ts";
  
- import type {
-   Query as ClaudeQuery,
-@@ -2752,6 +2753,205 @@ describe("ClaudeAdapterV2 background wake turns", () => {
-       ),
+ import * as ClaudeSdk from "@anthropic-ai/claude-agent-sdk";
+ import { beforeEach, vi } from "vite-plus/test";
+@@ -8578,6 +8579,215 @@ describe("ClaudeAdapterV2 background wake turns", () => {
+     ),
    );
  
 +  it.effect(
@@ -135,7 +145,12 @@ index 868e7fa0b..a97e1a0bf 100644
 +        );
 +      }).pipe(
 +        Effect.provide(
-+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
++          Layer.mergeAll(
++            IdAllocator.layer,
++            McpProviderSessions.layer,
++            NodeServices.layer,
++            NodeCrypto.layer,
++          ),
 +        ),
 +      ),
 +  );
@@ -245,7 +260,12 @@ index 868e7fa0b..a97e1a0bf 100644
 +      yield* Queue.take(harness.terminalReceipts);
 +    }).pipe(
 +      Effect.provide(
-+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
++        Layer.mergeAll(
++          IdAllocator.layer,
++          McpProviderSessions.layer,
++          NodeServices.layer,
++          NodeCrypto.layer,
++        ),
 +      ),
 +    ),
 +  );
@@ -254,35 +274,35 @@ index 868e7fa0b..a97e1a0bf 100644
      "projects Claude thinking blocks when %s",
      (status) =>
 diff --git a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
-index 92c3b44ec..1b2771bfc 100644
+index 2084067025..f3f7a038e0 100644
 --- a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
 +++ b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
 @@ -1,3 +1,5 @@
 +import { ClaudeResponseThroughput, observeClaudeFrame } from "./ClaudeResponseThroughput.ts";
 +
- import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
+ import * as DocumentText from "../../provider/DocumentText.ts";
  import {
-   dynamicToolTitle,
-@@ -851,6 +853,10 @@ export const layerQueryRunner: Layer.Layer<
-           messages: Stream.fromAsyncIterable(claudeQueryMessages(queryRuntime), (cause) =>
-             queryRunnerError(cause, "fromAsyncIterable"),
-           ).pipe(
-+            Stream.map((message) => {
-+              observeClaudeFrame(message);
-+              return message;
-+            }),
-             Stream.tap((message) =>
-               logProtocolEvent({
-                 direction: "incoming",
-@@ -3031,6 +3037,7 @@ function formatClaudeUsageLimitWait(waitMs: number): string {
+   compactDynamicToolOutput,
+@@ -1926,6 +1928,10 @@ export const layerQueryRunner: Layer.Layer<
+           claudeQueryMessages(queryRuntime),
+           (cause) => cause,
+         ).pipe(
++          Stream.map((message) => {
++            observeClaudeFrame(message);
++            return message;
++          }),
+           Stream.catch((cause) =>
+             Stream.fromEffect(
+               Effect.gen(function* () {
+@@ -5380,6 +5386,7 @@ function formatClaudeUsageLimitWait(waitMs: number): string {
  }
  
  interface ActiveClaudeTurnContext {
 +  readonly responseThroughput: ClaudeResponseThroughput;
-   readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
-   readonly nativeThreadId: string;
-   readonly nativeTurnId: string;
-@@ -4313,6 +4320,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
+   retryBudgetFailure?: OrchestrationV2ProviderFailure;
+   // Set when the prompt starts or a request goes out; cleared by the turn's next frame.
+   unansweredRequestSince?: DateTime.Utc | undefined;
+@@ -7524,6 +7531,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
              return ordinal;
            });
  
@@ -291,17 +311,17 @@ index 92c3b44ec..1b2771bfc 100644
          const providerTurnPayload = (input: {
            readonly context: ActiveClaudeTurnContext;
            readonly status: OrchestrationV2ProviderTurn["status"];
-@@ -4331,6 +4340,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
-           status: input.status,
-           startedAt: input.context.startedAt,
-           completedAt: input.completedAt,
+@@ -7545,6 +7554,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
+           ...(input.context.executedModel === undefined
+             ? {}
+             : { model: input.context.executedModel }),
 +          ...(input.context.responseThroughput.aggregate() === undefined
 +            ? {}
 +            : { responseThroughput: input.context.responseThroughput.aggregate() }),
          });
  
          const buildToolCallArtifacts = (input: {
-@@ -6068,6 +6080,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
+@@ -10102,6 +10114,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                    failure: null,
                    threadDisposition,
                  };
@@ -309,7 +329,7 @@ index 92c3b44ec..1b2771bfc 100644
            yield* Effect.all(
              [
                emitProviderEvent({
-@@ -6954,6 +6967,20 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
+@@ -11355,6 +11368,20 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
            }
            yield* trackClaudeGoal({ nativeThreadId: liveQuery.nativeThreadId, context, message });
  
@@ -327,12 +347,12 @@ index 92c3b44ec..1b2771bfc 100644
 +            });
 +          }
 +
-           // Subagent narration belongs to its child thread, never the parent log.
            if (message.type === "stream_event" && !message.parent_tool_use_id) {
              const event = message.event;
-@@ -8660,8 +8687,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
-           };
-           yield* Ref.set(queryContext, context);
+             const reasoning = context.reasoning;
+@@ -13852,8 +13879,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
+             return context;
+           });
            yield* querySession.messages.pipe(
 -            Stream.runForEach((message) =>
 -              sdkMessageLock.withPermits(1)(
@@ -341,11 +361,11 @@ index 92c3b44ec..1b2771bfc 100644
 +              observeClaudeFrame(message, undefined, querySession);
 +              return sdkMessageLock.withPermits(1)(
                  Effect.suspend(() => {
+                   let firstInit = false;
                    if (
-                     message.type === "system" &&
-@@ -8672,8 +8701,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
+@@ -13930,8 +13959,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                    }
-                   return handleSdkMessage({ query: querySession, message });
+                   return adapterOptions.onSessionInit(reportedCwd).pipe(Effect.andThen(handled));
                  }),
 -              ),
 -            ),
@@ -354,17 +374,17 @@ index 92c3b44ec..1b2771bfc 100644
              Effect.exit,
              Effect.flatMap(
                Effect.fnUntraced(function* (exit: ClaudeQueryStreamExit) {
-@@ -8756,6 +8785,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
-               goalsByNativeThread.set(nativeThreadId, turnInput.providerThread.goal ?? null);
-             }
+@@ -14114,6 +14143,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
+               querySession.launchArgSettings,
+             );
              const context: ActiveClaudeTurnContext = {
 +              responseThroughput: new ClaudeResponseThroughput(),
                input: turnInput,
-               nativeThreadId,
-               nativeTurnId,
+               autoCompactWindow,
+               queryPolicy: querySession.queryPolicy,
 diff --git a/apps/server/src/orchestration-v2/Adapters/ClaudeResponseThroughput.test.ts b/apps/server/src/orchestration-v2/Adapters/ClaudeResponseThroughput.test.ts
 new file mode 100644
-index 000000000..948cefdf7
+index 0000000000..948cefdf7e
 --- /dev/null
 +++ b/apps/server/src/orchestration-v2/Adapters/ClaudeResponseThroughput.test.ts
 @@ -0,0 +1,230 @@
@@ -600,7 +620,7 @@ index 000000000..948cefdf7
 +});
 diff --git a/apps/server/src/orchestration-v2/Adapters/ClaudeResponseThroughput.ts b/apps/server/src/orchestration-v2/Adapters/ClaudeResponseThroughput.ts
 new file mode 100644
-index 000000000..4e2ee1812
+index 0000000000..4e2ee18122
 --- /dev/null
 +++ b/apps/server/src/orchestration-v2/Adapters/ClaudeResponseThroughput.ts
 @@ -0,0 +1,155 @@
@@ -760,28 +780,28 @@ index 000000000..4e2ee1812
 +  }
 +}
 diff --git a/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.test.ts b/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.test.ts
-index 8f6d0edb7..1d58e76c4 100644
+index 13b94fd030..a74c59afd2 100644
 --- a/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.test.ts
 +++ b/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.test.ts
-@@ -1968,6 +1968,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
-       Effect.void,
-     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
-     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
+@@ -1735,6 +1735,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
+     promptSuggestions: Effect.Effect<boolean> = Effect.succeed(false),
+     onNotification: (method: string) => Effect.Effect<void> = () => Effect.void,
+     models?: CodexAdapterV2.CodexAdapterV2Options["models"],
 +    hooks: Pick<CodexAdapterV2.CodexAdapterV2Options, "registerUsageLimitsReader"> = {},
    ) =>
      Effect.gen(function* () {
        const fileSystem = yield* FileSystem.FileSystem;
-@@ -2012,6 +2013,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
-         environment: {},
-         clientFactory,
-         crypto: yield* Crypto.Crypto,
+@@ -1800,6 +1801,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
+         ...(onUsageLimits ? { onUsageLimits } : {}),
+         ...(models ? { models } : {}),
+         digest: yield* Digest.Digest,
 +        ...hooks,
          fileSystem,
          idAllocator,
          serverConfig,
-@@ -2085,6 +2087,74 @@ describe("CodexAdapterV2 post-settle continuation", () => {
-       };
-     });
+@@ -2607,6 +2609,90 @@ describe("CodexAdapterV2 post-settle continuation", () => {
+       ),
+   );
  
 +  it.effect("reads fresh limits through the existing initialized session connection", () =>
 +    Effect.scoped(
@@ -828,6 +848,11 @@ index 8f6d0edb7..1d58e76c4 100644
 +              methods.push(method);
 +            }),
 +          undefined,
++          undefined,
++          undefined,
++          undefined,
++          undefined,
++          undefined,
 +          {
 +            registerUsageLimitsReader: (read) =>
 +              Effect.gen(function* () {
@@ -842,10 +867,21 @@ index 8f6d0edb7..1d58e76c4 100644
 +        const limits = yield* reader!;
 +        assert.strictEqual(limits?.windows[0]?.usedPercent, 60);
 +        assert.strictEqual(limits?.checkedAt, "1970-01-01T00:01:00.000Z");
-+        assert.deepStrictEqual(methods, ["initialize", "thread/start", "account/rateLimits/read"]);
++        // config/read is the session's own MCP config read before thread/start.
++        assert.deepStrictEqual(methods, [
++          "initialize",
++          "config/read",
++          "thread/start",
++          "account/rateLimits/read",
++        ]);
 +      }).pipe(
 +        Effect.provide(
-+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
++          Layer.mergeAll(
++            IdAllocator.layer,
++            McpProviderSessions.layer,
++            NodeServices.layer,
++            NodeCrypto.layer,
++          ),
 +        ),
 +      ),
 +    ),
@@ -854,15 +890,15 @@ index 8f6d0edb7..1d58e76c4 100644
    it.effect.each(["supported", "unsupported", "invalid"] as const)(
      "delivers native history with %s app-server protocol",
      (response) =>
-@@ -2769,6 +2839,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
-         );
-         assert.equal(completed?.type, "provider_turn.updated");
-         if (completed?.type === "provider_turn.updated") {
-+          assert.equal(completed.providerTurn.responseThroughput, undefined);
-           assert.deepEqual(completed.providerTurn.turnTokenUsage, {
-             usageStatus: "complete",
-             usageScope: "main_agent",
-@@ -2998,6 +3069,157 @@ describe("CodexAdapterV2 post-settle continuation", () => {
+@@ -3490,6 +3576,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
+       );
+       assert.equal(completed?.type, "provider_turn.updated");
+       if (completed?.type === "provider_turn.updated") {
++        assert.equal(completed.providerTurn.responseThroughput, undefined);
+         assert.deepEqual(completed.providerTurn.turnTokenUsage, {
+           usageStatus: "complete",
+           usageScope: "main_agent",
+@@ -4402,6 +4489,162 @@ describe("CodexAdapterV2 post-settle continuation", () => {
      ),
    );
  
@@ -1011,62 +1047,64 @@ index 8f6d0edb7..1d58e76c4 100644
 +          );
 +        }).pipe(
 +          Effect.provide(
-+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
++            Layer.mergeAll(
++              IdAllocator.layer,
++              McpProviderSessions.layer,
++              NodeServices.layer,
++              NodeCrypto.layer,
++            ),
 +          ),
 +        ),
 +      ),
 +  );
 +
    it.effect("preserves T3 context on the wire and restores it after compaction", () =>
-     Effect.scoped(
-       Effect.gen(function* () {
+     Effect.gen(function* () {
+       const nativeThreadId = "context-thread";
 diff --git a/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts b/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts
-index 7f55417ea..7b4c38219 100644
+index 615b662ae4..2ffaf30237 100644
 --- a/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts
 +++ b/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts
 @@ -1,3 +1,4 @@
 +import { CodexResponseThroughput } from "./CodexResponseThroughput.ts";
- import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
- import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
- import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
-@@ -20,6 +21,7 @@ import {
+ import { pipe } from "effect/Function";
+ import * as DocumentText from "../../provider/DocumentText.ts";
+ import { brokenRuntimeError } from "../../provider/providerCompatibility.ts";
+@@ -25,6 +26,7 @@ import {
  } from "../../provider/CodexProvider.ts";
  import {
    codexRateLimitsToUpdate,
 +  codexRateLimitsToLimits,
    mergeCodexRateLimits,
-   codexUsageLimitResetAt,
-   type CodexRateLimitSnapshot,
-@@ -66,6 +68,7 @@ import type {
+   codexMessageResetAt,
+   codexTimeZone,
+@@ -85,6 +87,7 @@ import type {
    ProviderThreadId,
    ProviderTurnId,
    ProviderInstanceId,
 +  ServerProviderUsageLimits,
    RuntimeMode,
-   RuntimeRequestId,
-   ThreadId,
-@@ -1120,6 +1123,7 @@ function codexErrorInfoCode(value: unknown): string | null {
+ } from "@t3tools/contracts";
+ import * as CodexClient from "effect-codex-app-server/client";
+@@ -1435,6 +1438,7 @@ function failureResetAt(
  }
  
  interface ActiveCodexTurnContext {
 +  readonly responseThroughput?: CodexResponseThroughput;
-   latestProviderFailure?: {
-     readonly nativeMessage: string;
-     readonly failure: OrchestrationV2ProviderFailure;
-@@ -1598,7 +1602,10 @@ export type CodexAdapterV2DriverEnv =
- 
- export const createCodexAdapterV2 = (
+   hookStopReason?: string;
+   appliedServiceTier?: string;
+   capacityRetryAttempt?: number;
+@@ -2037,7 +2041,7 @@ export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapter
    { instanceId, environment, enabled, config }: ProviderAdapterDriverCreateInput<CodexSettings>,
--  hooks: Pick<CodexAdapterV2Options, "onUsageLimits" | "resolveRuntime"> = {},
-+  hooks: Pick<
-+    CodexAdapterV2Options,
-+    "onUsageLimits" | "resolveRuntime" | "registerUsageLimitsReader"
-+  > = {},
- ) =>
-   Effect.gen(function* () {
-     const clientFactory = yield* CodexAppServerClientFactory;
-@@ -1685,6 +1692,9 @@ const layer: Layer.Layer<
- );
+   hooks: Pick<
+     CodexAdapterV2Options,
+-    "onUsageLimits" | "resolveRuntime" | "compatibility" | "models"
++    "onUsageLimits" | "resolveRuntime" | "compatibility" | "models" | "registerUsageLimitsReader"
+   > = {},
+ ) {
+   const clientFactory = yield* CodexAppServerClientFactory;
+@@ -2086,6 +2090,9 @@ export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapter
+ });
  
  export interface CodexAdapterV2Options {
 +  readonly registerUsageLimitsReader?: (
@@ -1075,10 +1113,10 @@ index 7f55417ea..7b4c38219 100644
    readonly instanceId: ProviderInstanceId;
    readonly settings: CodexSettings;
    readonly environment: NodeJS.ProcessEnv;
-@@ -1827,6 +1837,23 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
-             yield* Ref.set(initialized, true);
-           }),
-         );
+@@ -2316,6 +2323,23 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+             ),
+             withAppServerDeadline("config/read"),
+           );
 +        if (adapterOptions.registerUsageLimitsReader) {
 +          yield* adapterOptions.registerUsageLimitsReader(
 +            Effect.gen(function* () {
@@ -1099,17 +1137,17 @@ index 7f55417ea..7b4c38219 100644
          const now = yield* DateTime.now;
          const session = providerSession({
            providerSessionId: input.providerSessionId,
-@@ -2065,6 +2092,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
-               itemParentNodeId: input.turnInput.rootNodeId,
-               rootNodeId: input.turnInput.rootNodeId,
-               subagent: null,
-+              responseThroughput: new CodexResponseThroughput(
-+                DateTime.toEpochMillis(yield* DateTime.now),
-+              ),
-               startedAt: input.startedAt,
-               itemPositions: new Map(),
-             };
-@@ -3382,12 +3412,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+@@ -2783,6 +2807,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+             itemParentNodeId: input.turnInput.rootNodeId,
+             rootNodeId: input.turnInput.rootNodeId,
+             subagent: null,
++            responseThroughput: new CodexResponseThroughput(
++              DateTime.toEpochMillis(yield* DateTime.now),
++            ),
+             startedAt: input.startedAt,
+             itemPositions: new Map(),
+             fileChangeKindsByItem: new Map(),
+@@ -4248,12 +4275,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
            return key;
          };
          const appendReasoning = Effect.fn("CodexAdapterV2.appendReasoning")(function* (
@@ -1125,26 +1163,26 @@ index 7f55417ea..7b4c38219 100644
 +            context.responseThroughput?.activity(payload.itemId, receipt);
            yield* completeProviderRetry(context, yield* DateTime.now);
            const itemId = reasoningPartKey(payload.turnId, payload.itemId, stream, index);
-           // Reserve the position before the delayed flush, ahead of later tool items.
-@@ -4125,6 +4158,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+           // Reserve positions before delayed flushes so later tools stay after them.
+@@ -5043,6 +5073,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+           readonly appName?: string;
            readonly options?: ReadonlyArray<ProviderApprovalOption>;
-         }) =>
-           Effect.gen(function* () {
-+            input.context.responseThroughput?.wait();
-             const createdAt = yield* DateTime.now;
-             // A subagent's approval is asked on the top-level thread and run,
-             // under the subagent that asked, where the user can see and answer it.
-@@ -4221,6 +4255,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+         }) {
++          input.context.responseThroughput?.wait();
+           const createdAt = yield* DateTime.now;
+           const reason = trimText(input.reason);
+           const { owner, subagent } = approvalOwnerCodexTurn(input.context);
+@@ -5140,6 +5171,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+           readonly questions: ReadonlyArray<CodexSchema.ToolRequestUserInputParams__ToolRequestUserInputQuestion>;
            readonly responseMode?: "message";
-         }) =>
-           Effect.gen(function* () {
-+            if (input.responseMode !== "message") input.context.responseThroughput?.wait();
-             const createdAt = yield* DateTime.now;
-             const requestId = yield* idAllocator.allocate.runtimeRequest({
-               driver: CODEX_PROVIDER,
-@@ -4310,10 +4345,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
-             return { node, request, turnItem };
-           });
+         }) {
++          if (input.responseMode !== "message") input.context.responseThroughput?.wait();
+           const createdAt = yield* DateTime.now;
+           const requestId = yield* idAllocator.allocate.runtimeRequest({
+             driver: CODEX_PROVIDER,
+@@ -5235,10 +5267,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+           return { node, request, turnItem, nativeQuestionIds };
+         });
  
 -        yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
 -          Effect.gen(function* () {
@@ -1161,7 +1199,7 @@ index 7f55417ea..7b4c38219 100644
                yield* completeProviderRetry(context, yield* DateTime.now);
              }
              yield* agentMessageDeltas.append({
-@@ -4321,37 +4362,45 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+@@ -5246,8 +5284,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                itemId: payload.itemId,
                delta: payload.delta,
              });
@@ -1169,6 +1207,11 @@ index 7f55417ea..7b4c38219 100644
 -        );
 +          });
 +        });
+ 
+         yield* client.handleServerNotification("item/commandExecution/outputDelta", (payload) =>
+           Effect.gen(function* () {
+@@ -5270,33 +5308,41 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+         );
  
          yield* client.handleServerNotification("item/reasoning/summaryTextDelta", (payload) =>
 -          appendReasoning(payload, "summary", payload.summaryIndex),
@@ -1217,7 +1260,7 @@ index 7f55417ea..7b4c38219 100644
              yield* completeProviderRetry(context, yield* DateTime.now);
              const steps = payload.plan.map((step, index) => ({
                id: `step-${index + 1}`,
-@@ -4381,8 +4430,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+@@ -5328,8 +5374,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                driver: CODEX_PROVIDER,
                turnItem: artifacts.turnItem,
              });
@@ -1228,8 +1271,8 @@ index 7f55417ea..7b4c38219 100644
  
          yield* client.handleServerNotification("account/rateLimits/updated", (payload) =>
            Effect.gen(function* () {
-@@ -4415,6 +4464,29 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
-           }).pipe(Effect.orDie),
+@@ -5382,6 +5428,29 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+           ),
          );
  
 +        for (const method of [
@@ -1258,9 +1301,9 @@ index 7f55417ea..7b4c38219 100644
          yield* client.handleServerNotification("thread/tokenUsage/updated", (payload) =>
            Effect.gen(function* () {
              accumulateCodexTurnTokenUsage(
-@@ -4693,13 +4765,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
-           });
-         });
+@@ -5772,13 +5841,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+           }).pipe(Effect.orDie, turnTerminalizationPermit.withPermits(1)),
+         );
  
 -        yield* client.handleServerNotification("item/started", (payload) =>
 -          Effect.gen(function* () {
@@ -1278,7 +1321,7 @@ index 7f55417ea..7b4c38219 100644
              if (payload.item.type === "contextCompaction") {
                yield* emitCompactionItem(
                  context,
-@@ -4816,11 +4892,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+@@ -5925,11 +5998,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                driver: CODEX_PROVIDER,
                turnItem: artifacts.turnItem,
              });
@@ -1293,9 +1336,9 @@ index 7f55417ea..7b4c38219 100644
 +          const receipt = performance.now();
 +          return Effect.gen(function* () {
              if (payload.item.type === "contextCompaction")
-               // The notification callback runs on the input reader. Let it read
-               // the injection response while the session-scoped request waits.
-@@ -4847,6 +4924,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+               yield* Ref.update(threadsAwaitingContextRestore, (current) =>
+                 new Set(current).add(payload.threadId),
+@@ -5954,6 +6028,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                return;
              }
              const { context, settled } = resolved;
@@ -1308,7 +1351,7 @@ index 7f55417ea..7b4c38219 100644
  
              if (payload.item.type === "reasoning") {
                yield* completeReasoning(payload.turnId, payload.item);
-@@ -5110,8 +5193,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+@@ -6294,8 +6374,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                  result: text,
                });
              }
@@ -1319,10 +1362,10 @@ index 7f55417ea..7b4c38219 100644
  
          yield* client.handleServerRequest("item/commandExecution/requestApproval", (payload) =>
            Effect.gen(function* () {
-@@ -5872,6 +5955,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
-               for (const [key, part] of reasoningParts) {
-                 if (part.turnId === input.nativeTurnId) reasoningParts.delete(key);
-               }
+@@ -7313,6 +7393,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+                 (goalsByNativeThread.get(nativeThreadId)?.status === "active" ||
+                   (activation !== undefined && !activation.stopped));
+               const executedModel = reportedTurnModel(nativeThreadId ?? "", input.nativeTurnId);
 +              const turnTokenUsage = completeCodexTurnTokenUsage(
 +                usageStateForThread(
 +                  input.context.providerThread.nativeThreadRef?.nativeId ??
@@ -1330,12 +1373,13 @@ index 7f55417ea..7b4c38219 100644
 +                ),
 +                input.nativeTurnId,
 +                input.status === "completed",
++                executedModel,
 +              );
 +              const responseThroughput = input.context.responseThroughput?.finalize(turnTokenUsage);
-               const nativeThreadId = input.context.providerThread.nativeThreadRef?.nativeId;
-               // Codex continues an active goal with another turn, so the run stays
-               // open and this turn reads as running until that turn starts.
-@@ -5898,14 +5990,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
+               const completedTurn: OrchestrationV2ProviderTurn = {
+                 id: input.context.providerTurnId,
+                 providerThreadId: input.context.providerThread.id,
+@@ -7328,16 +7418,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                  status: input.status,
                  startedAt: input.context.startedAt,
                  completedAt: input.completedAt,
@@ -1346,15 +1390,17 @@ index 7f55417ea..7b4c38219 100644
 -                  ),
 -                  input.nativeTurnId,
 -                  input.status === "completed",
+-                  executedModel,
 -                ),
 +                turnTokenUsage,
+                 ...(executedModel === undefined ? {} : { model: executedModel }),
 +                ...(responseThroughput === undefined ? {} : { responseThroughput }),
                };
                if (!holdsForGoal) {
                  yield* emitProviderEvent({
 diff --git a/apps/server/src/orchestration-v2/Adapters/CodexResponseThroughput.test.ts b/apps/server/src/orchestration-v2/Adapters/CodexResponseThroughput.test.ts
 new file mode 100644
-index 000000000..9e6d8b284
+index 0000000000..9e6d8b2848
 --- /dev/null
 +++ b/apps/server/src/orchestration-v2/Adapters/CodexResponseThroughput.test.ts
 @@ -0,0 +1,203 @@
@@ -1563,7 +1609,7 @@ index 000000000..9e6d8b284
 +});
 diff --git a/apps/server/src/orchestration-v2/Adapters/CodexResponseThroughput.ts b/apps/server/src/orchestration-v2/Adapters/CodexResponseThroughput.ts
 new file mode 100644
-index 000000000..1df8c4443
+index 0000000000..1df8c44435
 --- /dev/null
 +++ b/apps/server/src/orchestration-v2/Adapters/CodexResponseThroughput.ts
 @@ -0,0 +1,150 @@
@@ -1718,10 +1764,10 @@ index 000000000..1df8c4443
 +  }
 +}
 diff --git a/apps/server/src/orchestration-v2/ProjectionStore.test.ts b/apps/server/src/orchestration-v2/ProjectionStore.test.ts
-index 0729b0a93..73e2d73ac 100644
+index 211b2c8f89..bcff958169 100644
 --- a/apps/server/src/orchestration-v2/ProjectionStore.test.ts
 +++ b/apps/server/src/orchestration-v2/ProjectionStore.test.ts
-@@ -771,6 +771,13 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
+@@ -4037,6 +4037,13 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
          outputTokens: 1_000,
          updatedAt: "2026-08-29T12:00:00.000Z",
        } as const;
@@ -1735,7 +1781,7 @@ index 0729b0a93..73e2d73ac 100644
        const replacementUsage = {
          usedTokens: 18_000,
          maxTokens: 200_000,
-@@ -827,10 +834,10 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
+@@ -4093,10 +4100,10 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
          nodeId,
          driver,
          occurredAt: now,
@@ -1748,7 +1794,7 @@ index 0729b0a93..73e2d73ac 100644
          type: "provider-turn.updated",
          threadId,
          nodeId,
-@@ -838,9 +845,28 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
+@@ -4104,9 +4111,28 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
          occurredAt: now,
          payload: { ...providerTurn, status: "completed", completedAt: now },
        });
@@ -1778,7 +1824,7 @@ index 0729b0a93..73e2d73ac 100644
        assert.strictEqual(reloaded.providerTurns[0]?.status, "completed");
  
        yield* projectionStore.apply({
-@@ -855,11 +881,16 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
+@@ -4121,11 +4147,16 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
            status: "completed",
            completedAt: now,
            tokenUsage: replacementUsage,
@@ -1796,10 +1842,10 @@ index 0729b0a93..73e2d73ac 100644
    );
  
 diff --git a/apps/server/src/orchestration-v2/ProjectionStore.ts b/apps/server/src/orchestration-v2/ProjectionStore.ts
-index ad92e25c8..48ead899e 100644
+index 5d7944394f..6f5e7c4fa2 100644
 --- a/apps/server/src/orchestration-v2/ProjectionStore.ts
 +++ b/apps/server/src/orchestration-v2/ProjectionStore.ts
-@@ -685,6 +685,9 @@ export function upsertProviderTurn(
+@@ -980,6 +980,9 @@ function upsertProviderTurn(
      ...((next.tokenUsage ?? current?.tokenUsage) === undefined
        ? {}
        : { tokenUsage: next.tokenUsage ?? current?.tokenUsage }),
@@ -1809,37 +1855,37 @@ index ad92e25c8..48ead899e 100644
    });
  }
  
-@@ -2325,7 +2328,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
-           }
-           case "provider-turn.updated": {
-             const existingRows =
--              event.payload.tokenUsage === undefined
-+              event.payload.tokenUsage === undefined ||
-+              event.payload.responseThroughput === undefined
-                 ? yield* sql<PayloadRow>`
+@@ -3021,7 +3024,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
+             }
+             case "provider-turn.updated": {
+               const existingRows =
+-                event.payload.tokenUsage === undefined
++                event.payload.tokenUsage === undefined ||
++                event.payload.responseThroughput === undefined
+                   ? yield* sql<PayloadRow>`
                      SELECT payload_json
                      FROM orchestration_v2_projection_provider_turns
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index f87663989..3b66c0023 100644
+index b720e53e82..6da7b9e64d 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
-@@ -500,6 +500,8 @@ import { useLinkedThreadPullRequest } from "./ThreadStatusIndicators";
- import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
- import { ThreadStatusLine } from "./chat/ThreadStatusLine";
- import { formatRelativeTimeLabel, formatRelativeTimeUntilLabel } from "../timestampFormat";
+@@ -355,6 +355,8 @@ import { useThreadLinkedPullRequest } from "./pullRequest/useThreadLinkedPullReq
+ import { useProactivePanels } from "../hooks/useProactivePanels";
+ import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEntries";
+ import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
 +import { ComposerStats } from "./chat/ComposerStats";
 +import { selectComposerStatsTurns, selectRecordedCompactions } from "./chat/ComposerStats.logic";
+ import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+ import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
  import { ComposerSurface } from "./chat/ComposerSurface";
- import { resolveThreadSyncPhase } from "../threadSync";
- import {
-@@ -3720,6 +3722,31 @@ export default function ChatView(props: ChatViewProps) {
-       ),
-     [activeThreadLiveTokenUsage, serverVisibleTurnItems, serverProjection],
+@@ -1597,6 +1599,31 @@ export default function ChatView(props: ChatViewProps) {
+     activeThreadLiveTokenUsage,
+     activeProviderThread,
    );
 +  const activeUsageLimits = activeProviderStatus?.usageLimits;
 +  const activeProviderName =
 +    activeProviderStatus?.displayName?.trim() || activeProviderStatus?.instanceId || "";
-+  const composerStats = useMemo(() => {
++  const composerStats = (() => {
 +    if (!settings.statsForNerdsEnabled) return null;
 +    const usageLimits = activeUsageLimits
 +      ? { limits: activeUsageLimits, providerName: activeProviderName }
@@ -1860,14 +1906,14 @@ index f87663989..3b66c0023 100644
 +        ),
 +      ),
 +    };
-+  }, [settings.statsForNerdsEnabled, serverProjection, activeUsageLimits, activeProviderName]);
-   const pendingBackgroundTasks = useMemo(() => {
-     if (serverProjection === null || serverProjection === undefined) {
-       return [];
-@@ -11718,10 +11745,14 @@ export default function ChatView(props: ChatViewProps) {
++  })();
+   const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection);
+   const activeWorkStartedAt =
+     deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
+@@ -4093,10 +4120,14 @@ export default function ChatView(props: ChatViewProps) {
                          </div>
-                       </div>
-                     </ComposerSurface.Shell>
+                       ) : null}
+                     </div>
 -                    <div
 -                      aria-hidden
 -                      className="h-[calc(env(safe-area-inset-bottom)+1rem)] sm:h-[calc(env(safe-area-inset-bottom)+1.25rem)]"
@@ -1885,7 +1931,7 @@ index f87663989..3b66c0023 100644
                </div>
 diff --git a/apps/web/src/components/chat/ComposerStats.logic.test.ts b/apps/web/src/components/chat/ComposerStats.logic.test.ts
 new file mode 100644
-index 000000000..479e94b19
+index 0000000000..479e94b193
 --- /dev/null
 +++ b/apps/web/src/components/chat/ComposerStats.logic.test.ts
 @@ -0,0 +1,439 @@
@@ -2330,10 +2376,10 @@ index 000000000..479e94b19
 +});
 diff --git a/apps/web/src/components/chat/ComposerStats.logic.ts b/apps/web/src/components/chat/ComposerStats.logic.ts
 new file mode 100644
-index 000000000..b4f72291f
+index 0000000000..5ea95d163a
 --- /dev/null
 +++ b/apps/web/src/components/chat/ComposerStats.logic.ts
-@@ -0,0 +1,250 @@
+@@ -0,0 +1,252 @@
 +import type {
 +  OrchestrationV2ProviderTurn,
 +  OrchestrationV2ThreadProjection,
@@ -2343,6 +2389,7 @@ index 000000000..b4f72291f
 +  TurnTokenUsage,
 +} from "@t3tools/contracts";
 +import * as DateTime from "effect/DateTime";
++import type { ThreadStructureTurnItem } from "@t3tools/client-runtime/state/shell";
 +
 +/** Provider turn ordinals are scoped to a provider thread; children have their own nodes. */
 +export function selectComposerStatsTurns(projection: {
@@ -2409,7 +2456,8 @@ index 000000000..b4f72291f
 +
 +/** These are observed completed events, not a lifetime count for a provider. */
 +export function selectRecordedCompactions(
-+  items: ReadonlyArray<OrchestrationV2TurnItem>,
++  // Thread structures omit streamed text, which compaction items never carry.
++  items: ReadonlyArray<ThreadStructureTurnItem>,
 +  turns: ReadonlyArray<OrchestrationV2ProviderTurn>,
 +): ReadonlyArray<Extract<OrchestrationV2TurnItem, { type: "compaction" }>> {
 +  const nodes = new Set(turns.map((turn) => turn.nodeId));
@@ -2427,7 +2475,7 @@ index 000000000..b4f72291f
 +  );
 +  const seen = new Set<string>();
 +  return items
-+    .filter((item): item is Extract<OrchestrationV2TurnItem, { type: "compaction" }> => {
++    .filter((item): item is Extract<ThreadStructureTurnItem, { type: "compaction" }> => {
 +      if (
 +        item.type !== "compaction" ||
 +        item.status !== "completed" ||
@@ -2586,10 +2634,10 @@ index 000000000..b4f72291f
 +}
 diff --git a/apps/web/src/components/chat/ComposerStats.tsx b/apps/web/src/components/chat/ComposerStats.tsx
 new file mode 100644
-index 000000000..025f57253
+index 0000000000..6eb19aa279
 --- /dev/null
 +++ b/apps/web/src/components/chat/ComposerStats.tsx
-@@ -0,0 +1,541 @@
+@@ -0,0 +1,542 @@
 +import type {
 +  OrchestrationV2ProviderTurn,
 +  OrchestrationV2TurnItem,
@@ -2597,11 +2645,12 @@ index 000000000..025f57253
 +  ServerProviderUsageWindow,
 +} from "@t3tools/contracts";
 +import { formatDuration } from "@t3tools/shared/orchestrationTiming";
-+import { formatResetsIn } from "@t3tools/shared/usageLimits";
++import { formatResetsIn } from "@t3tools/shared/usageLimitsCopy";
 +import * as DateTime from "effect/DateTime";
 +import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 +
-+import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
++import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
++import { formatContextWindowTokens } from "~/lib/contextWindow";
 +import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 +import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 +import { composerFloatingLayerProps } from "./composerEventScope";
@@ -3132,46 +3181,40 @@ index 000000000..025f57253
 +  );
 +}
 diff --git a/apps/web/src/components/settings/SettingsPanels.tsx b/apps/web/src/components/settings/SettingsPanels.tsx
-index ef60c9e3c..eff5830f7 100644
+index 10d4e2c6fa..e0d23512bf 100644
 --- a/apps/web/src/components/settings/SettingsPanels.tsx
 +++ b/apps/web/src/components/settings/SettingsPanels.tsx
-@@ -624,6 +624,9 @@ export function useSettingsRestore(onRestored?: () => void) {
-       ...(settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior
-         ? ["Follow-up behavior"]
-         : []),
-+      ...(settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled
-+        ? ["Stats for nerds"]
-+        : []),
-       ...(settings.contextWindowMeterEnabled !== DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled
-         ? ["Context window indicator"]
-         : []),
-@@ -697,6 +700,7 @@ export function useSettingsRestore(onRestored?: () => void) {
-       settings.diffLayout,
-       settings.proactivePanelsEnabled,
-       settings.environmentIdentificationMode,
-+      settings.statsForNerdsEnabled,
-       settings.contextWindowMeterEnabled,
-       settings.fontFamilyCode,
-       settings.fontFamilyComposer,
-@@ -812,6 +816,7 @@ export function useSettingsRestore(onRestored?: () => void) {
+@@ -594,6 +594,9 @@ export function useSettingsRestore(onRestored?: () => void) {
+     ...(settings.followUpBehavior !== DEFAULT_UNIFIED_SETTINGS.followUpBehavior
+       ? [gt("Follow-up behavior")]
+       : []),
++    ...(settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled
++      ? [gt("Stats for nerds")]
++      : []),
+     ...(settings.sideThreadOpenTarget !== DEFAULT_UNIFIED_SETTINGS.sideThreadOpenTarget
+       ? [gt("Open subagents and side chats in")]
+       : []),
+@@ -729,6 +732,7 @@ export function useSettingsRestore(onRestored?: () => void) {
        composerRichTextEnabled: DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled,
        sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut,
        followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
 +      statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
-       contextWindowMeterEnabled: DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled,
-       environmentIdentificationMode: DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode,
-       glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity,
-@@ -2826,6 +2831,32 @@ export function GeneralSettingsPanel() {
+       sideThreadOpenTarget: DEFAULT_UNIFIED_SETTINGS.sideThreadOpenTarget,
+       toolCallVisibility: DEFAULT_UNIFIED_SETTINGS.toolCallVisibility,
+       screenReaderAnnouncements: DEFAULT_UNIFIED_SETTINGS.screenReaderAnnouncements,
+@@ -1274,6 +1278,33 @@ export function ChatSettingsPanel() {
+             />
            }
          />
- 
 +        <SettingsRow
-+          {...searchableSetting("stats-for-nerds")}
-+          description="Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider."
++          {...setting("stats-for-nerds")}
++          description={gt(
++            "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
++          )}
 +          resetAction={
 +            settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled ? (
 +              <SettingResetButton
-+                label="stats for nerds"
++                ariaLabel={gt("Reset stats for nerds to default")}
 +                onClick={() =>
 +                  updateSettings({
 +                    statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
@@ -3186,36 +3229,185 @@ index ef60c9e3c..eff5830f7 100644
 +              onCheckedChange={(checked) =>
 +                updateSettings({ statsForNerdsEnabled: Boolean(checked) })
 +              }
-+              aria-label="Stats for nerds"
++              aria-label={gt("Stats for nerds")}
 +            />
 +          }
 +        />
-+
          <SettingsRow
-           {...searchableSetting("send-shortcut")}
-           description="Choose when Enter sends a prompt or inserts a new line"
+           {...setting("send-shortcut")}
+           description={gt("Choose when Enter sends a prompt or inserts a new line")}
 diff --git a/apps/web/src/components/settings/settingsSearch.ts b/apps/web/src/components/settings/settingsSearch.ts
-index 5747fc59d..1a3f101f9 100644
+index a7629c16be..4fc38779ca 100644
 --- a/apps/web/src/components/settings/settingsSearch.ts
 +++ b/apps/web/src/components/settings/settingsSearch.ts
-@@ -453,6 +453,12 @@ export const SETTINGS_SEARCH_ITEMS = [
-     to: "/settings/general",
-     searchTerms: ["composer rest resting scroll wheel conversation timeline shrink minimize"],
+@@ -829,6 +829,12 @@ export const SETTINGS_SEARCH_ITEMS = [
+     to: "/settings/chat",
+     searchTerms: [msg("composer rich text tiptap bold italic markdown styled wysiwyg")],
    },
 +  {
 +    id: "stats-for-nerds",
-+    title: "Stats for nerds",
-+    to: "/settings/general",
-+    searchTerms: ["context tokens cache elapsed telemetry composer usage"],
++    title: msg("Stats for nerds"),
++    to: "/settings/chat",
++    searchTerms: [msg("context tokens cache elapsed telemetry composer usage")],
 +  },
    {
      id: "send-shortcut",
-     title: "Send shortcut",
+     title: msg("Send shortcut"),
+diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
+index 5fd6ff3ede..36a40de60b 100644
+--- a/apps/web/src/i18n/translations/de.json
++++ b/apps/web/src/i18n/translations/de.json
+@@ -12975,5 +12975,9 @@
+   "201490988858b511": "zurückgezogen von {by}",
+   "99451a5d2d40440f": "Zurückgezogen von {by}.",
+   "3ee30a50b70fffab": "Zurückgezogen von {by}: {reason}",
+-  "92e129bf413a1220": "zurückgezogen"
++  "92e129bf413a1220": "zurückgezogen",
++  "01ff459d89a7efb4": "Stats for nerds",
++  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
++  "3b779e627048205a": "Reset stats for nerds to default",
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
+ }
+diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
+index fa018a7c51..3e797e18e7 100644
+--- a/apps/web/src/i18n/translations/en.json
++++ b/apps/web/src/i18n/translations/en.json
+@@ -12984,5 +12984,9 @@
+   "201490988858b511": "withdrawn by {by}",
+   "99451a5d2d40440f": "Withdrawn by {by}.",
+   "3ee30a50b70fffab": "Withdrawn by {by}: {reason}",
+-  "92e129bf413a1220": "withdrawn"
++  "92e129bf413a1220": "withdrawn",
++  "01ff459d89a7efb4": "Stats for nerds",
++  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
++  "3b779e627048205a": "Reset stats for nerds to default",
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
+ }
+diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
+index 50309bfa62..f7ae7b7f21 100644
+--- a/apps/web/src/i18n/translations/es.json
++++ b/apps/web/src/i18n/translations/es.json
+@@ -12970,5 +12970,9 @@
+   "201490988858b511": "retirada por {by}",
+   "99451a5d2d40440f": "Retirada por {by}.",
+   "3ee30a50b70fffab": "Retirada por {by}: {reason}",
+-  "92e129bf413a1220": "retirada"
++  "92e129bf413a1220": "retirada",
++  "01ff459d89a7efb4": "Stats for nerds",
++  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
++  "3b779e627048205a": "Reset stats for nerds to default",
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
+ }
+diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
+index ef718bab74..285dba6778 100644
+--- a/apps/web/src/i18n/translations/fr.json
++++ b/apps/web/src/i18n/translations/fr.json
+@@ -12975,5 +12975,9 @@
+   "201490988858b511": "retirée par {by}",
+   "99451a5d2d40440f": "Retirée par {by}.",
+   "3ee30a50b70fffab": "Retirée par {by} : {reason}",
+-  "92e129bf413a1220": "retirée"
++  "92e129bf413a1220": "retirée",
++  "01ff459d89a7efb4": "Stats for nerds",
++  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
++  "3b779e627048205a": "Reset stats for nerds to default",
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
+ }
+diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
+index 206f1bbddf..a3e5c62524 100644
+--- a/apps/web/src/i18n/translations/ja.json
++++ b/apps/web/src/i18n/translations/ja.json
+@@ -12911,5 +12911,9 @@
+   "201490988858b511": "{by} が取り下げ",
+   "99451a5d2d40440f": "{by} が取り下げました。",
+   "3ee30a50b70fffab": "{by} が取り下げました: {reason}",
+-  "92e129bf413a1220": "取り下げ済み"
++  "92e129bf413a1220": "取り下げ済み",
++  "01ff459d89a7efb4": "Stats for nerds",
++  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
++  "3b779e627048205a": "Reset stats for nerds to default",
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
+ }
+diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
+index 18acb61580..14ac96d31f 100644
+--- a/apps/web/src/i18n/translations/ko.json
++++ b/apps/web/src/i18n/translations/ko.json
+@@ -12908,5 +12908,9 @@
+   "201490988858b511": "{by}에서 철회함",
+   "99451a5d2d40440f": "{by}에서 철회했습니다.",
+   "3ee30a50b70fffab": "{by}에서 철회했습니다: {reason}",
+-  "92e129bf413a1220": "철회됨"
++  "92e129bf413a1220": "철회됨",
++  "01ff459d89a7efb4": "Stats for nerds",
++  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
++  "3b779e627048205a": "Reset stats for nerds to default",
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
+ }
+diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
+index 05b2204a44..f8bf38448a 100644
+--- a/apps/web/src/i18n/translations/pt-BR.json
++++ b/apps/web/src/i18n/translations/pt-BR.json
+@@ -12975,5 +12975,9 @@
+   "201490988858b511": "retirada por {by}",
+   "99451a5d2d40440f": "Retirada por {by}.",
+   "3ee30a50b70fffab": "Retirada por {by}: {reason}",
+-  "92e129bf413a1220": "retirada"
++  "92e129bf413a1220": "retirada",
++  "01ff459d89a7efb4": "Stats for nerds",
++  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
++  "3b779e627048205a": "Reset stats for nerds to default",
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
+ }
+diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
+index 3556dd9455..804fee4827 100644
+--- a/apps/web/src/i18n/translations/ru.json
++++ b/apps/web/src/i18n/translations/ru.json
+@@ -12975,5 +12975,9 @@
+   "201490988858b511": "отозван: {by}",
+   "99451a5d2d40440f": "Отозван: {by}.",
+   "3ee30a50b70fffab": "Отозван ({by}): {reason}",
+-  "92e129bf413a1220": "отозван"
++  "92e129bf413a1220": "отозван",
++  "01ff459d89a7efb4": "Stats for nerds",
++  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
++  "3b779e627048205a": "Reset stats for nerds to default",
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
+ }
+diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
+index 6b559d46a1..28076efe0e 100644
+--- a/apps/web/src/i18n/translations/sv.json
++++ b/apps/web/src/i18n/translations/sv.json
+@@ -12982,5 +12982,9 @@
+   "201490988858b511": "återkallad av {by}",
+   "99451a5d2d40440f": "Återkallad av {by}.",
+   "3ee30a50b70fffab": "Återkallad av {by}: {reason}",
+-  "92e129bf413a1220": "återkallad"
++  "92e129bf413a1220": "återkallad",
++  "01ff459d89a7efb4": "Stats for nerds",
++  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
++  "3b779e627048205a": "Reset stats for nerds to default",
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
+ }
+diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
+index 4d6210cc5e..77fb320250 100644
+--- a/apps/web/src/i18n/translations/zh.json
++++ b/apps/web/src/i18n/translations/zh.json
+@@ -12989,5 +12989,9 @@
+   "201490988858b511": "已由 {by} 撤回",
+   "99451a5d2d40440f": "已由 {by} 撤回。",
+   "3ee30a50b70fffab": "已由 {by} 撤回：{reason}",
+-  "92e129bf413a1220": "已撤回"
++  "92e129bf413a1220": "已撤回",
++  "01ff459d89a7efb4": "Stats for nerds",
++  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
++  "3b779e627048205a": "Reset stats for nerds to default",
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
+ }
 diff --git a/packages/client-runtime/src/state/orchestrationV2Projection.test.ts b/packages/client-runtime/src/state/orchestrationV2Projection.test.ts
-index 478365a2e..103fe2d14 100644
+index 6436de7c7d..8d8be98c5c 100644
 --- a/packages/client-runtime/src/state/orchestrationV2Projection.test.ts
 +++ b/packages/client-runtime/src/state/orchestrationV2Projection.test.ts
-@@ -146,6 +146,13 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
+@@ -147,6 +147,13 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
        status: "running" as const,
        startedAt: now,
        completedAt: null,
@@ -3229,7 +3421,7 @@ index 478365a2e..103fe2d14 100644
        tokenUsage: {
          usedTokens: 50_000,
          maxTokens: 200_000,
-@@ -164,6 +171,7 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
+@@ -165,6 +172,7 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
          status: "completed",
          completedAt: now,
          tokenUsage: undefined,
@@ -3237,7 +3429,7 @@ index 478365a2e..103fe2d14 100644
        },
      } as OrchestrationV2DomainEvent;
  
-@@ -171,6 +179,11 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
+@@ -172,6 +180,11 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
  
      expect(next?.providerTurns[0]?.status).toBe("completed");
      expect(next?.providerTurns[0]?.tokenUsage).toEqual(running.tokenUsage);
@@ -3250,13 +3442,13 @@ index 478365a2e..103fe2d14 100644
  
    it("applies thread lifecycle payloads instead of leaving stale metadata", () => {
 diff --git a/packages/client-runtime/src/state/orchestrationV2Projection.ts b/packages/client-runtime/src/state/orchestrationV2Projection.ts
-index 3c9c6dfa7..3bca7f70c 100644
+index d936fa7726..5178c942a9 100644
 --- a/packages/client-runtime/src/state/orchestrationV2Projection.ts
 +++ b/packages/client-runtime/src/state/orchestrationV2Projection.ts
-@@ -272,22 +272,23 @@ export function applyOrchestrationV2ProjectionEvent(
+@@ -407,22 +407,23 @@ export function applyOrchestrationV2ProjectionEvent(
+             : base.thread,
+         providerThreads: upsertEntity(base.providerThreads, event.payload),
        };
-     case "provider-thread.updated":
-       return { ...base, providerThreads: upsertEntity(base.providerThreads, event.payload) };
 -    case "provider-turn.updated":
 +    case "provider-turn.updated": {
 +      const current = base.providerTurns.find((turn) => turn.id === event.payload.id);
@@ -3285,27 +3477,28 @@ index 3c9c6dfa7..3bca7f70c 100644
        return { ...base, runtimeRequests: upsertEntity(base.runtimeRequests, event.payload) };
      case "message.updated":
 diff --git a/packages/contracts/src/orchestrationV2.test.ts b/packages/contracts/src/orchestrationV2.test.ts
-index bca9ff656..7f8e33e6f 100644
+index 5e16fb4a54..98ab681e37 100644
 --- a/packages/contracts/src/orchestrationV2.test.ts
 +++ b/packages/contracts/src/orchestrationV2.test.ts
-@@ -17,6 +17,7 @@ import {
-   ProviderReplayTranscript,
-   ProviderThreadId,
+@@ -6,6 +6,8 @@ import {
+   EnvironmentId,
+   NodeId,
    RunAttemptId,
++  ProviderThreadId,
 +  ProviderTurnId,
    RunId,
+   ScheduledTaskId,
    ThreadId,
-   TrimmedNonEmptyString,
-@@ -32,6 +33,7 @@ import {
+@@ -18,6 +20,7 @@ import {
    OrchestrationV2ProviderCapabilities,
    OrchestrationV2ProviderThread,
    OrchestrationV2ProviderThreadJson,
 +  OrchestrationV2ProviderTurnJson,
    OrchestrationV2RpcSchemas,
-   OrchestrationV2ShellSnapshot,
-   OrchestrationV2SubscribeThreadInput,
-@@ -1568,3 +1570,72 @@ describe("latestProviderTurnForAttempt", () => {
-     expect(latestProviderTurnForAttempt(turns, null)).toBeUndefined();
+   OrchestrationV2Subagent,
+   OrchestrationV2ThreadShellJson,
+@@ -745,3 +748,72 @@ describe("withMessageSenderNote", () => {
+     expect(withMessageSenderNote(message, text)).toBe(expected);
    });
  });
 +
@@ -3378,13 +3571,13 @@ index bca9ff656..7f8e33e6f 100644
 +  });
 +});
 diff --git a/packages/contracts/src/orchestrationV2.ts b/packages/contracts/src/orchestrationV2.ts
-index e4179a201..70cbde81b 100644
+index 563479d00b..3a64f9381c 100644
 --- a/packages/contracts/src/orchestrationV2.ts
 +++ b/packages/contracts/src/orchestrationV2.ts
-@@ -1089,6 +1089,16 @@ export const OrchestrationV2ProviderTurn = Schema.Struct({
-   completedAt: Schema.NullOr(Schema.DateTimeUtc),
-   tokenUsage: Schema.optional(OrchestrationV2ProviderTurnTokenUsage),
-   turnTokenUsage: Schema.optional(TurnTokenUsage),
+@@ -1373,6 +1373,16 @@ export const OrchestrationV2ProviderTurn = Schema.Struct({
+   model: Schema.optional(TrimmedNonEmptyString),
+   /** True when the provider dropped this turn's request before persisting it to native history. */
+   promptDropped: Schema.optional(Schema.Literal(true)),
 +  /** Provider output over response activity. Missing basis is legacy Claude observed telemetry. */
 +  responseThroughput: Schema.optional(
 +    Schema.Struct({
@@ -3399,22 +3592,22 @@ index e4179a201..70cbde81b 100644
  export type OrchestrationV2ProviderTurn = typeof OrchestrationV2ProviderTurn.Type;
  
 diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
-index 569fcf40c..17923bcc4 100644
+index 4922cceeda..4dd87dec94 100644
 --- a/packages/contracts/src/settings.ts
 +++ b/packages/contracts/src/settings.ts
-@@ -454,6 +454,7 @@ export const ClientSettingsSchema = Schema.Struct({
-   // Legacy context window meter. The composer hides it by default; users who
-   // still want the old usage indicator can restore it from Settings.
-   contextWindowMeterEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+@@ -531,6 +531,7 @@ export const ClientSettingsSchema = Schema.Struct({
+   ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+ 
+   pullRequestLinksOpenInApp: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 +  statsForNerdsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-   // Desktop resting composer: scrolling an existing thread's conversation
-   // settles the composer into its single-line layout. Losing focus never does.
-   composerCollapseOnScroll: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-@@ -1751,6 +1752,7 @@ export const ClientSettingsPatch = Schema.Struct({
+ 
+   composerRichTextEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+   sendShortcut: Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"]).pipe(
+@@ -2153,6 +2154,7 @@ export const ClientSettingsPatch = Schema.Struct({
+     Schema.Record(TrimmedNonEmptyString, PullRequestMergeMethod),
+   ),
    pullRequestLinksOpenInApp: Schema.optionalKey(Schema.Boolean),
-   planModeEnabled: Schema.optionalKey(Schema.Boolean),
-   contextWindowMeterEnabled: Schema.optionalKey(Schema.Boolean),
 +  statsForNerdsEnabled: Schema.optionalKey(Schema.Boolean),
-   composerCollapseOnScroll: Schema.optionalKey(Schema.Boolean),
    composerRichTextEnabled: Schema.optionalKey(Schema.Boolean),
    sendShortcut: Schema.optionalKey(Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"])),
+   followUpBehavior: Schema.optionalKey(Schema.Literals(["queue", "steer"])),

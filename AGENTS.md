@@ -39,7 +39,7 @@ feature can't be ported sensibly, stop and explain why.
 
 If `t3code-customize` started you, stop once the tests and typechecks in `checks.json`
 pass (run them from the source checkout with `node_modules/.bin/vp test run <files>` and
-`node_modules/.bin/tsc --noEmit -p <package>/tsconfig.json`). It continues the build itself.
+`node_modules/.bin/effect-tsgo tsrs --noEmit` inside each package directory; older bases used `tsc`). It continues the build itself.
 
 Otherwise run the same Python entry with `build --resume`. It reruns the checks on the checkout as you
 left it, builds, installs the result and writes the ported commits back to

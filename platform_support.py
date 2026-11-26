@@ -104,7 +104,12 @@ class InstalledApp:
             root = job / 'squashfs-root'
             return InstalledApp(root, self.system, root / 'resources', root / 'AppRun')
         root = job / 'application'
-        shutil.copytree(self.path, root, symlinks=True)
+        if host_platform() != 'win32':
+            # A Windows app driven from WSL: Windows copies its own files far faster than /mnt/c writes.
+            from wsl_support import windows_copy_tree
+            windows_copy_tree(self.path, root)
+        else:
+            shutil.copytree(self.path, root, symlinks=True)
         return InstalledApp.inspect(root, self.system)
 
 
@@ -222,6 +227,9 @@ def build_lock(path):
 
 def windows_integrity(executable, values=None):
     """Read or replace Electron's embedded ASAR header hashes in a copied EXE."""
+    if host_platform() != 'win32':
+        from wsl_support import windows_integrity as from_wsl
+        return from_wsl(executable, values)
     import ctypes
     from ctypes import wintypes as w
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)

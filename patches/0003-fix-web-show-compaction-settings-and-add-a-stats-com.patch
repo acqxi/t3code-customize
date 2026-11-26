@@ -1,23 +1,33 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler South <tsouth2@gmail.com>
 Date: Sat, 10 Oct 2026 12:40:14 -0400
-Subject: [PATCH 3/5] fix(web): show compaction settings and add a stats
+Subject: [PATCH 3/6] fix(web): show compaction settings and add a stats
  compact action
 
 ---
- apps/web/src/components/ChatView.tsx          | 54 +++++++++--
+ apps/web/src/components/ChatView.tsx          | 55 ++++++++++-
  .../chat/ComposerStats.logic.test.ts          | 96 +++++++++++++++++++
  .../components/chat/ComposerStats.logic.ts    | 52 ++++++++++
  .../web/src/components/chat/ComposerStats.tsx | 73 ++++++++++++--
- apps/web/src/lib/contextWindow.test.ts        | 56 ++++++++++-
- apps/web/src/lib/contextWindow.ts             | 12 +--
- 6 files changed, 317 insertions(+), 26 deletions(-)
+ apps/web/src/i18n/translations/de.json        |  8 +-
+ apps/web/src/i18n/translations/en.json        |  8 +-
+ apps/web/src/i18n/translations/es.json        |  8 +-
+ apps/web/src/i18n/translations/fr.json        |  8 +-
+ apps/web/src/i18n/translations/ja.json        |  8 +-
+ apps/web/src/i18n/translations/ko.json        |  8 +-
+ apps/web/src/i18n/translations/pt-BR.json     |  8 +-
+ apps/web/src/i18n/translations/ru.json        |  8 +-
+ apps/web/src/i18n/translations/sv.json        |  8 +-
+ apps/web/src/i18n/translations/zh.json        |  8 +-
+ apps/web/src/lib/contextWindow.test.ts        | 59 +++++++++++-
+ .../client-runtime/src/state/contextWindow.ts | 23 +++--
+ 16 files changed, 406 insertions(+), 32 deletions(-)
 
 diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
-index 3b66c0023..2bcddefbb 100644
+index 6da7b9e64d..ce19be42e9 100644
 --- a/apps/web/src/components/ChatView.tsx
 +++ b/apps/web/src/components/ChatView.tsx
-@@ -3730,23 +3730,49 @@ export default function ChatView(props: ChatViewProps) {
+@@ -1607,20 +1607,40 @@ export default function ChatView(props: ChatViewProps) {
      const usageLimits = activeUsageLimits
        ? { limits: activeUsageLimits, providerName: activeProviderName }
        : null;
@@ -61,19 +71,25 @@ index 3b66c0023..2bcddefbb 100644
 +        providerThread,
        ),
      };
--  }, [settings.statsForNerdsEnabled, serverProjection, activeUsageLimits, activeProviderName]);
-+  }, [
-+    settings.statsForNerdsEnabled,
-+    settings.providerInstances,
-+    serverProjection,
-+    activeUsageLimits,
-+    activeProviderName,
-+  ]);
-   const pendingBackgroundTasks = useMemo(() => {
-     if (serverProjection === null || serverProjection === undefined) {
-       return [];
-@@ -11747,7 +11773,23 @@ export default function ChatView(props: ChatViewProps) {
-                     </ComposerSurface.Shell>
+   })();
+@@ -2694,6 +2714,15 @@ export default function ChatView(props: ChatViewProps) {
+     pendingApprovals.length > 0 ||
+     pendingUserInputs.length > 0;
+   const compactDisabled = compactThreadUnavailable;
++  const compactDisabledReason = compactDisabled
++    ? !canOperateThread
++      ? gt("This connection cannot change threads.")
++      : !activeProject
++        ? gt("Choose a project before compacting")
++        : !manualCompactionProviderAvailable
++          ? gt("Compaction is unavailable for this provider")
++          : gt("Compacting is unavailable right now")
++    : null;
+   const freshSessionAvailable =
+     activeMessageCount > 0 && serverConfig?.environment.capabilities.freshContext === true;
+   const freshSessionArmed = useFreshSessionArmed(routeThreadKey);
+@@ -4122,7 +4151,23 @@ export default function ChatView(props: ChatViewProps) {
+                     </div>
                      {/* Opaque so timeline content scrolling under the overlay can't show through the stats line. */}
                      <div className={composerStats !== null ? "bg-background" : undefined}>
 -                      {composerStats !== null && <ComposerStats {...composerStats} />}
@@ -84,11 +100,11 @@ index 3b66c0023..2bcddefbb 100644
 +                          compactDisabled={compactDisabled}
 +                          compactDisabledReason={
 +                            pendingApprovals.length > 0
-+                              ? "Resolve the pending approval first."
++                              ? gt("Resolve the pending approval first.")
 +                              : pendingUserInputs.length > 0
-+                                ? "Answer the pending question first."
++                                ? gt("Answer the pending question first.")
 +                                : isWorking
-+                                  ? "Wait for the current turn to finish."
++                                  ? gt("Wait for the current turn to finish.")
 +                                  : compactDisabledReason
 +                          }
 +                          isCompacting={isCompacting}
@@ -98,7 +114,7 @@ index 3b66c0023..2bcddefbb 100644
                          aria-hidden
                          className="h-[calc(env(safe-area-inset-bottom)+1rem)] sm:h-[calc(env(safe-area-inset-bottom)+1.25rem)]"
 diff --git a/apps/web/src/components/chat/ComposerStats.logic.test.ts b/apps/web/src/components/chat/ComposerStats.logic.test.ts
-index 479e94b19..79b01fd80 100644
+index 479e94b193..79b01fd80e 100644
 --- a/apps/web/src/components/chat/ComposerStats.logic.test.ts
 +++ b/apps/web/src/components/chat/ComposerStats.logic.test.ts
 @@ -14,6 +14,7 @@ import { describe, expect, it } from "vite-plus/test";
@@ -209,18 +225,18 @@ index 479e94b19..79b01fd80 100644
 +  });
 +});
 diff --git a/apps/web/src/components/chat/ComposerStats.logic.ts b/apps/web/src/components/chat/ComposerStats.logic.ts
-index b4f72291f..8c8236a63 100644
+index 5ea95d163a..7d344f7d90 100644
 --- a/apps/web/src/components/chat/ComposerStats.logic.ts
 +++ b/apps/web/src/components/chat/ComposerStats.logic.ts
-@@ -7,6 +7,7 @@ import type {
-   TurnTokenUsage,
+@@ -8,6 +8,7 @@ import type {
  } from "@t3tools/contracts";
  import * as DateTime from "effect/DateTime";
-+import type { ContextWindowSnapshot } from "~/lib/contextWindow";
+ import type { ThreadStructureTurnItem } from "@t3tools/client-runtime/state/shell";
++import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
  
  /** Provider turn ordinals are scoped to a provider thread; children have their own nodes. */
  export function selectComposerStatsTurns(projection: {
-@@ -248,3 +249,54 @@ export function composerLimitDisplay(
+@@ -250,3 +251,54 @@ export function composerLimitDisplay(
      dimmed: freshness.status !== "fresh",
    };
  }
@@ -276,18 +292,18 @@ index b4f72291f..8c8236a63 100644
 +  return { threshold, source, remainingTokens, thresholdPercentage, pressurePercentage, status };
 +}
 diff --git a/apps/web/src/components/chat/ComposerStats.tsx b/apps/web/src/components/chat/ComposerStats.tsx
-index 025f57253..53b81a83a 100644
+index 6eb19aa279..acd6dd6b27 100644
 --- a/apps/web/src/components/chat/ComposerStats.tsx
 +++ b/apps/web/src/components/chat/ComposerStats.tsx
-@@ -10,6 +10,7 @@ import * as DateTime from "effect/DateTime";
- import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+@@ -11,6 +11,7 @@ import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
  
- import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
+ import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
+ import { formatContextWindowTokens } from "~/lib/contextWindow";
 +import { Button } from "../ui/button";
  import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
  import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
  import { composerFloatingLayerProps } from "./composerEventScope";
-@@ -18,6 +19,7 @@ import {
+@@ -19,6 +20,7 @@ import {
    composerLimitDisplay,
    composerLimitSourceLabel,
    composerLimitsFreshness,
@@ -295,7 +311,7 @@ index 025f57253..53b81a83a 100644
    deriveResponseRate,
    deriveTurnCachePercentage,
    formatCachePercentage,
-@@ -234,7 +236,7 @@ function UsageLimitsSummary({
+@@ -235,7 +237,7 @@ function UsageLimitsSummary({
            <button
              type="button"
              aria-label="Usage limit details"
@@ -304,7 +320,7 @@ index 025f57253..53b81a83a 100644
            />
          }
        >
-@@ -278,12 +280,25 @@ export function ComposerStats({
+@@ -279,12 +281,25 @@ export function ComposerStats({
    turn,
    compactions,
    usageLimits,
@@ -330,7 +346,7 @@ index 025f57253..53b81a83a 100644
    const responseRate = deriveResponseRate(turn);
    const estimated = turn?.responseThroughput?.basis === "codex_active_windows_estimate";
    const usage = turn?.turnTokenUsage;
-@@ -301,7 +316,8 @@ export function ComposerStats({
+@@ -302,7 +317,8 @@ export function ComposerStats({
      !hasTokens &&
      responseRate === null &&
      compactions.length === 0 &&
@@ -340,7 +356,7 @@ index 025f57253..53b81a83a 100644
    )
      return null;
    const count = (value: number | undefined) =>
-@@ -327,7 +343,7 @@ export function ComposerStats({
+@@ -328,7 +344,7 @@ export function ComposerStats({
                <button
                  type="button"
                  aria-label="Turn token details"
@@ -349,7 +365,7 @@ index 025f57253..53b81a83a 100644
                />
              }
            >
-@@ -392,7 +408,7 @@ export function ComposerStats({
+@@ -393,7 +409,7 @@ export function ComposerStats({
              render={
                <span
                  tabIndex={0}
@@ -358,7 +374,7 @@ index 025f57253..53b81a83a 100644
                />
              }
            >
-@@ -410,7 +426,7 @@ export function ComposerStats({
+@@ -411,7 +427,7 @@ export function ComposerStats({
    }
  
    // Context is per thread, so it sits with the turn stats; the left side is account limits.
@@ -367,7 +383,7 @@ index 025f57253..53b81a83a 100644
      stats.unshift({
        key: "context",
        node: (
-@@ -423,13 +439,13 @@ export function ComposerStats({
+@@ -424,13 +440,13 @@ export function ComposerStats({
                <button
                  type="button"
                  aria-label="Context usage details"
@@ -383,7 +399,7 @@ index 025f57253..53b81a83a 100644
                    {Math.round(context.usedPercentage)}%
                  </span>
                ) : (
-@@ -444,7 +460,7 @@ export function ComposerStats({
+@@ -445,7 +461,7 @@ export function ComposerStats({
                  <h3 className="font-medium">Context usage</h3>
                  <span className="text-muted-foreground tabular-nums">
                    {context?.usedPercentage != null
@@ -392,7 +408,7 @@ index 025f57253..53b81a83a 100644
                      : "Not reported"}
                  </span>
                </div>
-@@ -456,11 +472,37 @@ export function ComposerStats({
+@@ -457,11 +473,37 @@ export function ComposerStats({
                    {context ? count(context.usedTokens) : "Not reported"}
                  </Detail>
                  <Detail label="Window size">{count(context?.maxTokens ?? undefined)}</Detail>
@@ -431,7 +447,7 @@ index 025f57253..53b81a83a 100644
                {compactions.length > 0 && (
                  <div className="space-y-1.5">
                    <p className="font-medium">Recent compactions</p>
-@@ -498,6 +540,19 @@ export function ComposerStats({
+@@ -499,6 +541,19 @@ export function ComposerStats({
                  Compactions count completed events in the loaded main-agent history for this
                  provider session.
                </p>
@@ -451,35 +467,193 @@ index 025f57253..53b81a83a 100644
                {context && (
                  <p className="text-muted-foreground">
                    Reported{" "}
+diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
+index 36a40de60b..087a421021 100644
+--- a/apps/web/src/i18n/translations/de.json
++++ b/apps/web/src/i18n/translations/de.json
+@@ -12979,5 +12979,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
+index 3e797e18e7..c958bf348d 100644
+--- a/apps/web/src/i18n/translations/en.json
++++ b/apps/web/src/i18n/translations/en.json
+@@ -12988,5 +12988,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
+index f7ae7b7f21..497db0cdb5 100644
+--- a/apps/web/src/i18n/translations/es.json
++++ b/apps/web/src/i18n/translations/es.json
+@@ -12974,5 +12974,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
+index 285dba6778..273889e103 100644
+--- a/apps/web/src/i18n/translations/fr.json
++++ b/apps/web/src/i18n/translations/fr.json
+@@ -12979,5 +12979,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
+index a3e5c62524..cc3160c4d6 100644
+--- a/apps/web/src/i18n/translations/ja.json
++++ b/apps/web/src/i18n/translations/ja.json
+@@ -12915,5 +12915,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
+index 14ac96d31f..a49d7ab8a4 100644
+--- a/apps/web/src/i18n/translations/ko.json
++++ b/apps/web/src/i18n/translations/ko.json
+@@ -12912,5 +12912,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
+index f8bf38448a..f9807ad230 100644
+--- a/apps/web/src/i18n/translations/pt-BR.json
++++ b/apps/web/src/i18n/translations/pt-BR.json
+@@ -12979,5 +12979,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
+index 804fee4827..7a6c2d8617 100644
+--- a/apps/web/src/i18n/translations/ru.json
++++ b/apps/web/src/i18n/translations/ru.json
+@@ -12979,5 +12979,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
+index 28076efe0e..51f36f89f1 100644
+--- a/apps/web/src/i18n/translations/sv.json
++++ b/apps/web/src/i18n/translations/sv.json
+@@ -12986,5 +12986,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
+index 77fb320250..c869bd1240 100644
+--- a/apps/web/src/i18n/translations/zh.json
++++ b/apps/web/src/i18n/translations/zh.json
+@@ -12993,5 +12993,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
 diff --git a/apps/web/src/lib/contextWindow.test.ts b/apps/web/src/lib/contextWindow.test.ts
-index 2847b23ca..d32601f98 100644
+index a9bef5448f..4212a4de7c 100644
 --- a/apps/web/src/lib/contextWindow.test.ts
 +++ b/apps/web/src/lib/contextWindow.test.ts
-@@ -8,7 +8,7 @@ import {
+@@ -47,9 +47,27 @@ const compactionEntry = (providerThreadId: string | null) =>
  
  describe("V2 context window presentation", () => {
    it("uses retained compaction token data when available", () => {
--    const snapshot = deriveLatestContextWindowSnapshot([
+-    const snapshot = deriveLatestContextWindowSnapshot([compactionEntry(null)]);
 +    const entries = [
-       {
-         item: {
-           id: "compaction-1" as never,
-@@ -22,8 +22,8 @@ describe("V2 context window presentation", () => {
-           ordinal: 1,
-           status: "completed",
-           title: null,
--          startedAt: null,
--          completedAt: null,
++      {
++        item: {
++          ...compactionEntry(null).item,
 +          startedAt: DateTime.makeUnsafe("2026-06-19T23:59:00.000Z"),
 +          completedAt: DateTime.makeUnsafe("2026-06-20T00:00:00.000Z"),
-           updatedAt: DateTime.makeUnsafe("2026-06-20T00:00:00.000Z"),
-           type: "compaction",
-           driver: null,
-@@ -31,9 +31,19 @@ describe("V2 context window presentation", () => {
-           afterTokenCount: 2_000,
-         },
-       },
--    ]);
++        },
++      },
 +    ] as const;
 +    const snapshot = deriveLatestContextWindowSnapshot(entries);
 +    expect(snapshot?.updatedAt).toBe("2026-06-20T00:00:00.000Z");
@@ -496,9 +670,9 @@ index 2847b23ca..d32601f98 100644
 +    expect(snapshot?.compactsAutomatically).toBeNull();
    });
  
-   it("prefers current provider usage and preserves ACP cost", () => {
-@@ -110,3 +120,39 @@ describe("latestProviderTurnTokenUsage", () => {
-     expect(latest?.usedTokens).toBe(300_000);
+   it("ignores a retired provider thread's compaction after a provider switch", () => {
+@@ -308,3 +326,40 @@ describe("latestProviderTurnTokenUsage", () => {
+     }
    });
  });
 +
@@ -512,6 +686,7 @@ index 2847b23ca..d32601f98 100644
 +        updatedAt: "2026-10-10T12:00:00.000Z",
 +      },
 +      {
++        id: ProviderThreadId.make("policy-thread"),
 +        contextUsage: {
 +          usedTokens: 300_000,
 +          autoCompactThreshold: 400_000,
@@ -537,49 +712,63 @@ index 2847b23ca..d32601f98 100644
 +    ).toMatchObject({ compactsAutomatically: null, autoCompactThreshold: null });
 +  });
 +});
-diff --git a/apps/web/src/lib/contextWindow.ts b/apps/web/src/lib/contextWindow.ts
-index 33f59c3ea..1eca0df91 100644
---- a/apps/web/src/lib/contextWindow.ts
-+++ b/apps/web/src/lib/contextWindow.ts
-@@ -74,8 +74,8 @@ export function deriveLatestContextWindowSnapshot(
+diff --git a/packages/client-runtime/src/state/contextWindow.ts b/packages/client-runtime/src/state/contextWindow.ts
+index 37374b79b1..8947c26419 100644
+--- a/packages/client-runtime/src/state/contextWindow.ts
++++ b/packages/client-runtime/src/state/contextWindow.ts
+@@ -101,7 +101,8 @@ function compactionSnapshot(
+     maxTokens !== null && maxTokens > 0 ? Math.min(100, (usedTokens / maxTokens) * 100) : null;
+   return {
+     usedTokens,
+-    totalProcessedTokens: asFiniteNumber(item.beforeTokenCount),
++    // The pre-compaction count is not a processed total.
++    totalProcessedTokens: null,
+     maxTokens,
+     remainingTokens: maxTokens !== null ? Math.max(0, Math.round(maxTokens - usedTokens)) : null,
+     usedPercentage,
+@@ -117,7 +118,8 @@ function compactionSnapshot(
+     lastReasoningOutputTokens: null,
+     toolUses: null,
+     durationMs: null,
+-    compactsAutomatically: true,
++    // A compaction record says nothing about the automatic policy.
++    compactsAutomatically: null,
+     autoCompactThreshold: null,
+     cost: null,
+     updatedAt,
+@@ -181,8 +183,12 @@ export function deriveLatestContextWindowSnapshot(
        lastReasoningOutputTokens: null,
        toolUses: null,
        durationMs: null,
 -      compactsAutomatically: true,
--      autoCompactThreshold: null,
+-      autoCompactThreshold: liveUsage.autoCompactThreshold ?? null,
++      // A usage report alone does not say compaction is automatic; keep the thread's reported policy.
 +      compactsAutomatically: providerThread?.contextUsage?.compactsAutomatically ?? null,
-+      autoCompactThreshold: providerThread?.contextUsage?.autoCompactThreshold ?? null,
++      autoCompactThreshold:
++        liveUsage.autoCompactThreshold ??
++        providerThread?.contextUsage?.autoCompactThreshold ??
++        null,
        cost: null,
        updatedAt: liveUsage.updatedAt,
      };
-@@ -117,7 +117,7 @@ export function deriveLatestContextWindowSnapshot(
+@@ -224,13 +230,18 @@ export function deriveLatestContextWindowSnapshot(
    }
    for (let index = entries.length - 1; index >= 0; index -= 1) {
-     const entry = entries[index];
--    if (!entry || entry.item.type !== "compaction") {
-+    if (!entry || entry.item.type !== "compaction" || entry.item.status !== "completed") {
+     const item = entries[index]?.item;
+-    if (item?.type !== "compaction" || isRetiredProviderThreadItem(item, providerThread)) {
++    // A running or failed compaction has not produced the context it reports.
++    if (
++      item?.type !== "compaction" ||
++      item.status !== "completed" ||
++      isRetiredProviderThreadItem(item, providerThread)
++    ) {
        continue;
      }
-     const payload = entry.item;
-@@ -135,7 +135,7 @@ export function deriveLatestContextWindowSnapshot(
- 
-     return {
-       usedTokens,
--      totalProcessedTokens: asFiniteNumber(payload.beforeTokenCount),
-+      totalProcessedTokens: null,
-       maxTokens,
-       remainingTokens,
-       usedPercentage,
-@@ -151,10 +151,10 @@ export function deriveLatestContextWindowSnapshot(
-       lastReasoningOutputTokens: null,
-       toolUses: null,
-       durationMs: null,
--      compactsAutomatically: true,
-+      compactsAutomatically: null,
-       autoCompactThreshold: null,
-       cost: null,
--      updatedAt: DateTime.formatIso(payload.startedAt ?? payload.updatedAt),
-+      updatedAt: DateTime.formatIso(payload.completedAt ?? payload.updatedAt),
-     };
+     const snapshot = compactionSnapshot(
+       item,
+       null,
+-      DateTime.formatIso(item.startedAt ?? item.updatedAt),
++      DateTime.formatIso(item.completedAt ?? item.updatedAt),
+     );
+     if (snapshot !== null) return snapshot;
    }
- 

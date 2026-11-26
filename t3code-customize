@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild your installed T3 Code Nightly with a stats bar under the composer.
+"""Rebuild your installed T3 Code with a stats bar under the composer.
 
 Run it after every T3 Code update. Everything happens on this machine: the
 patches in this repo are applied to the exact upstream commit your application was
@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import shlex
 import shutil
 import socket
 import struct
@@ -30,6 +31,7 @@ from platform_support import (PlatformError, InstalledApp, storage_paths, find_a
                               host_platform, host_arch, node_target, node_bin,
                               command_args, build_lock, finalize_copy, write_cli,
                               write_windows_shortcut)
+import wsl_support as wsl
 
 NAME = 't3code-customize'
 REPO = Path(__file__).resolve().parent
@@ -37,18 +39,78 @@ UPSTREAM = 'https://github.com/pingdotgg/t3code.git'
 HOME = Path.home()
 SYSTEM = host_platform()
 DATA, CACHE, CONFIG = storage_paths(HOME, SYSTEM)
-SHARE = DATA.parent
-SOURCE = CACHE / 't3code'
-STATE = DATA / 'state.json'
-CURRENT = DATA / 'current'
-LOCK = DATA.parent / (NAME + '.lock')
-DISABLED = DATA / 'disabled'
-BIN = (DATA / 'bin' / (NAME + '.cmd') if SYSTEM == 'win32' else HOME / '.local/bin' / NAME)
-DESKTOP = (Path(os.environ.get('APPDATA') or HOME / 'AppData/Roaming') /
-           'Microsoft/Windows/Start Menu/Programs/T3 Code (Customized).lnk' if SYSTEM == 'win32' else
-           SHARE / 'applications' / (NAME + '.desktop'))
 LAUNCHER_NAME = 'T3 Code (Customized)'
 MAC = SYSTEM == 'darwin'
+START_MENU = 'Microsoft/Windows/Start Menu/Programs/' + LAUNCHER_NAME + '.lnk'
+
+
+def _saved_config():
+    try:
+        return json.loads((CONFIG / 'config.json').read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def wsl_windows_folders(config=None, refresh=False):
+    """The Windows user's folders as seen from WSL, remembered in the config."""
+    config = _saved_config() if config is None else config
+    if not refresh and config.get('windows', {}).get('LOCALAPPDATA'):
+        return config['windows']
+    folders = wsl.windows_folders()
+    CONFIG.mkdir(parents=True, exist_ok=True)
+    (CONFIG / 'config.json').write_text(json.dumps({**_saved_config(), 'windows': folders}, indent=2))
+    return folders
+
+
+def detect_windows_target(config=None):
+    """In WSL, build for the Windows T3 Code when asked to or when it is the only T3 Code installed."""
+    if SYSTEM != 'linux' or not wsl.is_wsl():
+        return False
+    config = _saved_config() if config is None else config
+    if config.get('target') in ('windows', 'linux'):
+        return config['target'] == 'windows'
+    saved = config.get('app') or config.get('appimage') or ''
+    if saved:
+        return not saved.endswith('.AppImage')
+    from platform_support import app_candidates
+    if app_candidates(HOME, 'linux'):
+        return False
+    try:
+        local = Path(wsl_windows_folders(config)['LOCALAPPDATA'])
+    except wsl.WslError:
+        return False
+    return any(path.exists() for path in app_candidates(HOME, 'win32', {'LOCALAPPDATA': str(local)}))
+
+
+def configure(windows_target):
+    """Set the paths for the host and the installed app this run builds for."""
+    global WINDOWS_FROM_WSL, APP_SYSTEM, APP_ENV, DATA, SHARE, SOURCE, STATE, CURRENT, LOCK, DISABLED, BIN, DESKTOP
+    WINDOWS_FROM_WSL = bool(windows_target)
+    APP_SYSTEM, APP_ENV = SYSTEM, None
+    DATA = storage_paths(HOME, SYSTEM)[0]
+    LOCK = DATA.parent / (NAME + '.lock')
+    if WINDOWS_FROM_WSL:
+        folders = wsl_windows_folders()
+        APP_SYSTEM = 'win32'
+        APP_ENV = {'LOCALAPPDATA': folders['LOCALAPPDATA'], 'ProgramFiles': '/mnt/c/Program Files',
+                   'ProgramFiles(x86)': '/mnt/c/Program Files (x86)'}
+        # Builds live on the Windows drive so Windows can start them; sources stay on Linux for speed.
+        DATA = Path(folders['LOCALAPPDATA']) / NAME
+    SHARE = DATA.parent
+    SOURCE = CACHE / 't3code'
+    STATE = DATA / 'state.json'
+    CURRENT = DATA / 'current'
+    DISABLED = DATA / 'disabled'
+    BIN = (DATA / 'bin' / (NAME + '.cmd') if SYSTEM == 'win32' else HOME / '.local/bin' / NAME)
+    if SYSTEM == 'win32':
+        DESKTOP = Path(os.environ.get('APPDATA') or HOME / 'AppData/Roaming') / START_MENU
+    elif WINDOWS_FROM_WSL:
+        DESKTOP = Path(wsl_windows_folders()['APPDATA']) / START_MENU
+    else:
+        DESKTOP = SHARE / 'applications' / (NAME + '.desktop')
+
+
+configure(False)
 MAC_LAUNCHER = HOME / 'Applications' / (LAUNCHER_NAME + '.app')
 MAC_BUNDLE_ID = 'com.t3tools.t3code'
 AGENTS = {
@@ -71,7 +133,8 @@ PUBLIC_CONFIG = {
 # Never prompts (it may run without a terminal) and keeps node_modules consistent between runs.
 PNPM_INSTALL = ['--frozen-lockfile', '--ignore-scripts', '--config.confirmModulesPurge=false']
 # Strings that only exist in bundles built with the patches.
-MARKERS = (('apps/server/dist/client/', b'statsForNerds'), ('apps/server/dist/', b'claude_observed'),
+MARKERS = (('apps/server/dist/client/', b'statsForNerds'), ('apps/server/dist/client/', b'statsForNerdsShowPerReply'),
+           ('apps/server/dist/', b'claude_observed'), ('apps/server/dist/', b'acp_stream'),
            ('apps/desktop/dist-electron/', b'statsForNerds'))
 
 
@@ -158,7 +221,7 @@ def version_key(path):
 
 
 def installed_app(explicit=None):
-    return find_app(HOME, load(CONFIG / 'config.json', {}), explicit, SYSTEM)
+    return find_app(HOME, load(CONFIG / 'config.json', {}), explicit, APP_SYSTEM, APP_ENV)
 
 
 # --- Electron asar archives ---------------------------------------------------------
@@ -365,22 +428,48 @@ def node_major(node):
         return 0
 
 
-def ensure_node(log):
-    """Use the system Node if it is new enough, else a private copy from nodejs.org."""
+def node_version(node):
+    try:
+        return subprocess.run([node, '-p', 'process.versions.node'], capture_output=True, text=True,
+                              check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ''
+
+
+def required_node(commit):
+    """The exact Node a commit pins in engines.node (its single executable embeds that Node), if any."""
+    try:
+        engines = json.loads(git('show', commit + ':package.json')).get('engines', {}).get('node', '')
+    except (subprocess.CalledProcessError, ValueError):
+        return None
+    return engines if re.fullmatch(r'\d+\.\d+\.\d+', engines or '') else None
+
+
+def ensure_node(log, exact=None):
+    """Use the system Node if it fits, else a private copy from nodejs.org.
+
+    exact is the version upstream pins: its tests use that Node's APIs, and the WSL
+    runtime is a single executable that embeds it.
+    """
     system = shutil.which('node')
-    if system and node_major(system) >= 24:
+    if system and (node_version(system) == exact if exact else node_major(system) >= 24):
         return None
     target, extension = node_target()
-    private = sorted((CACHE / 'node').glob(f'node-v24.*-{target}'), key=version_key)
+    prefix = f'v{exact}' if exact else 'v24.'
+    private = sorted((CACHE / 'node').glob(f'node-{prefix}{"" if exact else "*"}-{target}'), key=version_key)
     executable = 'node.exe' if SYSTEM == 'win32' else 'node'
-    if private and node_major(str(node_bin(private[-1]) / executable)) >= 24:
+    if private and (node_version(str(node_bin(private[-1]) / executable)) == exact if exact else
+                    node_major(str(node_bin(private[-1]) / executable)) >= 24):
         return node_bin(private[-1])
-    step('Downloading Node 24 (one time, private to this tool)...')
+    step(f'Downloading Node {exact or 24} (one time, private to this tool)...')
     with urllib.request.urlopen('https://nodejs.org/dist/index.json', timeout=30) as response:
         releases = json.load(response)
     # nodejs.org lists the Windows zips as win-*-zip and the macOS builds as osx-*-tar.
     release_target = {'win32': target + '-zip', 'darwin': target.replace('darwin-', 'osx-') + '-tar'}.get(SYSTEM, target)
-    version = next(r['version'] for r in releases if r['version'].startswith('v24.') and release_target in r['files'])
+    version = next((r['version'] for r in releases if (r['version'] == prefix if exact else r['version'].startswith(prefix))
+                    and release_target in r['files']), None)
+    if version is None:
+        raise Stop(f'Node {exact} is not published for {target}.')
     name = f'node-{version}-{target}'
     base = f'https://nodejs.org/dist/{version}/'
     with urllib.request.urlopen(base + 'SHASUMS256.txt', timeout=30) as response:
@@ -493,16 +582,28 @@ def checks(env, log):
     if missing:
         raise NeedsFix('Test files listed in checks.json no longer exist (moved upstream?):\n' + '\n'.join('  ' + t for t in missing))
     step('Testing the patches...')
-    steps = [(['vp', 'test', 'run', *spec['tests']], 'The patch tests failed.')]
-    steps += [(['tsc', '--noEmit', '-p', p + '/tsconfig.json'], f'Typecheck failed in {p}.') for p in spec['typecheck']]
-    for args, message in steps:
-        if run(args, cwd=SOURCE, env=env, log=log, check=False).returncode:
-            raise NeedsFix(message + ' Command: ' + ' '.join(args))
+    steps = [(['vp', 'test', 'run', *spec['tests']], SOURCE, 'The patch tests failed.')]
+    steps += [(typecheck_command(p), SOURCE / p, f'Typecheck failed in {p}.') for p in spec['typecheck']]
+    for args, cwd, message in steps:
+        if run(args, cwd=cwd, env=env, log=log, check=False).returncode:
+            raise NeedsFix(message + ' Command: ' + ' '.join(args) + ' (in ' + str(cwd) + ')')
 
 
-def build_bundles(env, version, stock_root, config, log):
+def typecheck_command(package):
+    """The package's own typecheck script, else effect-tsgo, else tsc."""
+    script = json.loads((SOURCE / package / 'package.json').read_text()).get('scripts', {}).get('typecheck', '')
+    args = shlex.split(script)
+    if args and re.fullmatch(r'[A-Za-z0-9._-]+', args[0]) and not any(c in script for c in '&|;$`<>'):
+        return args
+    if (SOURCE / 'node_modules/.bin/effect-tsgo').exists():
+        return ['effect-tsgo', 'tsrs', '--noEmit']
+    return ['tsc', '--noEmit', '-p', 'tsconfig.json']
+
+
+def build_bundles(env, version, stock_root, config, log, runtime=False):
     step('Building T3 Code...')
-    env = dict(env, APP_VERSION=version, TMPDIR=str(CACHE / 'tmp'), **config)
+    # GITHUB_REPOSITORY points release-notes links at upstream, as in official builds.
+    env = dict(env, APP_VERSION=version, TMPDIR=str(CACHE / 'tmp'), GITHUB_REPOSITORY='pingdotgg/t3code', **config)
     Path(env['TMPDIR']).mkdir(parents=True, exist_ok=True)
     packages = [SOURCE / 'apps' / app / 'package.json' for app in ('web', 'server', 'desktop')]
     # The desktop build regenerates this tracked file; put the committed copy back afterwards.
@@ -517,7 +618,13 @@ def build_bundles(env, version, stock_root, config, log):
         run(['node', 'scripts/cli.ts', 'build'], cwd=SOURCE / 'apps/server', env=env, log=log)
         brand = 'nightly' if 'nightly' in version else 'production'
         run(['node', 'scripts/apply-web-brand-assets.ts', brand, 'apps/server/dist/client'], cwd=SOURCE, env=env, log=log)
-        # Reuse the native helper from your own app instead of compiling it.
+        if runtime:
+            # The WSL runtime's server is a Node single executable built from the same bundle.
+            step('Building the WSL runtime...')
+            shutil.rmtree(SOURCE / 'apps/server/dist-exe', ignore_errors=True)
+            run(['node', 'scripts/cli.ts', 'build-exe'], cwd=SOURCE / 'apps/server', env=env, log=log)
+        # Reuse the native helper from your own app instead of compiling it. A Windows target
+        # never carries the Linux helper, as in upstream's CI bundle job (build:bundle).
         arch = host_arch()
         helper = SOURCE / f'native/browser-secret/build/{arch}/t3-browser-secret'
         stock_helper = stock_root.resources / 'browser-secret/t3-browser-secret'
@@ -525,7 +632,8 @@ def build_bundles(env, version, stock_root, config, log):
             helper.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(stock_helper, helper)
             os.utime(helper, None)
-        run(['node', 'scripts/build-browser-secret.mjs'], cwd=SOURCE / 'apps/desktop', env=env, log=log)
+        if not WINDOWS_FROM_WSL:
+            run(['node', 'scripts/build-browser-secret.mjs'], cwd=SOURCE / 'apps/desktop', env=env, log=log)
         run(['node', 'scripts/build-preview-annotation-css.mjs'], cwd=SOURCE / 'apps/desktop', env=env, log=log)
         run(['vp', 'pack'], cwd=SOURCE / 'apps/desktop', env=env, log=log)
     finally:
@@ -580,7 +688,7 @@ def stuck_message(problem, target):
         return (f'{problem}\n\nYour T3 Code is older than these patches. Update T3 Code, then run {NAME} again.\n'
                 'Your current T3 Code is untouched.')
     return (f'{problem}\n\nThis nightly changed code the patches touch. Any of these works:\n'
-            f'  - wait for the repo to catch up (usually within a day), then run {NAME} again\n'
+            f'  - wait for the repo to catch up, then run {NAME} again\n'
             f'  - let an agent port them now: {NAME} --fix claude  (or --fix codex)\n'
             f'  - or ask your coding agent to follow {REPO}/AGENTS.md\n'
             'Your current T3 Code is untouched and still opens normally.')
@@ -619,6 +727,8 @@ def install_launcher(app):
     write_cli(BIN, REPO, sys.executable)
     if SYSTEM == 'win32':
         write_windows_shortcut(DESKTOP, REPO, sys.executable, run)
+    elif WINDOWS_FROM_WSL:
+        install_windows_launcher(load(STATE, {}))
     elif MAC:
         install_mac_launcher(app)
     else:
@@ -666,30 +776,129 @@ def install_linux_launcher():
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def overlay_app(app, job, config):
+def overlay_app(app, job, config, reads=None):
+    """reads: where to read the stock archives (a Linux staging copy when building for Windows from WSL)."""
+    reads = reads or app.resources
     desktop = app.resources / 'app.asar'
     server = app.resources / 'server.asar'
     archives = ([(desktop, ('apps/desktop/dist-electron',)), (server, ('apps/server/dist',))]
                 if server.is_file() else [(desktop, ('apps/server/dist', 'apps/desktop/dist-electron'))])
     for path, prefixes in archives:
         output = job / (path.name + '.new')
-        overlay(path, output, SOURCE, config, prefixes)
-        os.replace(output, path)
+        overlay(reads / path.name, output, SOURCE, config, prefixes)
+        if WINDOWS_FROM_WSL:
+            wsl.windows_copy_file(output, path)
+            if wsl.windows_sha256(path) != sha256(output):
+                raise Stop('Copying ' + path.name + ' into the Windows app failed verification.')
+            output.unlink()
+        else:
+            os.replace(output, path)
+
+
+def contains(path, marker):
+    """Whether a large file contains marker, read in chunks."""
+    tail = b''
+    with Path(path).open('rb') as source:
+        for chunk in iter(lambda: source.read(1 << 22), b''):
+            if marker in tail + chunk:
+                return True
+            tail = chunk[-len(marker):]
+    return False
+
+
+def stage_stock_resources(app, job):
+    """Copy the archives the build reads onto the Linux filesystem, by Windows (fast both ways)."""
+    stage = job / 'stock-resources'
+    stage.mkdir(parents=True, exist_ok=True)
+    for name in ('app.asar', 'server.asar', wsl.WSL_RUNTIME_ARCHIVE):
+        if (app.resources / name).is_file():
+            wsl.windows_copy_file(app.resources / name, stage / name)
+            if sha256(stage / name) != wsl.windows_sha256(app.resources / name):
+                raise Stop(f'Staging {name} from the Windows app failed verification.')
+    return stage
+
+
+def assemble_wsl_runtime(app, job, version, log, reads=None):
+    """Replace the copied app's WSL runtime archive with one carrying the patched server and client."""
+    archive = app.resources / wsl.WSL_RUNTIME_ARCHIVE
+    if not archive.is_file():
+        return None
+    stock_archive = (reads or app.resources) / wsl.WSL_RUNTIME_ARCHIVE
+    executable = SOURCE / 'apps/server/dist-exe/t3'
+    client = SOURCE / 'apps/server/dist/client'
+    if not executable.is_file():
+        raise Stop('The build did not produce the WSL runtime executable apps/server/dist-exe/t3.')
+    reported = run([str(executable), '--version'], log=log, capture=True).strip()
+    if reported != f't3 v{version}':
+        raise Stop(f'The rebuilt WSL runtime reports {reported!r}, expected t3 v{version}.')
+    for marker in (b'claude_observed', b'claude_stream', b'codex_stream', b'acp_stream'):
+        if not contains(executable, marker):
+            raise Stop('The rebuilt WSL runtime server is missing the stats patches.')
+    if not any(contains(p, b'statsForNerdsShowPerReply') for p in (client / 'assets').glob('*.js')):
+        raise Stop('The rebuilt WSL runtime web client is missing the stats bar.')
+    staged = job / 'wsl-runtime.tar.gz'
+    stem, digest = wsl.rebuild_runtime_archive(stock_archive, staged, executable, client)
+    expected = f't3-{version}-linux-{host_arch()}'
+    if stem != expected:
+        raise Stop(f'The WSL runtime archive holds {stem}, expected {expected}.')
+    (wsl.windows_copy_file if WINDOWS_FROM_WSL else shutil.copyfile)(staged, archive)
+    if (wsl.windows_sha256(archive) if WINDOWS_FROM_WSL else wsl.file_digest(archive)) != digest:
+        raise Stop('Copying the WSL runtime archive into the app failed verification.')
+    wsl.write_runtime_hash(app.resources / wsl.WSL_RUNTIME_HASH, digest)
+    staged.unlink()
+    say(f'    WSL runtime sha256-{digest[:12]}')
+    return digest
+
+
+def fingerprint(app):
+    """The installed app's fingerprint, including the WSL runtime it ships."""
+    records = app.fingerprint()
+    sidecar = app.resources / wsl.WSL_RUNTIME_HASH
+    if app.system == 'win32' and sidecar.is_file():
+        records.append({'path': str(sidecar), 'sha256': sidecar.read_text().strip()})
+    return records
+
+
+def stock_files(app):
+    """Files whose change means the installed T3 Code was updated."""
+    files = [app.executable, *sorted(app.resources.glob('*.asar'))]
+    sidecar = app.resources / wsl.WSL_RUNTIME_HASH
+    return files + ([sidecar] if sidecar.is_file() else [])
+
+
+def install_windows_launcher(state):
+    app = installed_app()
+    build = Path(state['build']) if state.get('build') else None
+    exe = InstalledApp.inspect(build, 'win32').executable if build and build.exists() else None
+    wsl.write_launcher(DATA, app.executable, exe, stock_files(app))
+    wsl.write_shortcut(DESKTOP, DATA, exe or app.executable)
 
 
 def current_executable(state):
     if state.get('build'):
         root = Path(state['build'])
-        if SYSTEM == 'linux':
+        if SYSTEM == 'linux' and not WINDOWS_FROM_WSL:
             return root / 'AppRun'
         if MAC:
             return root / 'inject.cjs'
+        if WINDOWS_FROM_WSL and root.exists():
+            return InstalledApp.inspect(root, APP_SYSTEM).executable
         if root.exists():
             return InstalledApp.inspect(root, SYSTEM).executable
-    return CURRENT / 'AppRun' if SYSTEM == 'linux' else DATA / 'missing-build'
+    return CURRENT / 'AppRun' if SYSTEM == 'linux' and not WINDOWS_FROM_WSL else DATA / 'missing-build'
 
 
 def cmd_build(args):
+    try:
+        build(args)
+    finally:
+        # A failed or interrupted Windows build must not leave a copy of the app on the Windows drive.
+        if WINDOWS_FROM_WSL and (DATA / 'work').is_dir():
+            for leftover in (DATA / 'work').iterdir():
+                wsl.windows_remove_tree(leftover)
+
+
+def build(args):
     started = time.time()
     if not shutil.which('git'):
         raise Stop('git is required. Install it and run again.')
@@ -702,7 +911,7 @@ def cmd_build(args):
     if MAC and electron_fuses(app.path).get('EnableNodeCliInspectArguments') != '1':
         raise Stop('This T3 Code no longer lets a launcher hook into its startup, so the customization cannot load\n'
                    'into the signed app. Your current T3 Code is untouched.')
-    stock_fingerprint = app.fingerprint()
+    stock_fingerprint = fingerprint(app)
     state = load(STATE, {})
     recipe = recipe_hash()
     if (not args.force and not args.resume and state.get('stock') == stock_fingerprint
@@ -715,33 +924,42 @@ def cmd_build(args):
     logs.mkdir(parents=True, exist_ok=True)
     job = CACHE / 'work' / time.strftime('%Y%m%d-%H%M%S')
     job.mkdir(parents=True)
+    # The Windows app copy is assembled on the Windows drive, where it is finally moved and run.
+    app_job = DATA / 'work' / job.name if WINDOWS_FROM_WSL else job
+    app_job.mkdir(parents=True, exist_ok=True)
     with (logs / (job.name + '.log')).open('w', encoding='utf-8') as log:
         say('Log: ' + log.name)
         step('Reading your T3 Code...')
         # On macOS the signed app is read in place and never copied or changed.
-        stock_root = app if MAC else app.copy_to(job, run, log)
-        archive = Archive(stock_root.resources / 'app.asar')
+        stock_root = app if MAC else app.copy_to(app_job, run, log)
+        # Reading the Windows drive through /mnt/c is slow; read Linux copies of its archives instead.
+        reads = stage_stock_resources(stock_root, job) if WINDOWS_FROM_WSL else stock_root.resources
+        archive = Archive(reads / 'app.asar')
         try:
             metadata = json.loads(archive.read('package.json'))
         finally:
             archive.close()
-        server = stock_root.resources / 'server.asar'
-        archive = Archive(server if server.is_file() else stock_root.resources / 'app.asar')
+        server = reads / 'server.asar'
+        archive = Archive(server if server.is_file() else reads / 'app.asar')
         try:
             config = read_public_config(archive)
         finally:
             archive.close()
         version, commit = metadata['version'], metadata.get('t3codeCommitHash', '')
-        if 'nightly' not in version:
-            raise Stop(f'This is T3 Code {version}. The patches target T3 Code Nightly; install Nightly and run again.')
         if not re.fullmatch(r'[0-9a-f]{7,40}', commit):
             raise Stop('This application does not record its source commit, so it cannot be rebuilt exactly.')
-        say(f'    Nightly {version}, upstream commit {commit[:12]}')
+        channel = 'Nightly' if 'nightly' in version else 'Release'
+        say(f'    {channel} {version}, upstream commit {commit[:12]}')
+        runtime = (stock_root.resources / wsl.WSL_RUNTIME_ARCHIVE).is_file() and app.system == 'win32'
+        if runtime and (SYSTEM != 'linux' or host_arch() != 'x64'):
+            # Upstream builds the WSL runtime on Linux; a Windows host cannot make the Linux executable.
+            say('    Note: the WSL runtime stays stock on this host. Run the tool inside WSL to patch it too.')
+            runtime = False
         if len(config) != len(PUBLIC_CONFIG):
             say('    Note: could not read T3 Connect config from your app; sign-in may not work in this build.')
-        node_bin = ensure_node(log)
-        env = build_env(node_bin)
         target = ensure_commit(commit, version, log)
+        node_bin = ensure_node(log, required_node(target))
+        env = build_env(node_bin)
         step('Applying the patches...')
         attempts = 2
         resume = ported = args.resume
@@ -764,18 +982,20 @@ def cmd_build(args):
                 agent_fix(agent, str(problem), target, version, log)
                 resume = ported = True
         head = git('rev-parse', 'HEAD').strip()
-        build_bundles(env, version, stock_root, config, log)
+        build_bundles(env, version, stock_root, config, log, runtime=runtime)
         if git('rev-parse', 'HEAD').strip() != head:
             raise Stop('The source checkout changed during the build.')
         step('Assembling and verifying your customized app...')
+        runtime_digest = None
         if MAC:
             assembled = job / 'build'
             assemble_mac(app, assembled, SOURCE, config)
         else:
-            overlay_app(stock_root, job, config)
+            overlay_app(stock_root, job, config, reads)
+            runtime_digest = assemble_wsl_runtime(stock_root, job, version, log, reads) if runtime else None
             finalize_copy(stock_root, run, log)
             assembled = stock_root.path
-        if app.fingerprint() != stock_fingerprint:
+        if fingerprint(app) != stock_fingerprint:
             raise Stop('The installed T3 Code changed during the build. Run again for its new version.')
         if ported:
             export_patches(target)
@@ -785,12 +1005,15 @@ def cmd_build(args):
         shutil.move(str(assembled), destination)
         save(STATE, {'stock': stock_fingerprint, 'version': version, 'commit': target, 'recipe': recipe_hash(),
                      'build': str(destination), 'connect': len(config) == len(PUBLIC_CONFIG),
+                     **({'wslRuntime': 'sha256-' + runtime_digest} if not MAC and runtime_digest else {}),
                      'builtAt': time.strftime('%Y-%m-%dT%H:%M:%S')})
         icon = destination / 't3code.png'
         if icon.exists():
             shutil.copy2(icon, DATA / 'icon.png')
         prune()
     shutil.rmtree(job, ignore_errors=True)
+    if app_job != job:
+        wsl.windows_remove_tree(app_job)
     install_launcher(app)
     minutes = max(1, round((time.time() - started) / 60))
     say(f'\nDone in {minutes} min: T3 Code {version} with the stats bar.')
@@ -818,8 +1041,9 @@ def prune(keep=3):
     current = Path(state['build']).parent if state.get('build') else CURRENT.resolve()
     builds = sorted((DATA / 'builds').iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
     for old in builds[keep:]:
-        if old.resolve() != current:
-            shutil.rmtree(old, ignore_errors=True)
+        # A Windows process holds its files open; never delete a build that is still running.
+        if old.resolve() != current and not (WINDOWS_FROM_WSL and wsl.windows_processes_from(old)):
+            (wsl.windows_remove_tree if WINDOWS_FROM_WSL else lambda p: shutil.rmtree(p, ignore_errors=True))(old)
 
 
 def cmd_verify(args):
@@ -829,8 +1053,8 @@ def cmd_verify(args):
     base = (REPO / 'patches/base.txt').read_text().strip()
     with (logs / ('verify-' + time.strftime('%Y%m%d-%H%M%S') + '.log')).open('w', encoding='utf-8') as log:
         say('Log: ' + log.name)
-        env = build_env(ensure_node(log))
         target = ensure_commit(base, None, log)
+        env = build_env(ensure_node(log, required_node(target)))
         prepare(target, log)
         install_dependencies(env, log)
         checks(env, log)
@@ -849,7 +1073,7 @@ def launch_target():
     built = current_executable(state)
     if DISABLED.exists() or not built.exists():
         return stock_target(app), None
-    if state.get('stock') != app.fingerprint():
+    if state.get('stock') != fingerprint(app):
         return stock_target(app), f'T3 Code was updated. Run {NAME} in a terminal to bring the stats bar back.'
     # On macOS the target is the build folder holding the loader and the overlay.
     return (built.parent if MAC else built).resolve(), None
@@ -896,6 +1120,16 @@ def launch_mac(app, target, rest):
 
 
 def cmd_launch(args):
+    if WINDOWS_FROM_WSL:
+        # The launcher script decides, exactly as the Start menu shortcut does.
+        rest = args.rest[1:] if args.rest[:1] == ['--'] else args.rest
+        if not (DATA / 'launch.ps1').exists():
+            raise Stop(f'No launcher yet. Run {NAME} first.')
+        subprocess.Popen([wsl.powershell(), '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                          wsl.to_windows_path(DATA / 'launch.ps1'), *rest], cwd='/mnt/c',
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        say(f'Opening {LAUNCHER_NAME}...')
+        return
     app = installed_app()
     target, notice = launch_target()
     if notice:
@@ -927,13 +1161,92 @@ def cmd_status(args):
     say('Customized build:   ' + (f"{state['version']} (built {state['builtAt']})" if state else 'none yet'))
     say('Switched:           ' + ('off' if DISABLED.exists() else 'on'))
     say('Next launch opens:  ' + ('customized build' if target != stock_target(app) else 'stock T3 Code'))
+    if WINDOWS_FROM_WSL:
+        say('WSL runtime:        ' + (state.get('wslRuntime') or 'stock'))
+        say('Launcher:           ' + str(DESKTOP))
     if notice:
         say(notice)
 
 
+def runtime_processes(home=None):
+    """WSL runtime folders that running T3 backends execute from, by runtime id."""
+    parent = str((home or HOME) / '.t3/wsl-runtime') + '/'
+    found = {}
+    for cmdline in Path('/proc').glob('[0-9]*/cmdline'):
+        try:
+            args = cmdline.read_bytes().split(b'\0')
+        except OSError:
+            continue
+        if args and args[0].decode(errors='replace').startswith(parent):
+            runtime = args[0].decode(errors='replace')[len(parent):].split('/')[0]
+            found.setdefault(runtime, []).append(cmdline.parent.name)
+    return found
+
+
+def turn_summary(turn):
+    """One line of a provider turn's stats: timing and usage only, never message content."""
+    perf, usage = turn.get('performance') or {}, turn.get('turnTokenUsage') or {}
+    tokens, gen_ms = perf.get('generationTokens') or {}, perf.get('generationMs')
+    rate = (f"{tokens['value'] / gen_ms * 1000:.0f} tok/s ({tokens['basis']})"
+            if tokens and gen_ms and gen_ms >= 1000 else 'n/a')
+    tools = perf.get('tools') or {}
+    def ms(key):
+        return f'{perf[key] / 1000:.1f}s' if isinstance(perf.get(key), (int, float)) else '—'
+    return (f"{turn.get('status')}: TTFT {ms('firstTokenMs')} ({perf.get('firstTokenKind', '—')}), TTFA {ms('firstAnswerMs')}, "
+            f"avg {rate}, tools {tools.get('count', '—')} / {ms_text(tools.get('wallMs'))}, turn {ms('turnMs')}, "
+            f"out {usage.get('outputTokens', '—')}, cached {usage.get('cachedInputTokens', '—')}/{usage.get('inputTokens', '—')}"
+            + (' [partial]' if perf.get('partial') else '') + ('' if perf else ' [no stream timing]'))
+
+
+def ms_text(value):
+    return f'{value / 1000:.1f}s' if isinstance(value, (int, float)) else '—'
+
+
+def cmd_check(args):
+    """Read-only: the running runtime, T3 data counts and the latest turn stats per provider."""
+    import sqlite3
+    state = load(STATE, {})
+    ours = state.get('wslRuntime')
+    say('Customized build:  ' + (f"{state['version']} (built {state['builtAt']})" if state else 'none'))
+    say('Its WSL runtime:   ' + (ours or 'stock'))
+    running = runtime_processes()
+    for runtime, pids in sorted(running.items()):
+        label = 'customized' if runtime == ours else 'stock or other build'
+        say(f'Running runtime:   {runtime[:19]}… ({label}, {len(pids)} process(es))')
+    if not running:
+        say('Running runtime:   none in this distro')
+    if WINDOWS_FROM_WSL:
+        app = installed_app()
+        builds = [p for p in wsl.windows_processes_from(DATA / 'builds')]
+        stock = [p for p in wsl.windows_processes_from(app.path)]
+        say('Windows desktop:   ' + ('customized' if builds else 'stock' if stock else 'not running'))
+    database = HOME / '.t3/userdata/statev2.sqlite'
+    if not database.exists():
+        say('No T3 state database at ' + str(database))
+        return
+    db = sqlite3.connect(f'file:{database}?mode=ro', uri=True)
+    try:
+        counts = {name: db.execute(f'SELECT count(*) FROM {table}').fetchone()[0] for name, table in
+                  (('projects', 'projection_projects'), ('threads', 'orchestration_v2_projection_threads'))}
+        say(f"Your data:         {counts['projects']} projects, {counts['threads']} threads")
+        latest = {}
+        for (payload,) in db.execute('SELECT payload_json FROM orchestration_v2_projection_provider_turns ORDER BY rowid DESC LIMIT 2000'):
+            turn = json.loads(payload)
+            match = re.match(r'provider-turn:provider:([^:]+):', turn.get('id', ''))
+            provider = match.group(1) if match else 'other'
+            if provider not in latest and turn.get('status') != 'running':
+                latest[provider] = turn
+    finally:
+        db.close()
+    say('\nLatest finished turn per provider:')
+    for provider, turn in sorted(latest.items()):
+        say(f'  {provider:12} {turn_summary(turn)}')
+
+
 def cmd_on(args):
     DISABLED.unlink(missing_ok=True)
-    say('Customization on. Quit T3 Code fully and reopen it.')
+    say('Customization on. Quit T3 Code fully and reopen it' +
+        (f' from "{LAUNCHER_NAME}".' if WINDOWS_FROM_WSL else '.'))
 
 
 def cmd_off(args):
@@ -942,14 +1255,38 @@ def cmd_off(args):
     say('Stock T3 Code on the next launch. Quit it fully and reopen it.')
 
 
+def remove_customized_runtime(state):
+    """Drop the customized WSL runtime cache unless a running backend still uses it."""
+    runtime = state.get('wslRuntime')
+    if not runtime or not re.fullmatch(r'sha256-[0-9a-f]{64}', runtime):
+        return
+    root = HOME / '.t3/wsl-runtime' / runtime
+    if not root.is_dir():
+        return
+    needle = (str(root) + '/').encode()
+    for cmdline in Path('/proc').glob('[0-9]*/cmdline'):
+        try:
+            if needle in cmdline.read_bytes():
+                say(f'Kept {root}: a running T3 backend uses it. T3 removes it later on its own.')
+                return
+        except OSError:
+            continue
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def cmd_uninstall(args):
+    if WINDOWS_FROM_WSL:
+        running = wsl.windows_processes_from(DATA)
+        if running:
+            raise Stop('The customized T3 Code is running. Quit it fully, then uninstall again.')
+        remove_customized_runtime(load(STATE, {}))
     BIN.unlink(missing_ok=True)
     DESKTOP.unlink(missing_ok=True)
     if MAC:
         shutil.rmtree(MAC_LAUNCHER, ignore_errors=True)
     for folder in (DATA, CACHE, CONFIG):
         if folder.exists():
-            shutil.rmtree(folder)
+            wsl.windows_remove_tree(folder) if WINDOWS_FROM_WSL and folder == DATA else shutil.rmtree(folder)
     tail = '' if DATA in REPO.parents else f' You can delete {REPO} too.'
     say('Removed t3code-customize, its launcher, builds and caches. Your T3 Code and its data are untouched.' + tail)
 
@@ -967,11 +1304,14 @@ def main():
         p.add_argument('--skip-checks', action='store_true', help='skip the patch tests and typechecks')
         p.add_argument('--force', action='store_true', help='rebuild even if nothing changed')
         p.add_argument('--no-pull', action='store_true', help='do not fetch newer patches first')
+        p.add_argument('--target', choices=('windows', 'linux'),
+                       help='in WSL: build for the Windows T3 Code (and its WSL runtime) or a Linux AppImage (remembered)')
 
     build_options(sub.add_parser('build', help='update the patches and build (the default)'))
     launch = sub.add_parser('launch', help='open the customized build if it matches your T3 Code, else stock')
     launch.add_argument('rest', nargs=argparse.REMAINDER)
     sub.add_parser('status', help='show what the next launch opens')
+    sub.add_parser('check', help='read-only: which runtime runs, your data counts and the latest stats per provider')
     sub.add_parser('on', help='use the customized build')
     sub.add_parser('off', help='go back to stock T3 Code')
     sub.add_parser('verify', help='apply the patches to their base and run the checks (for CI)')
@@ -983,8 +1323,13 @@ def main():
     if not args.command:
         parser.print_help()
         return
+    target = getattr(args, 'target', None)
+    if target:
+        CONFIG.mkdir(parents=True, exist_ok=True)
+        save(CONFIG / 'config.json', {**load(CONFIG / 'config.json', {}), 'target': target})
+    configure(target == 'windows' if target else detect_windows_target())
     handler = globals()['cmd_' + args.command]
-    if args.command in ('launch', 'status', 'on', 'off'):
+    if args.command in ('launch', 'status', 'on', 'off', 'check'):
         return handler(args)
     CACHE.mkdir(parents=True, exist_ok=True)
     # Keep the coordination file outside the removable installation. On Windows

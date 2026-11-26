@@ -241,9 +241,9 @@ class OverlayTests(unittest.TestCase):
                 'apps/server/dist/old-chunk.mjs': b'stale chunk'})
         source = self.root / 'source'
         for name, value in {'apps/desktop/dist-electron/main.cjs': b'statsForNerds',
-                            'apps/server/dist/bin.mjs': b'claude_observed',
+                            'apps/server/dist/bin.mjs': b'claude_observed acp_stream',
                             'apps/server/dist/client/index.html': b'new',
-                            'apps/server/dist/client/stats.js': b'statsForNerds'}.items():
+                            'apps/server/dist/client/stats.js': b'statsForNerds statsForNerdsShowPerReply'}.items():
             file = source / name
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_bytes(value)
@@ -265,9 +265,9 @@ class OverlayTests(unittest.TestCase):
                 'apps/server/dist/client/index.html': b'old web'})
         source = self.root / 'source'
         files = {'apps/desktop/dist-electron/main.cjs': b'statsForNerds',
-                 'apps/server/dist/bin.mjs': b'claude_observed',
+                 'apps/server/dist/bin.mjs': b'claude_observed acp_stream',
                  'apps/server/dist/client/index.html': b'web',
-                 'apps/server/dist/client/new.js': b'statsForNerds'}
+                 'apps/server/dist/client/new.js': b'statsForNerds statsForNerdsShowPerReply'}
         for name, value in files.items():
             path = source / name
             path.parent.mkdir(parents=True, exist_ok=True)
