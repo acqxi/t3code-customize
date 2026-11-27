@@ -12,7 +12,7 @@
 - **脈絡使用量**：目前對話串用掉的脈絡。滑鼠移上去可以看到脈絡視窗大小、自動壓縮門檻，以及「立即壓縮」按鈕。
 - **每秒 token 數**：上一則回覆的產生速度。滑鼠移上去可以看到該輪耗時與 token 明細。
 - **快取命中率**：上一輪的快取命中率。
-- **效能指標**：首個 token 時間、首段回答時間，即時、平均與峰值 tokens/s，token 與快取用量，工具耗時與整輪耗時，以及每一輪的模型供應商、模型、推理強度與速度模式。可以顯示在每則回覆下方、輸入框下方（本輪與上一輪，排成一行）、Thread details 側欄，或任意組合。估計值標示 `≈`，無法取得的值顯示 `—`；有哪些指標取決於模型供應商。Codex、Claude Code 與 Antigravity 等 ACP 代理都依串流內容計時。定義見 [docs/performance-metrics.md](docs/performance-metrics.md)。
+- **效能指標**：首個 token 時間、首段回答時間，即時、平均與峰值 tokens/s，token 與快取用量，工具耗時與整輪耗時，以及每一輪的模型供應商、模型、推理強度與速度模式。可以顯示在每則回覆下方、輸入框下方（本輪與上一輪，排成一行）、Thread details 側欄，或任意組合。估計值標示 `≈`，無法取得的值顯示 `—`；有哪些指標取決於模型供應商。Codex、Claude Code 與 Antigravity 等 ACP 代理都依串流內容計時。效能明細可以在「最後一輪」、「整個對話串」與「各模型」之間切換；Usage 儀表板的模型明細也會加上各模型的 tok/s、TTFT 與 TTFA。定義見 [docs/performance-metrics.md](docs/performance-metrics.md)。
 - **訂閱切換**：同一個模型有多個已登入的訂閱可用時，若目前的訂閱照這個速度會在 5 小時或每週額度重置前用完，會出現像 **Opus 5.5 on Personal →** 的標籤，點一下就把對話串切到額度最充裕的那個訂閱上的同一個模型。每週額度將在一天內重置、卻還剩很多的訂閱也會提示。滑鼠移上去可以看到判斷依據。
 - **WSL 主機橋接**（使用 WSL 後端的 Windows Desktop）：WSL 中的代理可以透過 T3 原生的 Linked environments，把需要 Windows 的工作（瀏覽器、Computer Use、GUI 程式或 PowerShell）交給同一台電腦上的 Windows 後端。Desktop 經由 `wsl.exe` 的 stdio 轉送，Windows 後端不必開放網路存取。可在 Environments 地圖上的 **Host bridge** 連線，或在 **Settings > Connections > Local host bridge** 開啟。說明見 [docs/wsl-host-bridge.md](docs/wsl-host-bridge.md)。
 
@@ -94,7 +94,7 @@ upstream 變動很快，有時 nightly 會改到 patch 動到的程式碼。這�
 
 ## 運作方式
 
-T3 Code 是開放原始碼軟體（MIT）。本儲存庫包含十個 patch 與一支腳本。腳本會：
+T3 Code 是開放原始碼軟體（MIT）。本儲存庫包含十二個 patch 與一支腳本。腳本會：
 
 1. 讀取已安裝的 App：它對應的 upstream commit，以及 T3 Connect 需要的公開設定，
 2. 把 patch 套用到該 commit 並執行測試，

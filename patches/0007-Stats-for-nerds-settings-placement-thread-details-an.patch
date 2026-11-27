@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: acqxi <kacqxi@gmail.com>
 Date: Fri, 27 Nov 2026 01:36:00 +0800
-Subject: [PATCH 07/10] Stats for nerds: settings, placement, thread details
+Subject: [PATCH 07/12] Stats for nerds: settings, placement, thread details
  and every provider's limits
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

@@ -38,7 +38,10 @@
     "apps/web/src/components/settings/environmentsMap.logic.test.ts",
     "apps/desktop/src/window/DesktopWindow.test.ts",
     "apps/desktop/src/wsl/DesktopWslRuntimeStatus.test.ts",
-    "apps/web/src/components/settings/wslRuntimeStatus.logic.test.ts"
+    "apps/web/src/components/settings/wslRuntimeStatus.logic.test.ts",
+    "apps/server/src/usage/usagePerformance.test.ts",
+    "apps/web/src/components/chat/TurnPerformanceScope.logic.test.ts",
+    "apps/web/src/components/usage/usagePerformance.test.ts"
   ],
   "typecheck": [
     "apps/server",

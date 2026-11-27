@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: acqxi <kacqxi@gmail.com>
 Date: Fri, 27 Nov 2026 04:17:40 +0800
-Subject: [PATCH 09/10] WSL host bridge: helper, native link path and Desktop
+Subject: [PATCH 11/12] WSL host bridge: helper, native link path and Desktop
  supervisor
 
 WSL agents can hand work that needs Windows to the Windows backend on the

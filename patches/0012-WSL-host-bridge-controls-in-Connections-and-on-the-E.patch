@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: acqxi <kacqxi@gmail.com>
 Date: Fri, 27 Nov 2026 04:17:41 +0800
-Subject: [PATCH 10/10] WSL host bridge: controls in Connections and on the
+Subject: [PATCH 12/12] WSL host bridge: controls in Connections and on the
  Environments map
 
 The Environments map draws the bridge as its own kind of link from WSL to
@@ -32,20 +32,20 @@ error. Nothing pairs on its own.
  .../settings/environmentsMap.logic.test.ts    | 101 +++
  .../settings/environmentsMap.logic.ts         |  92 ++-
  .../src/components/settings/settingsSearch.ts |  12 +
- apps/web/src/i18n/translations/de.json        |  83 +-
- apps/web/src/i18n/translations/en.json        |  83 +-
- apps/web/src/i18n/translations/es.json        |  83 +-
- apps/web/src/i18n/translations/fr.json        |  83 +-
- apps/web/src/i18n/translations/ja.json        |  83 +-
- apps/web/src/i18n/translations/ko.json        |  83 +-
- apps/web/src/i18n/translations/pt-BR.json     |  83 +-
- apps/web/src/i18n/translations/ru.json        |  83 +-
- apps/web/src/i18n/translations/sv.json        |  83 +-
- apps/web/src/i18n/translations/zh.json        |  83 +-
+ apps/web/src/i18n/translations/de.json        |  81 ++
+ apps/web/src/i18n/translations/en.json        |  81 ++
+ apps/web/src/i18n/translations/es.json        |  81 ++
+ apps/web/src/i18n/translations/fr.json        |  81 ++
+ apps/web/src/i18n/translations/ja.json        |  81 ++
+ apps/web/src/i18n/translations/ko.json        |  81 ++
+ apps/web/src/i18n/translations/pt-BR.json     |  81 ++
+ apps/web/src/i18n/translations/ru.json        |  81 ++
+ apps/web/src/i18n/translations/sv.json        |  81 ++
+ apps/web/src/i18n/translations/zh.json        |  81 ++
  apps/web/src/index.css                        |   4 +
  apps/web/src/state/hostBridge.test.ts         | 133 ++++
  apps/web/src/state/hostBridge.ts              | 278 +++++++
- 23 files changed, 2790 insertions(+), 27 deletions(-)
+ 23 files changed, 2780 insertions(+), 17 deletions(-)
  create mode 100644 apps/web/src/components/settings/HostBridgeControls.tsx
  create mode 100644 apps/web/src/components/settings/LocalHostBridge.logic.test.ts
  create mode 100644 apps/web/src/components/settings/LocalHostBridge.logic.ts
@@ -1868,15 +1868,13 @@ index 0a7cf8f930..74bbc165ce 100644
      id: "remote-environments",
      title: msg("Environments"),
 diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
-index eb6445200d..346a487ce1 100644
+index 9615c86850..79d9927fbe 100644
 --- a/apps/web/src/i18n/translations/de.json
 +++ b/apps/web/src/i18n/translations/de.json
-@@ -13116,5 +13116,86 @@
-   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+@@ -13117,6 +13117,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
--  "4a4030032575944d": "Metrics"
-+  "4a4030032575944d": "Metrics",
+   "4a4030032575944d": "Metrics",
 +  "2eb45b2448481e0c": "Windows",
 +  "42723ed413180d9f": "WSL",
 +  "2e1fa05c8a85c54b": "{wsl} kann jetzt Arbeit an {windows} delegieren",
@@ -1957,18 +1955,18 @@ index eb6445200d..346a487ce1 100644
 +  "9bf2d20e9ed34823": "Warte, bis sich diese App mit dem WSL-Backend verbindet.",
 +  "4513d2ec8abc85a6": "Schalte zuerst unter Einstellungen > Labs verknüpfte Umgebungen für das WSL-Backend ein.",
 +  "9918571a5eed0df4": "Schalte zuerst unter Einstellungen > Labs verknüpfte Umgebungen für Windows ein.",
-+  "1b3673409b08603b": "Host-Brücke auf diesem Computer"
- }
++  "1b3673409b08603b": "Host-Brücke auf diesem Computer",
+   "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
+   "0fdf303b060c2739": "This thread",
+   "6ff57d72f5d4ddc6": "Now",
 diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
-index 15f72e9952..ea34b7abba 100644
+index bdc44a2a6b..2bd09f0552 100644
 --- a/apps/web/src/i18n/translations/en.json
 +++ b/apps/web/src/i18n/translations/en.json
-@@ -13125,5 +13125,86 @@
-   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+@@ -13126,6 +13126,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
--  "4a4030032575944d": "Metrics"
-+  "4a4030032575944d": "Metrics",
+   "4a4030032575944d": "Metrics",
 +  "2eb45b2448481e0c": "Windows",
 +  "42723ed413180d9f": "WSL",
 +  "2e1fa05c8a85c54b": "{wsl} can now delegate work to {windows}",
@@ -2049,18 +2047,18 @@ index 15f72e9952..ea34b7abba 100644
 +  "9bf2d20e9ed34823": "Waiting for this app to connect to the WSL backend.",
 +  "4513d2ec8abc85a6": "Turn on Linked environments in Settings > Labs for the WSL backend first.",
 +  "9918571a5eed0df4": "Turn on Linked environments in Settings > Labs for Windows first.",
-+  "1b3673409b08603b": "Host bridge on this computer"
- }
++  "1b3673409b08603b": "Host bridge on this computer",
+   "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
+   "0fdf303b060c2739": "This thread",
+   "6ff57d72f5d4ddc6": "Now",
 diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
-index afeb72a7cf..9fec8b1547 100644
+index 2e2f494974..ab534e6b55 100644
 --- a/apps/web/src/i18n/translations/es.json
 +++ b/apps/web/src/i18n/translations/es.json
-@@ -13111,5 +13111,86 @@
-   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+@@ -13112,6 +13112,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
--  "4a4030032575944d": "Metrics"
-+  "4a4030032575944d": "Metrics",
+   "4a4030032575944d": "Metrics",
 +  "2eb45b2448481e0c": "Windows",
 +  "42723ed413180d9f": "WSL",
 +  "2e1fa05c8a85c54b": "{wsl} ya puede delegar trabajo a {windows}",
@@ -2141,18 +2139,18 @@ index afeb72a7cf..9fec8b1547 100644
 +  "9bf2d20e9ed34823": "Esperando a que esta app se conecte al backend de WSL.",
 +  "4513d2ec8abc85a6": "Primero activa los entornos vinculados en Configuración > Labs para el backend de WSL.",
 +  "9918571a5eed0df4": "Primero activa los entornos vinculados en Configuración > Labs para Windows.",
-+  "1b3673409b08603b": "Puente de host en este equipo"
- }
++  "1b3673409b08603b": "Puente de host en este equipo",
+   "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
+   "0fdf303b060c2739": "This thread",
+   "6ff57d72f5d4ddc6": "Now",
 diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
-index 819bdf649f..30e2a5eed9 100644
+index 7ff412f598..77d3a01e5d 100644
 --- a/apps/web/src/i18n/translations/fr.json
 +++ b/apps/web/src/i18n/translations/fr.json
-@@ -13116,5 +13116,86 @@
-   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+@@ -13117,6 +13117,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
--  "4a4030032575944d": "Metrics"
-+  "4a4030032575944d": "Metrics",
+   "4a4030032575944d": "Metrics",
 +  "2eb45b2448481e0c": "Windows",
 +  "42723ed413180d9f": "WSL",
 +  "2e1fa05c8a85c54b": "{wsl} peut maintenant déléguer du travail à {windows}",
@@ -2233,18 +2231,18 @@ index 819bdf649f..30e2a5eed9 100644
 +  "9bf2d20e9ed34823": "En attente de la connexion de cette application au backend WSL.",
 +  "4513d2ec8abc85a6": "Activez d’abord les environnements liés dans Réglages > Labs pour le backend WSL.",
 +  "9918571a5eed0df4": "Activez d’abord les environnements liés dans Réglages > Labs pour Windows.",
-+  "1b3673409b08603b": "Pont d’hôte sur cet ordinateur"
- }
++  "1b3673409b08603b": "Pont d’hôte sur cet ordinateur",
+   "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
+   "0fdf303b060c2739": "This thread",
+   "6ff57d72f5d4ddc6": "Now",
 diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
-index eded30efc6..bd062c7866 100644
+index 12f8f7277d..fbbd54b32e 100644
 --- a/apps/web/src/i18n/translations/ja.json
 +++ b/apps/web/src/i18n/translations/ja.json
-@@ -13052,5 +13052,86 @@
-   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+@@ -13053,6 +13053,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
--  "4a4030032575944d": "Metrics"
-+  "4a4030032575944d": "Metrics",
+   "4a4030032575944d": "Metrics",
 +  "2eb45b2448481e0c": "Windows",
 +  "42723ed413180d9f": "WSL",
 +  "2e1fa05c8a85c54b": "{wsl} から {windows} に作業を委任できるようになりました",
@@ -2325,18 +2323,18 @@ index eded30efc6..bd062c7866 100644
 +  "9bf2d20e9ed34823": "このアプリが WSL バックエンドに接続するのを待っています。",
 +  "4513d2ec8abc85a6": "まず 設定 > Labs で WSL バックエンドのリンクされた環境をオンにしてください。",
 +  "9918571a5eed0df4": "まず 設定 > Labs で Windows のリンクされた環境をオンにしてください。",
-+  "1b3673409b08603b": "このコンピューターのホストブリッジ"
- }
++  "1b3673409b08603b": "このコンピューターのホストブリッジ",
+   "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
+   "0fdf303b060c2739": "This thread",
+   "6ff57d72f5d4ddc6": "Now",
 diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
-index 33a3acf777..273c5dbdbc 100644
+index 9636abce15..05c497dd2c 100644
 --- a/apps/web/src/i18n/translations/ko.json
 +++ b/apps/web/src/i18n/translations/ko.json
-@@ -13049,5 +13049,86 @@
-   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+@@ -13050,6 +13050,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
--  "4a4030032575944d": "Metrics"
-+  "4a4030032575944d": "Metrics",
+   "4a4030032575944d": "Metrics",
 +  "2eb45b2448481e0c": "Windows",
 +  "42723ed413180d9f": "WSL",
 +  "2e1fa05c8a85c54b": "이제 {wsl}에서 {windows}로 작업을 위임할 수 있습니다",
@@ -2417,18 +2415,18 @@ index 33a3acf777..273c5dbdbc 100644
 +  "9bf2d20e9ed34823": "이 앱이 WSL 백엔드에 연결되기를 기다리는 중입니다.",
 +  "4513d2ec8abc85a6": "먼저 설정 > Labs에서 WSL 백엔드의 연결된 환경을 켜세요.",
 +  "9918571a5eed0df4": "먼저 설정 > Labs에서 Windows의 연결된 환경을 켜세요.",
-+  "1b3673409b08603b": "이 컴퓨터의 호스트 브리지"
- }
++  "1b3673409b08603b": "이 컴퓨터의 호스트 브리지",
+   "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
+   "0fdf303b060c2739": "This thread",
+   "6ff57d72f5d4ddc6": "Now",
 diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
-index f58e005721..8051e9e2e4 100644
+index 7f0f880dd5..05a25f058a 100644
 --- a/apps/web/src/i18n/translations/pt-BR.json
 +++ b/apps/web/src/i18n/translations/pt-BR.json
-@@ -13116,5 +13116,86 @@
-   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+@@ -13117,6 +13117,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
--  "4a4030032575944d": "Metrics"
-+  "4a4030032575944d": "Metrics",
+   "4a4030032575944d": "Metrics",
 +  "2eb45b2448481e0c": "Windows",
 +  "42723ed413180d9f": "WSL",
 +  "2e1fa05c8a85c54b": "{wsl} agora pode delegar trabalho para {windows}",
@@ -2509,18 +2507,18 @@ index f58e005721..8051e9e2e4 100644
 +  "9bf2d20e9ed34823": "Aguardando este app se conectar ao backend do WSL.",
 +  "4513d2ec8abc85a6": "Primeiro ligue os ambientes vinculados em Configurações > Labs para o backend do WSL.",
 +  "9918571a5eed0df4": "Primeiro ligue os ambientes vinculados em Configurações > Labs para o Windows.",
-+  "1b3673409b08603b": "Ponte de host neste computador"
- }
++  "1b3673409b08603b": "Ponte de host neste computador",
+   "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
+   "0fdf303b060c2739": "This thread",
+   "6ff57d72f5d4ddc6": "Now",
 diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
-index 36d37fa1a0..9d1d6c8165 100644
+index bd3f52d177..1afbb242b9 100644
 --- a/apps/web/src/i18n/translations/ru.json
 +++ b/apps/web/src/i18n/translations/ru.json
-@@ -13116,5 +13116,86 @@
-   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+@@ -13117,6 +13117,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
--  "4a4030032575944d": "Metrics"
-+  "4a4030032575944d": "Metrics",
+   "4a4030032575944d": "Metrics",
 +  "2eb45b2448481e0c": "Windows",
 +  "42723ed413180d9f": "WSL",
 +  "2e1fa05c8a85c54b": "Теперь {wsl} может делегировать работу в {windows}",
@@ -2601,18 +2599,18 @@ index 36d37fa1a0..9d1d6c8165 100644
 +  "9bf2d20e9ed34823": "Ожидание подключения этого приложения к бэкенду WSL.",
 +  "4513d2ec8abc85a6": "Сначала включите связанные окружения в Настройки > Labs для бэкенда WSL.",
 +  "9918571a5eed0df4": "Сначала включите связанные окружения в Настройки > Labs для Windows.",
-+  "1b3673409b08603b": "Мост к хосту на этом компьютере"
- }
++  "1b3673409b08603b": "Мост к хосту на этом компьютере",
+   "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
+   "0fdf303b060c2739": "This thread",
+   "6ff57d72f5d4ddc6": "Now",
 diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
-index 092258b886..cf0728c2b6 100644
+index 99169ab7cd..50f6cb9154 100644
 --- a/apps/web/src/i18n/translations/sv.json
 +++ b/apps/web/src/i18n/translations/sv.json
-@@ -13123,5 +13123,86 @@
-   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+@@ -13124,6 +13124,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
--  "4a4030032575944d": "Metrics"
-+  "4a4030032575944d": "Metrics",
+   "4a4030032575944d": "Metrics",
 +  "2eb45b2448481e0c": "Windows",
 +  "42723ed413180d9f": "WSL",
 +  "2e1fa05c8a85c54b": "{wsl} kan nu delegera arbete till {windows}",
@@ -2693,18 +2691,18 @@ index 092258b886..cf0728c2b6 100644
 +  "9bf2d20e9ed34823": "Väntar på att den här appen ansluter till WSL-backenden.",
 +  "4513d2ec8abc85a6": "Slå först på länkade miljöer i Inställningar > Labs för WSL-backenden.",
 +  "9918571a5eed0df4": "Slå först på länkade miljöer i Inställningar > Labs för Windows.",
-+  "1b3673409b08603b": "Värdbrygga på den här datorn"
- }
++  "1b3673409b08603b": "Värdbrygga på den här datorn",
+   "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
+   "0fdf303b060c2739": "This thread",
+   "6ff57d72f5d4ddc6": "Now",
 diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
-index b6d30a3d45..3ddd0a1644 100644
+index ae9799435c..434333bbdb 100644
 --- a/apps/web/src/i18n/translations/zh.json
 +++ b/apps/web/src/i18n/translations/zh.json
-@@ -13130,5 +13130,86 @@
-   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+@@ -13131,6 +13131,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
--  "4a4030032575944d": "Metrics"
-+  "4a4030032575944d": "Metrics",
+   "4a4030032575944d": "Metrics",
 +  "2eb45b2448481e0c": "Windows",
 +  "42723ed413180d9f": "WSL",
 +  "2e1fa05c8a85c54b": "{wsl} 现在可以把工作委派给 {windows}",
@@ -2785,8 +2783,10 @@ index b6d30a3d45..3ddd0a1644 100644
 +  "9bf2d20e9ed34823": "正在等待此应用连接到 WSL 后端。",
 +  "4513d2ec8abc85a6": "请先在 设置 > Labs 中为 WSL 后端开启链接环境。",
 +  "9918571a5eed0df4": "请先在 设置 > Labs 中为 Windows 开启链接环境。",
-+  "1b3673409b08603b": "这台电脑上的主机桥"
- }
++  "1b3673409b08603b": "这台电脑上的主机桥",
+   "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
+   "0fdf303b060c2739": "This thread",
+   "6ff57d72f5d4ddc6": "Now",
 diff --git a/apps/web/src/index.css b/apps/web/src/index.css
 index 6ce3f831c9..39d39e8746 100644
 --- a/apps/web/src/index.css

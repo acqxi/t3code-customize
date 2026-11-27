@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: acqxi <kacqxi@gmail.com>
 Date: Fri, 27 Nov 2026 01:27:43 +0800
-Subject: [PATCH 08/10] Customized build: title marker, restart controls and
+Subject: [PATCH 10/12] Customized build: title marker, restart controls and
  WSL runtime status
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1580,7 +1580,7 @@ index 0000000000..5a33a68a50
 +  return backendId !== null && status?.instanceId === backendId;
 +}
 diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
-index fb061706a6..eb6445200d 100644
+index 5e16ff6e54..9615c86850 100644
 --- a/apps/web/src/i18n/translations/de.json
 +++ b/apps/web/src/i18n/translations/de.json
 @@ -13084,6 +13084,30 @@
@@ -1615,7 +1615,7 @@ index fb061706a6..eb6445200d 100644
    "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
    "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
-index 1b5e27d442..15f72e9952 100644
+index f844e571a3..bdc44a2a6b 100644
 --- a/apps/web/src/i18n/translations/en.json
 +++ b/apps/web/src/i18n/translations/en.json
 @@ -13093,6 +13093,30 @@
@@ -1650,7 +1650,7 @@ index 1b5e27d442..15f72e9952 100644
    "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
    "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
-index a779e60abf..afeb72a7cf 100644
+index 256af79a59..2e2f494974 100644
 --- a/apps/web/src/i18n/translations/es.json
 +++ b/apps/web/src/i18n/translations/es.json
 @@ -13079,6 +13079,30 @@
@@ -1685,7 +1685,7 @@ index a779e60abf..afeb72a7cf 100644
    "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
    "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
-index e9ec2b6622..819bdf649f 100644
+index 2540a88a9f..7ff412f598 100644
 --- a/apps/web/src/i18n/translations/fr.json
 +++ b/apps/web/src/i18n/translations/fr.json
 @@ -13084,6 +13084,30 @@
@@ -1720,7 +1720,7 @@ index e9ec2b6622..819bdf649f 100644
    "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
    "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
-index fc854997ed..eded30efc6 100644
+index 08340812d3..12f8f7277d 100644
 --- a/apps/web/src/i18n/translations/ja.json
 +++ b/apps/web/src/i18n/translations/ja.json
 @@ -13020,6 +13020,30 @@
@@ -1755,7 +1755,7 @@ index fc854997ed..eded30efc6 100644
    "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
    "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
-index 3317693330..33a3acf777 100644
+index 72fb349de7..9636abce15 100644
 --- a/apps/web/src/i18n/translations/ko.json
 +++ b/apps/web/src/i18n/translations/ko.json
 @@ -13017,6 +13017,30 @@
@@ -1790,7 +1790,7 @@ index 3317693330..33a3acf777 100644
    "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
    "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
-index f82279ee5d..f58e005721 100644
+index d5cd07702e..7f0f880dd5 100644
 --- a/apps/web/src/i18n/translations/pt-BR.json
 +++ b/apps/web/src/i18n/translations/pt-BR.json
 @@ -13084,6 +13084,30 @@
@@ -1825,7 +1825,7 @@ index f82279ee5d..f58e005721 100644
    "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
    "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
-index a795afc55f..36d37fa1a0 100644
+index 2c5337a7c8..bd3f52d177 100644
 --- a/apps/web/src/i18n/translations/ru.json
 +++ b/apps/web/src/i18n/translations/ru.json
 @@ -13084,6 +13084,30 @@
@@ -1860,7 +1860,7 @@ index a795afc55f..36d37fa1a0 100644
    "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
    "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
-index 9b8ee838ff..092258b886 100644
+index 0ecf26a984..99169ab7cd 100644
 --- a/apps/web/src/i18n/translations/sv.json
 +++ b/apps/web/src/i18n/translations/sv.json
 @@ -13091,6 +13091,30 @@
@@ -1895,7 +1895,7 @@ index 9b8ee838ff..092258b886 100644
    "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
    "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
 diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
-index f736b02c65..b6d30a3d45 100644
+index b31aa66f0a..ae9799435c 100644
 --- a/apps/web/src/i18n/translations/zh.json
 +++ b/apps/web/src/i18n/translations/zh.json
 @@ -13098,6 +13098,30 @@
