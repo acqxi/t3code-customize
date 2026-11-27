@@ -6,7 +6,8 @@ Subject: [PATCH 12/12] WSL host bridge: controls in Connections and on the
 
 The Environments map draws the bridge as its own kind of link from WSL to
 Windows: a violet line, wider than a native link, labeled "Host bridge" with
-its state on the edge. Selecting the edge or either machine shows the same
+its state on the edge, drawn whenever the Desktop offers the bridge, also
+while it is off. Selecting the edge or either machine shows the same
 controls as Settings > Connections: Enable and pair, Pair again, Disable,
 Revoke, access and collapsed diagnostics. Dragging WSL onto Windows opens
 them instead of the ordinary link flow.
@@ -14,8 +15,10 @@ them instead of the ordinary link flow.
 States come from the Desktop helper and the WSL backend's native link list:
 Discovering, Waiting for Windows or WSL, Bridge starting, Pairing required,
 Connected, Recovering, Permission denied, Identity mismatch, Disabled. What
-blocks pairing (the WSL backend off or disconnected, Linked environments off
-on either side, a runtime without the bridge) shows before Enable.
+blocks pairing shows before Enable: the WSL backend off or disconnected, this
+computer's Windows backend off in this app (the pairing code is minted
+through it), Linked environments off on either side, or a runtime without
+the bridge. A side whose settings can't be read is never reported as off.
 
 Enable turns the bridge on, waits for the helper to listen, mints a code on
 Windows and links WSL to it, with each step, a progress bar and the elapsed
@@ -23,29 +26,29 @@ time shown. A failure names the reason and the next step, and lands in Last
 error. Nothing pairs on its own.
 ---
  .../settings/ConnectionsSettings.tsx          |   2 +
- .../components/settings/EnvironmentsMap.tsx   | 166 +++-
- .../settings/EnvironmentsMapDetails.tsx       |   8 +-
- .../settings/HostBridgeControls.tsx           | 707 ++++++++++++++++++
- .../settings/LocalHostBridge.logic.test.ts    | 218 ++++++
- .../settings/LocalHostBridge.logic.ts         | 238 ++++++
+ .../components/settings/EnvironmentsMap.tsx   | 167 +++-
+ .../settings/EnvironmentsMapDetails.tsx       |  15 +-
+ .../settings/HostBridgeControls.tsx           | 710 ++++++++++++++++++
+ .../settings/LocalHostBridge.logic.test.ts    | 282 +++++++
+ .../settings/LocalHostBridge.logic.ts         | 279 +++++++
  .../settings/LocalHostBridgeSettings.tsx      |  28 +
  .../settings/environmentsMap.logic.test.ts    | 101 +++
- .../settings/environmentsMap.logic.ts         |  92 ++-
+ .../settings/environmentsMap.logic.ts         |  94 ++-
  .../src/components/settings/settingsSearch.ts |  12 +
- apps/web/src/i18n/translations/de.json        |  81 ++
- apps/web/src/i18n/translations/en.json        |  81 ++
- apps/web/src/i18n/translations/es.json        |  81 ++
- apps/web/src/i18n/translations/fr.json        |  81 ++
- apps/web/src/i18n/translations/ja.json        |  81 ++
- apps/web/src/i18n/translations/ko.json        |  81 ++
- apps/web/src/i18n/translations/pt-BR.json     |  81 ++
- apps/web/src/i18n/translations/ru.json        |  81 ++
- apps/web/src/i18n/translations/sv.json        |  81 ++
- apps/web/src/i18n/translations/zh.json        |  81 ++
+ apps/web/src/i18n/translations/de.json        |  85 ++-
+ apps/web/src/i18n/translations/en.json        |  85 ++-
+ apps/web/src/i18n/translations/es.json        |  85 ++-
+ apps/web/src/i18n/translations/fr.json        |  85 ++-
+ apps/web/src/i18n/translations/ja.json        |  85 ++-
+ apps/web/src/i18n/translations/ko.json        |  85 ++-
+ apps/web/src/i18n/translations/pt-BR.json     |  85 ++-
+ apps/web/src/i18n/translations/ru.json        |  85 ++-
+ apps/web/src/i18n/translations/sv.json        |  85 ++-
+ apps/web/src/i18n/translations/zh.json        |  85 ++-
  apps/web/src/index.css                        |   4 +
  apps/web/src/state/hostBridge.test.ts         | 133 ++++
  apps/web/src/state/hostBridge.ts              | 278 +++++++
- 23 files changed, 2780 insertions(+), 17 deletions(-)
+ 23 files changed, 2924 insertions(+), 31 deletions(-)
  create mode 100644 apps/web/src/components/settings/HostBridgeControls.tsx
  create mode 100644 apps/web/src/components/settings/LocalHostBridge.logic.test.ts
  create mode 100644 apps/web/src/components/settings/LocalHostBridge.logic.ts
@@ -74,7 +77,7 @@ index ef9ceeedf9..ee0160ecfd 100644
          {...searchableSetting("remote-environments")}
          title={gt("Environments")}
 diff --git a/apps/web/src/components/settings/EnvironmentsMap.tsx b/apps/web/src/components/settings/EnvironmentsMap.tsx
-index a4a662253c..bb76d15b84 100644
+index a4a662253c..8856aaa401 100644
 --- a/apps/web/src/components/settings/EnvironmentsMap.tsx
 +++ b/apps/web/src/components/settings/EnvironmentsMap.tsx
 @@ -13,6 +13,7 @@ import {
@@ -94,7 +97,15 @@ index a4a662253c..bb76d15b84 100644
    type FleetLayout,
    type FleetLinkAction,
    type FleetLinkEdge,
-@@ -131,6 +134,13 @@ import {
+@@ -114,6 +117,7 @@ import {
+   type FleetStack,
+   type FleetViewTransform,
+   isLinkEdge,
++  isPendingHostBridge,
+   isRouteEdge,
+   layoutFleetGraph,
+   linkNeedsAttention,
+@@ -131,6 +135,13 @@ import {
    healthLabel,
    healthTone,
  } from "./EnvironmentsMapDetails";
@@ -108,7 +119,7 @@ index a4a662253c..bb76d15b84 100644
  import { LinkEnvironmentDialog, type LinkEnvironmentPrefill } from "./LinkedEnvironmentsSettings";
  import { LinkSeveralEnvironmentsDialog } from "./LinkSeveralEnvironments";
  import { savedBackendStatus } from "./SavedEnvironmentRows";
-@@ -170,6 +180,38 @@ function healthDash(health: PeerLinkHealth): string | undefined {
+@@ -170,6 +181,38 @@ function healthDash(health: PeerLinkHealth): string | undefined {
    return health.kind === "unreachable" ? "5 4" : undefined;
  }
  
@@ -136,18 +147,18 @@ index a4a662253c..bb76d15b84 100644
 +    case "progress":
 +      return { tone: "text-host-bridge/75", dash: "6 4" };
 +    case "paused":
-+      return { tone: "text-muted-foreground", dash: "2 4" };
++      return { tone: "text-host-bridge/60", dash: "2 4" };
 +    case "error":
 +      return { tone: "text-destructive", dash: "8 3 1 3" };
 +    case "off":
-+      return { tone: "text-muted-foreground/50", dash: "2 5" };
++      return { tone: "text-host-bridge/45", dash: "2 5" };
 +  }
 +}
 +
  /** Worst first: a machine several hosts link to wears the health of its most troubled link. */
  const byTrouble = (left: FleetLinkEdge, right: FleetLinkEdge) =>
    linkTroubleRank(left.health) - linkTroubleRank(right.health);
-@@ -271,6 +313,7 @@ function useConnectMachines() {
+@@ -271,6 +314,7 @@ function useConnectMachines() {
  
  function useFleetGraph() {
    const gt = useGT();
@@ -155,7 +166,7 @@ index a4a662253c..bb76d15b84 100644
    const m = useMessages();
    const { environments } = useEnvironments();
    const hosts = usePeerLinkHosts();
-@@ -339,9 +382,11 @@ function useFleetGraph() {
+@@ -339,9 +383,11 @@ function useFleetGraph() {
                : { state: "loading" },
      };
    });
@@ -167,7 +178,7 @@ index a4a662253c..bb76d15b84 100644
      connectMachines: machines
        .filter((machine) => machine.connectOnly)
        .map((machine) => ({
-@@ -352,7 +397,46 @@ function useFleetGraph() {
+@@ -352,7 +398,44 @@ function useFleetGraph() {
        })),
      now: DateTime.makeUnsafe(nowMinute),
    });
@@ -185,9 +196,6 @@ index a4a662253c..bb76d15b84 100644
 +  const ports = bridgePorts(desktop);
 +  const targetEnvironmentId =
 +    (desktop.windowsEnvironmentId as EnvironmentId | null) ?? windows?.environmentId ?? null;
-+  const shown =
-+    pairing !== null ||
-+    (desktop.enabled && !["connected", "disabled", "unsupported"].includes(view.status));
 +  const now = DateTime.makeUnsafe(nowMinute);
 +  return {
 +    sourceEnvironmentId: wsl.environmentId,
@@ -197,8 +205,9 @@ index a4a662253c..bb76d15b84 100644
 +    pairing: pairing?.status ?? null,
 +    isBridgeLink: (link) =>
 +      link.urls.length > 0 && link.urls.every((url) => isHostBridgeUrl(url, ports)),
++    // Drawn whenever this Desktop offers the bridge, off or not, so it can be found and turned on.
 +    pendingLink:
-+      shown && targetEnvironmentId !== null
++      targetEnvironmentId !== null
 +        ? {
 +            environmentId: targetEnvironmentId,
 +            label: desktop.windowsLabel ?? windows?.label ?? "",
@@ -215,7 +224,7 @@ index a4a662253c..bb76d15b84 100644
  }
  
  /**
-@@ -403,7 +487,7 @@ export function EnvironmentsMap(
+@@ -403,7 +486,7 @@ export function EnvironmentsMap(
      "renderSavedEnvironment" | "renderConnectMachine" | "onAddEnvironment"
    > & { readonly footerId?: string },
  ) {
@@ -224,7 +233,7 @@ index a4a662253c..bb76d15b84 100644
    const [expanded, setExpanded] = useState(NO_STACKS);
    const stacks = fleetStacks(graph, expanded);
    const key = fleetShapeKey(graph, stacks);
-@@ -478,6 +562,28 @@ export function EnvironmentsMap(
+@@ -478,6 +561,28 @@ export function EnvironmentsMap(
    };
    // One way in for every gesture: the handle, a drop, the details and the toolbar.
    const requestLink = (sourceId: string, targetId: string | null) => {
@@ -253,7 +262,7 @@ index a4a662253c..bb76d15b84 100644
      const action = fleetLinkAction(graph, stacks, selected, sourceId, targetId);
      if (action === null) return;
      if (action.kind === "code-only") {
-@@ -1229,6 +1335,13 @@ function linkName(
+@@ -1229,6 +1334,13 @@ function linkName(
  ): string {
    const source = labelOf(edge.from);
    const target = labelOf(edge.to);
@@ -267,7 +276,7 @@ index a4a662253c..bb76d15b84 100644
    return back === undefined
      ? gt("Link from {source} to {target}: {summary}", {
          source,
-@@ -1694,17 +1807,27 @@ const FleetScene = memo(function FleetScene({
+@@ -1694,17 +1806,27 @@ const FleetScene = memo(function FleetScene({
                    className={
                      selected
                        ? "text-primary"
@@ -300,7 +309,7 @@ index a4a662253c..bb76d15b84 100644
                    />
                    <path
                      d={`M${arrow.x - arrow.dir * 7} ${arrow.y - 4}L${arrow.x} ${arrow.y}L${arrow.x - arrow.dir * 7} ${arrow.y + 4}Z`}
-@@ -1812,14 +1935,29 @@ const FleetScene = memo(function FleetScene({
+@@ -1812,14 +1934,29 @@ const FleetScene = memo(function FleetScene({
              onBlur={() => setHover(null)}
              {...hoverProps(target)}
            >
@@ -337,11 +346,28 @@ index a4a662253c..bb76d15b84 100644
            </button>
          );
        })}
+@@ -2171,7 +2308,7 @@ const FleetScene = memo(function FleetScene({
+             node,
+             environment,
+             routes.length > 0 && routes.every((edge) => edge.state === "refused"),
+-            links.filter((edge) => edge.from === node.id).length,
++            links.filter((edge) => edge.from === node.id && !isPendingHostBridge(edge)).length,
+             gt,
+           );
+         // The card's state is short; the name carries the reason and what it leaves unknown.
 diff --git a/apps/web/src/components/settings/EnvironmentsMapDetails.tsx b/apps/web/src/components/settings/EnvironmentsMapDetails.tsx
-index 801775bc50..bc0064b2a1 100644
+index 801775bc50..3e30bc43b8 100644
 --- a/apps/web/src/components/settings/EnvironmentsMapDetails.tsx
 +++ b/apps/web/src/components/settings/EnvironmentsMapDetails.tsx
-@@ -40,6 +40,7 @@ import { peerLinkStatusText, useForgetPeerLink } from "./LinkedEnvironmentsSetti
+@@ -33,6 +33,7 @@ import {
+   fleetSummary,
+   fleetTwoWayLinks,
+   isLinkEdge,
++  isPendingHostBridge,
+   linkNeedsAttention,
+   linkTroubleRank,
+ } from "./environmentsMap.logic";
+@@ -40,6 +41,7 @@ import { peerLinkStatusText, useForgetPeerLink } from "./LinkedEnvironmentsSetti
  import { savedBackendStatus } from "./SavedEnvironmentRows";
  import { useWslRuntimeCardStatus, WslRuntimeStatusLine } from "./WslRuntimeStatus";
  import { isWslRuntimeBackend } from "./wslRuntimeStatus.logic";
@@ -349,7 +375,7 @@ index 801775bc50..bc0064b2a1 100644
  import { desktopLocalBackendId } from "../../connection/desktopLocal";
  
  type GT = ReturnType<typeof useGT>;
-@@ -196,7 +197,11 @@ export function FleetDetails(props: FleetDetailsProps) {
+@@ -196,7 +198,11 @@ export function FleetDetails(props: FleetDetailsProps) {
            </Button>
          </div>
        ) : null}
@@ -362,7 +388,20 @@ index 801775bc50..bc0064b2a1 100644
          <div className={SECTION}>
            <p className="mb-3 text-muted-foreground">{gt("Two links, one each way.")}</p>
            <div className="space-y-4">
-@@ -768,6 +773,7 @@ function NodeDetails({
+@@ -685,8 +691,10 @@ function NodeDetails({
+       </div>
+     );
+   }
+-  const out = links.filter((edge) => edge.from === node.id);
+-  const incoming = links.filter((edge) => edge.to === node.id);
++  // The bridge's line before it is linked is no link yet; its controls show below instead.
++  const real = links.filter((edge) => !isPendingHostBridge(edge));
++  const out = real.filter((edge) => edge.from === node.id);
++  const incoming = real.filter((edge) => edge.to === node.id);
+   const linkedFrom = (
+     <LinkList
+       title={gt(
+@@ -768,6 +776,7 @@ function NodeDetails({
          ) : null)}
        <div className={cn(SECTION, "space-y-3 border-t border-border/60")}>
          {environment ? <WslRuntimeDetail environment={environment} /> : null}
@@ -372,10 +411,10 @@ index 801775bc50..bc0064b2a1 100644
          <LinkList
 diff --git a/apps/web/src/components/settings/HostBridgeControls.tsx b/apps/web/src/components/settings/HostBridgeControls.tsx
 new file mode 100644
-index 0000000000..f9dd7c13b7
+index 0000000000..7462f79e35
 --- /dev/null
 +++ b/apps/web/src/components/settings/HostBridgeControls.tsx
-@@ -0,0 +1,707 @@
+@@ -0,0 +1,710 @@
 +import { offersLinkedEnvironments } from "@t3tools/client-runtime/link-request";
 +import {
 +  AuthMcpClientAccess,
@@ -388,7 +427,6 @@ index 0000000000..f9dd7c13b7
 +import { useEffect, useState } from "react";
 +
 +import { requestConfirmDialog } from "~/confirmDialog";
-+import { desktopLocalBackendId } from "~/connection/desktopLocal";
 +import { useLiveRefresh } from "~/hooks/useLiveRefresh";
 +import { useNowMinute } from "~/hooks/useNowMinute";
 +import { cn } from "~/lib/utils";
@@ -408,6 +446,7 @@ index 0000000000..f9dd7c13b7
 +import { toastManager } from "../ui/toast";
 +import {
 +  HOST_BRIDGE_PAIRING_STEPS,
++  hostBridgeBackends,
 +  hostBridgeBlocker,
 +  localHostBridgeView,
 +  pairingProgress,
@@ -423,17 +462,11 @@ index 0000000000..f9dd7c13b7
 +
 +type GT = ReturnType<typeof useGT>;
 +
-+const isLocalBackend = (environment: EnvironmentPresentation, wsl: boolean) => {
-+  const id = desktopLocalBackendId(environment.entry.target);
-+  return wsl ? id?.startsWith("wsl:") === true : id === "primary";
-+};
-+
 +/** Everything the card and the map show about the bridge, from one Desktop poll and one link list. */
 +export function useHostBridgeModel() {
 +  const { desktop, pairing } = useHostBridgeSnapshot();
 +  const { environments } = useEnvironments();
-+  const wsl = environments.find((environment) => isLocalBackend(environment, true)) ?? null;
-+  const windows = environments.find((environment) => isLocalBackend(environment, false)) ?? null;
++  const { wsl, windows } = hostBridgeBackends(environments, desktop?.windowsEnvironmentId ?? null);
 +  const wslId = wsl?.environmentId ?? null;
 +  const links = useEnvironmentQuery(
 +    wslId === null ? null : peerLinkEnvironment.list({ environmentId: wslId, input: {} }),
@@ -463,8 +496,11 @@ index 0000000000..f9dd7c13b7
 +  const blocker = hostBridgeBlocker({
 +    wslKnown: wsl !== null,
 +    wslConnected: wsl?.connection.phase === "connected",
-+    wslOffersLinks: offersLinkedEnvironments(wslConfig),
-+    windowsOffersLinks: offersLinkedEnvironments(windows?.serverConfig ?? null),
++    wslOffersLinks: wslConfig === null ? null : offersLinkedEnvironments(wslConfig),
++    windowsKnown: windows !== null,
++    windowsConnected: windows?.connection.phase === "connected",
++    windowsOffersLinks:
++      windows?.serverConfig == null ? null : offersLinkedEnvironments(windows.serverConfig),
 +    wslSupportsBridge,
 +  });
 +  return { desktop, pairing, view, wsl, windows, blocker };
@@ -606,6 +642,14 @@ index 0000000000..f9dd7c13b7
 +      return gt("Waiting for this app to connect to the WSL backend.");
 +    case "wsl-links-off":
 +      return gt("Turn on Linked environments in Settings > Labs for the WSL backend first.");
++    case "no-windows-backend":
++      return gt(
++        "This app does not list this computer's Windows backend. Add it in Settings > Connections first.",
++      );
++    case "windows-disconnected":
++      return gt(
++        "Turn on this computer's Windows backend in this app and wait until it connects. The pairing code comes from it.",
++      );
 +    case "windows-links-off":
 +      return gt("Turn on Linked environments in Settings > Labs for Windows first.");
 +    case "runtime-lacks-bridge":
@@ -1076,30 +1120,33 @@ index 0000000000..f9dd7c13b7
 +  }
 +  return (
 +    <section className="space-y-1.5">
-+      <h3 className="text-xs font-medium text-host-bridge">
-+        {gt("Host bridge on this computer")}
-+      </h3>
++      <h3 className="text-xs font-medium text-host-bridge">{gt("Host bridge on this computer")}</h3>
 +      <HostBridgeControls model={model} />
 +    </section>
 +  );
 +}
 diff --git a/apps/web/src/components/settings/LocalHostBridge.logic.test.ts b/apps/web/src/components/settings/LocalHostBridge.logic.test.ts
 new file mode 100644
-index 0000000000..c70c9329e6
+index 0000000000..6512fc680f
 --- /dev/null
 +++ b/apps/web/src/components/settings/LocalHostBridge.logic.test.ts
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,282 @@
 +import {
 +  type DesktopHostBridgeState,
 +  EnvironmentId,
 +  type PeerLinkSummary,
 +} from "@t3tools/contracts";
++import {
++  BearerConnectionTarget,
++  PrimaryConnectionTarget,
++} from "@t3tools/client-runtime/connection";
 +import * as DateTime from "effect/DateTime";
 +import { describe, expect, it } from "vite-plus/test";
 +
 +import {
 +  bridgePorts,
 +  helperWaitFailure,
++  hostBridgeBackends,
 +  hostBridgeBlocker,
 +  linkFailure,
 +  localHostBridgeView,
@@ -1282,6 +1329,8 @@ index 0000000000..c70c9329e6
 +      wslKnown: true,
 +      wslConnected: true,
 +      wslOffersLinks: true,
++      windowsKnown: true,
++      windowsConnected: true,
 +      windowsOffersLinks: true,
 +      wslSupportsBridge: true,
 +    };
@@ -1291,6 +1340,25 @@ index 0000000000..c70c9329e6
 +    expect(hostBridgeBlocker({ ...ready, wslSupportsBridge: false })).toBe("runtime-lacks-bridge");
 +    expect(hostBridgeBlocker({ ...ready, wslOffersLinks: false })).toBe("wsl-links-off");
 +    expect(hostBridgeBlocker({ ...ready, windowsOffersLinks: false })).toBe("windows-links-off");
++    expect(hostBridgeBlocker({ ...ready, windowsKnown: false })).toBe("no-windows-backend");
++  });
++
++  it("never says Linked environments is off for a backend whose settings it cannot read", () => {
++    const ready = {
++      wslKnown: true,
++      wslConnected: true,
++      wslOffersLinks: true,
++      windowsKnown: true,
++      windowsConnected: true,
++      windowsOffersLinks: true,
++      wslSupportsBridge: true,
++    };
++    // Windows turned off in this app: no config, and the code cannot be minted through it.
++    expect(hostBridgeBlocker({ ...ready, windowsConnected: false, windowsOffersLinks: null })).toBe(
++      "windows-disconnected",
++    );
++    expect(hostBridgeBlocker({ ...ready, windowsOffersLinks: null })).toBeNull();
++    expect(hostBridgeBlocker({ ...ready, wslOffersLinks: null })).toBeNull();
 +  });
 +
 +  it("moves the progress bar one step at a time", () => {
@@ -1307,16 +1375,56 @@ index 0000000000..c70c9329e6
 +    expect(pairingProgress({ ...pairing, status: "done", step: "linked" })).toBe(1);
 +  });
 +});
++
++describe("hostBridgeBackends", () => {
++  const primary = {
++    environmentId: windowsId,
++    entry: {
++      target: new PrimaryConnectionTarget({
++        environmentId: windowsId,
++        label: "Same Name",
++        httpBaseUrl: "http://127.0.0.1:3773",
++        wsBaseUrl: "ws://127.0.0.1:3773",
++      }),
++    },
++  };
++  const bearer = (environmentId: EnvironmentId, connectionId: string) => ({
++    environmentId,
++    entry: {
++      target: new BearerConnectionTarget({ environmentId, label: "Same Name", connectionId }),
++    },
++  });
++  const wsl = bearer(wslId, "local:wsl:TestDistro");
++  const remote = bearer(EnvironmentId.make("env-remote-wsl"), "saved-remote");
++
++  it("finds Windows as the app's primary backend, which has no Desktop-local id", () => {
++    expect(hostBridgeBackends([remote, primary, wsl], null)).toEqual({ wsl, windows: primary });
++  });
++
++  it("prefers the environment the Desktop's helper reached", () => {
++    const reached = bearer(EnvironmentId.make("env-windows-reached"), "local:other");
++    expect(hostBridgeBackends([primary, reached, wsl], "env-windows-reached").windows).toBe(
++      reached,
++    );
++  });
++
++  it("never takes another machine, or the WSL backend, for Windows", () => {
++    expect(hostBridgeBackends([remote, wsl], null)).toEqual({ wsl, windows: null });
++    expect(hostBridgeBackends([wsl], wslId).windows).toBeNull();
++  });
++});
 diff --git a/apps/web/src/components/settings/LocalHostBridge.logic.ts b/apps/web/src/components/settings/LocalHostBridge.logic.ts
 new file mode 100644
-index 0000000000..a9616030a8
+index 0000000000..53bfc37167
 --- /dev/null
 +++ b/apps/web/src/components/settings/LocalHostBridge.logic.ts
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,279 @@
 +import type { DesktopHostBridgeState, EnvironmentId, PeerLinkSummary } from "@t3tools/contracts";
 +import { peerLinkHealth } from "@t3tools/client-runtime/state/peerLinks";
 +import { isHostBridgeUrl } from "@t3tools/shared/hostBridgeMux";
 +import type * as DateTime from "effect/DateTime";
++
++import { desktopLocalBackendId } from "../../connection/desktopLocal";
 +
 +export type LocalHostBridgeStatus =
 +  | "unsupported"
@@ -1533,23 +1641,62 @@ index 0000000000..a9616030a8
 +  | "no-wsl-backend"
 +  | "wsl-disconnected"
 +  | "wsl-links-off"
++  | "no-windows-backend"
++  | "windows-disconnected"
 +  | "windows-links-off"
 +  | "runtime-lacks-bridge";
 +
 +export function hostBridgeBlocker(input: {
 +  readonly wslKnown: boolean;
 +  readonly wslConnected: boolean;
-+  readonly wslOffersLinks: boolean;
-+  readonly windowsOffersLinks: boolean;
++  /** Null while the WSL backend's config is not loaded yet. */
++  readonly wslOffersLinks: boolean | null;
++  readonly windowsKnown: boolean;
++  /** The app's own connection to Windows: the pairing code is minted through it. */
++  readonly windowsConnected: boolean;
++  /** Null while the Windows backend's config is not loaded yet. */
++  readonly windowsOffersLinks: boolean | null;
 +  /** Null while the WSL backend's config is not loaded yet. */
 +  readonly wslSupportsBridge: boolean | null;
 +}): HostBridgeBlocker | null {
 +  if (!input.wslKnown) return "no-wsl-backend";
 +  if (!input.wslConnected) return "wsl-disconnected";
 +  if (input.wslSupportsBridge === false) return "runtime-lacks-bridge";
-+  if (!input.wslOffersLinks) return "wsl-links-off";
-+  if (!input.windowsOffersLinks) return "windows-links-off";
++  if (input.wslOffersLinks === false) return "wsl-links-off";
++  if (!input.windowsKnown) return "no-windows-backend";
++  // Unconnected, its settings are unknown: never claim Linked environments is off there.
++  if (!input.windowsConnected) return "windows-disconnected";
++  if (input.windowsOffersLinks === false) return "windows-links-off";
 +  return null;
++}
++
++interface BridgeEnvironment {
++  readonly environmentId: EnvironmentId;
++  readonly entry: { readonly target: Parameters<typeof desktopLocalBackendId>[0] };
++}
++
++/**
++ * This computer's two backends among the app's environments. WSL is the Desktop's `wsl:`
++ * backend. Windows is the app's own primary backend, which has no Desktop-local connection id,
++ * or the environment the Desktop's helper reached once it knows it.
++ */
++export function hostBridgeBackends<E extends BridgeEnvironment>(
++  environments: ReadonlyArray<E>,
++  windowsEnvironmentId: string | null,
++): { readonly wsl: E | null; readonly windows: E | null } {
++  const wsl =
++    environments.find(
++      (environment) => desktopLocalBackendId(environment.entry.target)?.startsWith("wsl:") === true,
++    ) ?? null;
++  const others = environments.filter((environment) => environment !== wsl);
++  const windows =
++    (windowsEnvironmentId === null
++      ? undefined
++      : others.find((environment) => environment.environmentId === windowsEnvironmentId)) ??
++    others.find((environment) => environment.entry.target._tag === "PrimaryConnectionTarget") ??
++    others.find((environment) => desktopLocalBackendId(environment.entry.target) === "primary") ??
++    null;
++  return { wsl, windows };
 +}
 diff --git a/apps/web/src/components/settings/LocalHostBridgeSettings.tsx b/apps/web/src/components/settings/LocalHostBridgeSettings.tsx
 new file mode 100644
@@ -1695,7 +1842,7 @@ index 2ddb83048f..170dbee4e5 100644
 +  });
 +});
 diff --git a/apps/web/src/components/settings/environmentsMap.logic.ts b/apps/web/src/components/settings/environmentsMap.logic.ts
-index b68a740b2b..9e25ff1a73 100644
+index b68a740b2b..915a971788 100644
 --- a/apps/web/src/components/settings/environmentsMap.logic.ts
 +++ b/apps/web/src/components/settings/environmentsMap.logic.ts
 @@ -12,6 +12,8 @@ import {
@@ -1833,6 +1980,15 @@ index b68a740b2b..9e25ff1a73 100644
    const source = graph.nodes.find((node) => node.id === edge.from);
    const target = graph.nodes.find((node) => node.id === edge.to);
    if (source?.kind !== "environment" || target?.kind !== "environment") return false;
+@@ -350,7 +436,7 @@ export function fleetLinkBackOffered(graph: FleetGraph, edge: FleetLinkEdge): bo
+         target.outgoing === "loaded"
+           ? graph.edges
+               .filter(isLinkEdge)
+-              .filter((other) => other.from === target.id)
++              .filter((other) => other.from === target.id && !isPendingHostBridge(other))
+               .map((other) => other.link)
+           : null,
+     },
 @@ -377,7 +463,9 @@ export function fleetSummary(graph: FleetGraph): {
      !connected.some((node) => node.outgoing === "error");
    return {
@@ -1868,7 +2024,7 @@ index 0a7cf8f930..74bbc165ce 100644
      id: "remote-environments",
      title: msg("Environments"),
 diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
-index 4bced723c3..47c75e2236 100644
+index 4bced723c3..68904fc562 100644
 --- a/apps/web/src/i18n/translations/de.json
 +++ b/apps/web/src/i18n/translations/de.json
 @@ -13160,6 +13160,87 @@
@@ -1959,8 +2115,17 @@ index 4bced723c3..47c75e2236 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
+@@ -13174,5 +13255,7 @@
+   "5559571021fbc6c7": "tok/s",
+   "6bc9093ea4cb76ba": "TTFT",
+   "2979e55ecb170657": "TTFA",
+-  "77c569c8dfc00af2": "Turns"
++  "77c569c8dfc00af2": "Turns",
++  "e360fa569394a202": "Diese App listet das Windows-Backend dieses Computers nicht. Füge es zuerst unter Einstellungen > Verbindungen hinzu.",
++  "91c719b4b23cb789": "Schalte das Windows-Backend dieses Computers in dieser App ein und warte, bis es verbunden ist. Der Kopplungscode kommt von dort."
+ }
 diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
-index 0c5da57dfb..c8cefecc21 100644
+index 0c5da57dfb..da1c3f1f14 100644
 --- a/apps/web/src/i18n/translations/en.json
 +++ b/apps/web/src/i18n/translations/en.json
 @@ -13169,6 +13169,87 @@
@@ -2051,8 +2216,17 @@ index 0c5da57dfb..c8cefecc21 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
+@@ -13183,5 +13264,7 @@
+   "5559571021fbc6c7": "tok/s",
+   "6bc9093ea4cb76ba": "TTFT",
+   "2979e55ecb170657": "TTFA",
+-  "77c569c8dfc00af2": "Turns"
++  "77c569c8dfc00af2": "Turns",
++  "e360fa569394a202": "This app does not list this computer's Windows backend. Add it in Settings > Connections first.",
++  "91c719b4b23cb789": "Turn on this computer's Windows backend in this app and wait until it connects. The pairing code comes from it."
+ }
 diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
-index a8303d4238..db9e073598 100644
+index a8303d4238..49e5472c88 100644
 --- a/apps/web/src/i18n/translations/es.json
 +++ b/apps/web/src/i18n/translations/es.json
 @@ -13155,6 +13155,87 @@
@@ -2143,8 +2317,17 @@ index a8303d4238..db9e073598 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
+@@ -13169,5 +13250,7 @@
+   "5559571021fbc6c7": "tok/s",
+   "6bc9093ea4cb76ba": "TTFT",
+   "2979e55ecb170657": "TTFA",
+-  "77c569c8dfc00af2": "Turns"
++  "77c569c8dfc00af2": "Turns",
++  "e360fa569394a202": "Esta app no muestra el backend de Windows de este equipo. Agrégalo primero en Configuración > Conexiones.",
++  "91c719b4b23cb789": "Activa el backend de Windows de este equipo en esta app y espera a que se conecte. El código de emparejamiento sale de ahí."
+ }
 diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
-index 21c230f5f8..df921d9450 100644
+index 21c230f5f8..94d6c71dc0 100644
 --- a/apps/web/src/i18n/translations/fr.json
 +++ b/apps/web/src/i18n/translations/fr.json
 @@ -13160,6 +13160,87 @@
@@ -2235,8 +2418,17 @@ index 21c230f5f8..df921d9450 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
+@@ -13174,5 +13255,7 @@
+   "5559571021fbc6c7": "tok/s",
+   "6bc9093ea4cb76ba": "TTFT",
+   "2979e55ecb170657": "TTFA",
+-  "77c569c8dfc00af2": "Turns"
++  "77c569c8dfc00af2": "Turns",
++  "e360fa569394a202": "Cette application ne liste pas le backend Windows de cet ordinateur. Ajoutez-le d’abord dans Réglages > Connexions.",
++  "91c719b4b23cb789": "Activez le backend Windows de cet ordinateur dans cette application et attendez qu’il soit connecté. Le code d’association vient de lui."
+ }
 diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
-index 5e43597181..57049ad85f 100644
+index 5e43597181..7d72da5bd4 100644
 --- a/apps/web/src/i18n/translations/ja.json
 +++ b/apps/web/src/i18n/translations/ja.json
 @@ -13096,6 +13096,87 @@
@@ -2327,8 +2519,17 @@ index 5e43597181..57049ad85f 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
+@@ -13110,5 +13191,7 @@
+   "5559571021fbc6c7": "tok/s",
+   "6bc9093ea4cb76ba": "TTFT",
+   "2979e55ecb170657": "TTFA",
+-  "77c569c8dfc00af2": "Turns"
++  "77c569c8dfc00af2": "Turns",
++  "e360fa569394a202": "このアプリにこのコンピューターの Windows バックエンドがありません。まず 設定 > Connections で追加してください。",
++  "91c719b4b23cb789": "このアプリでこのコンピューターの Windows バックエンドをオンにし、接続するまで待ってください。ペアリングコードはそこから取得します。"
+ }
 diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
-index 142d881597..f7f99896c9 100644
+index 142d881597..073c90bcdb 100644
 --- a/apps/web/src/i18n/translations/ko.json
 +++ b/apps/web/src/i18n/translations/ko.json
 @@ -13093,6 +13093,87 @@
@@ -2419,8 +2620,17 @@ index 142d881597..f7f99896c9 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
+@@ -13107,5 +13188,7 @@
+   "5559571021fbc6c7": "tok/s",
+   "6bc9093ea4cb76ba": "TTFT",
+   "2979e55ecb170657": "TTFA",
+-  "77c569c8dfc00af2": "Turns"
++  "77c569c8dfc00af2": "Turns",
++  "e360fa569394a202": "이 앱에 이 컴퓨터의 Windows 백엔드가 없습니다. 먼저 설정 > Connections에서 추가하세요.",
++  "91c719b4b23cb789": "이 앱에서 이 컴퓨터의 Windows 백엔드를 켜고 연결될 때까지 기다리세요. 페어링 코드는 거기에서 받습니다."
+ }
 diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
-index c81056e338..e2a03117e9 100644
+index c81056e338..47dd7de7b3 100644
 --- a/apps/web/src/i18n/translations/pt-BR.json
 +++ b/apps/web/src/i18n/translations/pt-BR.json
 @@ -13160,6 +13160,87 @@
@@ -2511,8 +2721,17 @@ index c81056e338..e2a03117e9 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
+@@ -13174,5 +13255,7 @@
+   "5559571021fbc6c7": "tok/s",
+   "6bc9093ea4cb76ba": "TTFT",
+   "2979e55ecb170657": "TTFA",
+-  "77c569c8dfc00af2": "Turns"
++  "77c569c8dfc00af2": "Turns",
++  "e360fa569394a202": "Este app não lista o backend do Windows deste computador. Adicione-o primeiro em Configurações > Conexões.",
++  "91c719b4b23cb789": "Ligue o backend do Windows deste computador neste app e espere ele conectar. O código de pareamento vem dele."
+ }
 diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
-index 45ba3f7ad3..d4c7d74f0d 100644
+index 45ba3f7ad3..02a59081f5 100644
 --- a/apps/web/src/i18n/translations/ru.json
 +++ b/apps/web/src/i18n/translations/ru.json
 @@ -13159,6 +13159,87 @@
@@ -2603,8 +2822,17 @@ index 45ba3f7ad3..d4c7d74f0d 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
+@@ -13173,5 +13254,7 @@
+   "5559571021fbc6c7": "tok/s",
+   "6bc9093ea4cb76ba": "TTFT",
+   "2979e55ecb170657": "TTFA",
+-  "77c569c8dfc00af2": "Turns"
++  "77c569c8dfc00af2": "Turns",
++  "e360fa569394a202": "В этом приложении нет бэкенда Windows этого компьютера. Сначала добавьте его в Настройки > Подключения.",
++  "91c719b4b23cb789": "Включите бэкенд Windows этого компьютера в этом приложении и дождитесь подключения. Код сопряжения выдаёт он."
+ }
 diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
-index cadfea539c..9b2b0684a0 100644
+index cadfea539c..9b0361d68f 100644
 --- a/apps/web/src/i18n/translations/sv.json
 +++ b/apps/web/src/i18n/translations/sv.json
 @@ -13167,6 +13167,87 @@
@@ -2695,8 +2923,17 @@ index cadfea539c..9b2b0684a0 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
+@@ -13181,5 +13262,7 @@
+   "5559571021fbc6c7": "tok/s",
+   "6bc9093ea4cb76ba": "TTFT",
+   "2979e55ecb170657": "TTFA",
+-  "77c569c8dfc00af2": "Turns"
++  "77c569c8dfc00af2": "Turns",
++  "e360fa569394a202": "Den här appen visar inte datorns Windows-backend. Lägg först till den i Inställningar > Anslutningar.",
++  "91c719b4b23cb789": "Slå på datorns Windows-backend i den här appen och vänta tills den är ansluten. Parkopplingskoden kommer därifrån."
+ }
 diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
-index 4c52c8a8c3..25f56e9b3e 100644
+index 4c52c8a8c3..0fb747618a 100644
 --- a/apps/web/src/i18n/translations/zh.json
 +++ b/apps/web/src/i18n/translations/zh.json
 @@ -13174,6 +13174,87 @@
@@ -2787,6 +3024,15 @@ index 4c52c8a8c3..25f56e9b3e 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
+@@ -13188,5 +13269,7 @@
+   "5559571021fbc6c7": "tok/s",
+   "6bc9093ea4cb76ba": "TTFT",
+   "2979e55ecb170657": "TTFA",
+-  "77c569c8dfc00af2": "Turns"
++  "77c569c8dfc00af2": "Turns",
++  "e360fa569394a202": "此应用中没有这台电脑的 Windows 后端。请先在 设置 > Connections 中添加。",
++  "91c719b4b23cb789": "请在此应用中开启这台电脑的 Windows 后端，并等待连接完成。配对码由它提供。"
+ }
 diff --git a/apps/web/src/index.css b/apps/web/src/index.css
 index 7b7f83e80b..9404359c4a 100644
 --- a/apps/web/src/index.css

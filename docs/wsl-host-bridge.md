@@ -97,7 +97,9 @@ the patches are the extension mechanism.
 5. **GUI**. The Environments map draws the bridge as its own kind of link
    from WSL to Windows: a violet line, wider than a native link, labeled
    **Host bridge** with its state on the edge (dashed while pairing, dotted
-   when paused or off, red on an error). Selecting the edge, the WSL node or the
+   and fainter when paused or off, red on an error). It is drawn whenever the
+   Desktop offers the bridge, also while it is off, so it can be found and
+   turned on there; until it is linked it counts as no link. Selecting the edge, the WSL node or the
    Windows node shows the bridge's controls in the details panel; dragging WSL
    onto Windows opens them instead of the ordinary link flow. Settings →
    Connections has the same controls as a compact row, for the list view and
@@ -179,8 +181,12 @@ Enable shows each step with a progress bar and the elapsed time: turning on
 the bridge, starting the helper in WSL, helper listening (with its address),
 getting a pairing code from Windows, checking Windows' identity through the
 bridge and pairing, linked. Before the button is offered, the controls say
-what blocks pairing: the WSL backend off or not connected, Linked environments
-off on either side, or a WSL runtime without the bridge.
+what blocks pairing: the WSL backend off or not connected, this computer's
+Windows backend off or not connected in this app (the pairing code is minted
+through that connection), Linked environments off on either side, or a WSL
+runtime without the bridge. A backend whose settings the app cannot read, such
+as a Windows backend turned off in the app, is never reported as having Linked
+environments off.
 
 A failure names the step, the reason and a next step, for example "The WSL
 backend is not running" or "Something else answered on the bridge port, not
