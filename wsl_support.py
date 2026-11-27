@@ -33,7 +33,26 @@ def is_wsl(release=None, interop='/proc/sys/fs/binfmt_misc/WSLInterop'):
     return 'microsoft' in release or 'wsl' in release or os.path.exists(interop)
 
 
-def powershell():
+INTEROP_FIX = (
+    'Windows interop is off in this WSL distro, so it cannot run Windows programs '
+    '("Exec format error"). To turn it on now, run in WSL:\n'
+    "  sudo sh -c 'echo :WSLInterop:M::MZ::/init:PF > /proc/sys/fs/binfmt_misc/register'\n"
+    'To keep it after WSL restarts (systemd clears it at boot), run once:\n'
+    "  echo ':WSLInterop:M::MZ::/init:PF' | sudo tee /etc/binfmt.d/WSLInterop.conf\n"
+    'If /etc/wsl.conf has "[interop] enabled=false", set it to true and run "wsl --shutdown" in Windows.')
+
+
+def interop_enabled(interop='/proc/sys/fs/binfmt_misc/WSLInterop'):
+    try:
+        with open(interop, encoding='ascii', errors='replace') as source:
+            return source.readline().strip() == 'enabled'
+    except OSError:
+        return False
+
+
+def powershell(interop='/proc/sys/fs/binfmt_misc/WSLInterop'):
+    if not interop_enabled(interop):
+        raise WslError(INTEROP_FIX)
     found = shutil.which('powershell.exe')
     if found:
         return found

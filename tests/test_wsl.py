@@ -130,6 +130,17 @@ class PowerShellTests(unittest.TestCase):
     def test_encoded_command_is_utf16(self):
         self.assertEqual(base64.b64decode(wsl.encode_command('é')).decode('utf-16le'), 'é')
 
+    def test_powershell_explains_disabled_interop(self):
+        with tempfile.TemporaryDirectory() as folder:
+            missing = str(Path(folder) / 'WSLInterop')
+            with self.assertRaises(wsl.WslError) as raised:
+                wsl.powershell(interop=missing)
+            self.assertIn('/etc/binfmt.d/WSLInterop.conf', str(raised.exception))
+            Path(missing).write_text('disabled\ninterpreter /init\n')
+            self.assertFalse(wsl.interop_enabled(missing))
+            Path(missing).write_text('enabled\ninterpreter /init\n')
+            self.assertTrue(wsl.interop_enabled(missing))
+
     def test_wsl_detection(self):
         self.assertTrue(wsl.is_wsl('6.6.87.2-microsoft-standard-WSL2', interop='/nonexistent'))
         self.assertFalse(wsl.is_wsl('6.8.0-45-generic', interop='/nonexistent'))
