@@ -2,9 +2,11 @@
 
 These instructions are for a coding agent. A person can follow them too.
 
-The patches in `patches/` are commits made against the upstream commit in
-`patches/base.txt`. Upstream moves fast, so they often stop applying cleanly. Your job
-is to carry them onto the user's nightly with every feature still working.
+Each supported T3 Code release has its own patch set in `patches/<version>/`: the
+patches, `base.txt` (the upstream commit they were made against) and `checks.json`.
+The tool picks the set made for the installed commit, or the closest older one to port
+from. Upstream moves fast, so a new release often needs a port. Your job is to carry the
+patches onto the user's release with every feature still working.
 
 ## Start
 
@@ -27,7 +29,7 @@ Work only in that private source checkout and this repo.
 - Failing checks: fix the relevant commit with `git commit --fixup=<sha>`, then
   `git -c sequence.editor=true rebase -i --autosquash <nightly commit>`. Keep one
   commit per patch.
-- If a test file moved upstream, update its path in `checks.json`.
+- If a test file moved upstream, update its path in the set's `checks.json`.
 - `git log <base>..<nightly commit>` and `git show` explain what changed upstream.
 - To install dependencies, use exactly `pnpm install --frozen-lockfile --ignore-scripts`
   in the source checkout, the same as the tool.
@@ -37,13 +39,14 @@ feature can't be ported sensibly, stop and explain why.
 
 ## Finish
 
-If `t3code-customize` started you, stop once the tests and typechecks in `checks.json`
+If `t3code-customize` started you, stop once the tests and typechecks in the set's `checks.json`
 pass (run them from the source checkout with `node_modules/.bin/vp test run <files>` and
 `node_modules/.bin/effect-tsgo tsrs --noEmit` inside each package directory; older bases used `tsc`). It continues the build itself.
 
 Otherwise run the same Python entry with `build --resume`. It reruns the checks on the checkout as you
-left it, builds, installs the result and writes the ported commits back to
-`patches/`. Leave the checkout clean with no rebase in progress.
+left it, builds, installs the result and writes the ported commits to a new set,
+`patches/<installed version>/`, keeping the set it came from for older installs. Leave
+the checkout clean with no rebase in progress.
 
 End with a short report: what changed upstream, what you changed and in which files,
 and whether the final build succeeded. Separate fixture tests, native process

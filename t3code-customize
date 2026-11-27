@@ -193,13 +193,54 @@ def save(path, value):
     os.replace(temporary, path)
 
 
+# One patch set per supported T3 Code release: patches/<version>/ holds the
+# patches, base.txt (the upstream commit they apply to) and checks.json.
+PATCH_SET = None
+
+
+def patch_sets():
+    root = REPO / 'patches'
+    if (root / 'base.txt').exists():
+        return [root]
+    return sorted((d for d in root.iterdir() if (d / 'base.txt').exists()), key=version_key)
+
+
+def patch_dir():
+    return PATCH_SET or patch_sets()[-1]
+
+
 def patches():
-    return sorted((REPO / 'patches').glob('*.patch'))
+    return sorted(patch_dir().glob('*.patch'))
+
+
+def patch_base():
+    return (patch_dir() / 'base.txt').read_text().strip()
+
+
+def checks_file():
+    own = patch_dir() / 'checks.json'
+    return own if own.exists() else REPO / 'checks.json'
+
+
+def is_ancestor(older, newer):
+    return git('merge-base', '--is-ancestor', older, newer, check=False, capture=False).returncode == 0
+
+
+def choose_patch_set(target):
+    """The set made for this commit, else the closest older one to port from; None if all are newer."""
+    candidates = []
+    for folder in patch_sets():
+        base = (folder / 'base.txt').read_text().strip()
+        if base == target:
+            return folder
+        if is_ancestor(base, target):
+            candidates.append((int(git('rev-list', '--count', f'{base}..{target}').strip()), folder))
+    return min(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def recipe_hash():
     digest = hashlib.sha256()
-    for path in patches() + [REPO / 'patches/base.txt', REPO / 'checks.json',
+    for path in patches() + [patch_dir() / 'base.txt', checks_file(),
                              REPO / NAME, REPO / 'platform_support.py']:
         digest.update(path.name.encode() + path.read_bytes())
     return digest.hexdigest()[:12]
@@ -549,7 +590,7 @@ def ensure_commit(commit, version, log):
 
 def prepare(target, log, resume=False):
     """Leave SOURCE with the patches as commits on top of target."""
-    base = (REPO / 'patches/base.txt').read_text().strip()
+    base = patch_base()
     if not resume:
         if rebase_in_progress():
             # Start over from the repo's patches; a fresh build never continues an old port.
@@ -580,10 +621,10 @@ def install_dependencies(env, log):
 
 
 def checks(env, log):
-    spec = json.loads((REPO / 'checks.json').read_text())
+    spec = json.loads(checks_file().read_text())
     missing = [t for t in spec['tests'] if not (SOURCE / t).exists()]
     if missing:
-        raise NeedsFix('Test files listed in checks.json no longer exist (moved upstream?):\n' + '\n'.join('  ' + t for t in missing))
+        raise NeedsFix(f'Test files listed in {checks_file()} no longer exist (moved upstream?):\n' + '\n'.join('  ' + t for t in missing))
     step('Testing the patches...')
     steps = [(['vp', 'test', 'run', *spec['tests']], SOURCE, 'The patch tests failed.')]
     steps += [(typecheck_command(p), SOURCE / p, f'Typecheck failed in {p}.') for p in spec['typecheck']]
@@ -682,8 +723,8 @@ def agent_fix(agent, problem, target, version, log):
 
 
 def older_than_patches(target):
-    base = (REPO / 'patches/base.txt').read_text().strip()
-    return target != base and git('merge-base', '--is-ancestor', target, base, check=False, capture=False).returncode == 0
+    """Older than every patch set: nothing here can be ported back to it."""
+    return choose_patch_set(target) is None
 
 
 def stuck_message(problem, target):
@@ -961,6 +1002,13 @@ def build(args):
         if len(config) != len(PUBLIC_CONFIG):
             say('    Note: could not read T3 Connect config from your app; sign-in may not work in this build.')
         target = ensure_commit(commit, version, log)
+        global PATCH_SET
+        PATCH_SET = choose_patch_set(target)
+        if PATCH_SET is None:
+            raise Stop(f'T3 Code {version} is older than every patch set in {REPO / "patches"}. '
+                       f'Update T3 Code, then run {NAME} again. Your current T3 Code is untouched.')
+        if patch_base() != target:
+            say(f'    No patch set for {version} yet; porting the {PATCH_SET.name} set.')
         node_bin = ensure_node(log, required_node(target))
         env = build_env(node_bin)
         step('Applying the patches...')
@@ -1001,7 +1049,7 @@ def build(args):
         if fingerprint(app) != stock_fingerprint:
             raise Stop('The installed T3 Code changed during the build. Run again for its new version.')
         if ported:
-            export_patches(target)
+            export_patches(target, version)
         build_dir = DATA / 'builds' / f'{version}-{recipe_hash()}-{job.name}'
         build_dir.mkdir(parents=True)
         destination = build_dir / assembled.name
@@ -1021,7 +1069,7 @@ def build(args):
     minutes = max(1, round((time.time() - started) / 60))
     say(f'\nDone in {minutes} min: T3 Code {version} with the stats bar.')
     if ported:
-        say(f'The ported patches were saved to {REPO / "patches"}.')
+        say(f'The ported patches were saved to {REPO / "patches" / version}.')
     if DISABLED.exists():
         say(f'Customization is switched off. Run {NAME} on to use it.')
     else:
@@ -1029,13 +1077,19 @@ def build(args):
         say('First time? Turn on Settings > Appearance > Stats for nerds.')
 
 
-def export_patches(target):
-    """Keep a port that an agent or you finished, so the next build starts from it."""
-    out = REPO / 'patches'
-    for path in patches():
+def export_patches(target, version):
+    """Keep a port as this release's own patch set; the set it came from stays for older installs."""
+    global PATCH_SET
+    source_checks = checks_file()
+    out = REPO / 'patches' / version
+    out.mkdir(parents=True, exist_ok=True)
+    for path in out.glob('*.patch'):
         path.unlink()
     git('format-patch', '--quiet', '--no-signature', '--zero-commit', '-o', str(out), target + '..HEAD', capture=False)
     (out / 'base.txt').write_text(target + '\n')
+    if source_checks != out / 'checks.json':
+        shutil.copy2(source_checks, out / 'checks.json')
+    PATCH_SET = out
 
 
 def prune(keep=3):
@@ -1050,18 +1104,26 @@ def prune(keep=3):
 
 
 def cmd_verify(args):
-    """Apply the patches to their base and run the checks. No installed app needed."""
+    """Apply each patch set to its base and run its checks. No installed app needed."""
+    global PATCH_SET
     logs = CACHE / 'logs'
     logs.mkdir(parents=True, exist_ok=True)
-    base = (REPO / 'patches/base.txt').read_text().strip()
-    with (logs / ('verify-' + time.strftime('%Y%m%d-%H%M%S') + '.log')).open('w', encoding='utf-8') as log:
-        say('Log: ' + log.name)
-        target = ensure_commit(base, None, log)
-        env = build_env(ensure_node(log, required_node(target)))
-        prepare(target, log)
-        install_dependencies(env, log)
-        checks(env, log)
-    say('Patches apply and pass their checks on ' + base[:12] + '.')
+    sets = patch_sets()
+    if args.patch_set != 'all':
+        sets = [folder for folder in sets if folder.name == args.patch_set]
+        if not sets:
+            raise Stop(f'No patch set named {args.patch_set}. Sets: ' + ', '.join(f.name for f in patch_sets()))
+    for folder in sets:
+        PATCH_SET = folder
+        base = patch_base()
+        with (logs / ('verify-' + folder.name + '-' + time.strftime('%Y%m%d-%H%M%S') + '.log')).open('w', encoding='utf-8') as log:
+            say(f'Patch set {folder.name}. Log: ' + log.name)
+            target = ensure_commit(base, None, log)
+            env = build_env(ensure_node(log, required_node(target)))
+            prepare(target, log)
+            install_dependencies(env, log)
+            checks(env, log)
+        say(f'Patch set {folder.name} applies and passes its checks on {base[:12]}.')
 
 
 def stock_target(app):
@@ -1321,7 +1383,8 @@ def main():
     sub.add_parser('check', help='read-only: which runtime runs, your data counts and the latest stats per provider')
     sub.add_parser('on', help='use the customized build')
     sub.add_parser('off', help='go back to stock T3 Code')
-    sub.add_parser('verify', help='apply the patches to their base and run the checks (for CI)')
+    verify = sub.add_parser('verify', help='apply each patch set to its base and run its checks (for CI)')
+    verify.add_argument('--patch-set', default='all', help='one release, such as 0.1.13, or all (default)')
     sub.add_parser('uninstall', help='remove the launcher, builds and caches')
     argv = sys.argv[1:]
     if not argv or argv[0].startswith('-') and argv[0] not in ('-h', '--help'):

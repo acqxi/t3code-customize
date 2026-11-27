@@ -19,6 +19,21 @@ Unofficial. Not affiliated with T3 Tools. For T3 Code (Nightly, Beta or Release)
 The official app's native dependencies and public T3 Connect configuration are
 reused. Windows signature changes and platform restrictions are described below.
 
+## Supported T3 Code versions
+
+Each supported release has its own patch set in `patches/<version>/`. The tool reads
+your installed T3 Code's upstream commit and picks the matching set, so machines on
+different releases build from the same checkout.
+
+| T3 Code | Patch set | Status |
+| --- | --- | --- |
+| 0.1.13 | `patches/0.1.13` | being ported |
+| 0.1.12 | `patches/0.1.12` | supported |
+
+A release without its own set is built from the closest older set. If those patches
+no longer apply, see [When a nightly breaks the patches](#when-a-nightly-breaks-the-patches);
+a finished port is saved as a new set and the older ones stay.
+
 ## Install
 
 Install T3 Code (Nightly, Beta or Release) first. You need Git, Python **3.10+**, an
@@ -191,7 +206,8 @@ t3code-customize uninstall   remove it, its launcher, builds and caches
 
 ```sh
 python -m unittest discover -s tests -v
-python t3code-customize verify
+python t3code-customize verify            # every patch set
+python t3code-customize verify --patch-set 0.1.13
 ```
 
 Use `python3` on Linux. The first command tests layouts, split/merged

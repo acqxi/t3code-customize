@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -267,3 +268,61 @@ def struct_header():
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PatchSetTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.source = self.tmp / 'source'
+        self.source.mkdir()
+        run = lambda *args: subprocess.run(['git', *args], cwd=self.source, check=True, capture_output=True, text=True).stdout.strip()
+        run('init', '-q')
+        self.commits = []
+        for name in ('old', 'v12', 'mid', 'v13', 'new'):
+            run('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', name)
+            self.commits.append(run('rev-parse', 'HEAD'))
+        old, v12, mid, v13, new = self.commits
+        for version, base in (('0.1.9', old), ('0.1.12', v12), ('0.1.13', v13)):
+            folder = self.tmp / 'repo/patches' / version
+            folder.mkdir(parents=True)
+            (folder / 'base.txt').write_text(base + '\n')
+        (self.tmp / 'repo/patches/0.1.13/checks.json').write_text('{}')
+        (self.tmp / 'repo/checks.json').write_text('{"shared": true}')
+        self.patches = [patch.object(customize, 'REPO', self.tmp / 'repo'), patch.object(customize, 'SOURCE', self.source),
+                        patch.object(customize, 'PATCH_SET', None)]
+        for item in self.patches:
+            item.start()
+
+    def tearDown(self):
+        for item in self.patches:
+            item.stop()
+
+    def test_sets_sort_by_release_and_default_to_newest(self):
+        self.assertEqual([f.name for f in customize.patch_sets()], ['0.1.9', '0.1.12', '0.1.13'])
+        self.assertEqual(customize.patch_dir().name, '0.1.13')
+
+    def test_installed_commit_picks_its_own_set_or_closest_older(self):
+        old, v12, mid, v13, new = self.commits
+        self.assertEqual(customize.choose_patch_set(v12).name, '0.1.12')
+        self.assertEqual(customize.choose_patch_set(v13).name, '0.1.13')
+        self.assertEqual(customize.choose_patch_set(mid).name, '0.1.12')
+        self.assertEqual(customize.choose_patch_set(new).name, '0.1.13')
+
+    def test_older_than_every_set(self):
+        with patch.object(customize, 'patch_sets', return_value=customize.patch_sets()[1:]):
+            self.assertIsNone(customize.choose_patch_set(self.commits[0]))
+            self.assertTrue(customize.older_than_patches(self.commits[0]))
+
+    def test_checks_file_prefers_the_set_then_the_shared_file(self):
+        customize.PATCH_SET = self.tmp / 'repo/patches/0.1.13'
+        self.assertEqual(customize.checks_file().name, 'checks.json')
+        self.assertEqual(customize.checks_file().parent.name, '0.1.13')
+        customize.PATCH_SET = self.tmp / 'repo/patches/0.1.12'
+        self.assertEqual(customize.checks_file(), self.tmp / 'repo/checks.json')
+
+    def test_legacy_flat_layout_is_one_set(self):
+        flat = self.tmp / 'flat/patches'
+        flat.mkdir(parents=True)
+        (flat / 'base.txt').write_text(self.commits[1] + '\n')
+        with patch.object(customize, 'REPO', self.tmp / 'flat'):
+            self.assertEqual(customize.patch_sets(), [flat])

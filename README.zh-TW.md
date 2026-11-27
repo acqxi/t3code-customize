@@ -18,6 +18,17 @@
 
 客製版沿用官方 App 的原生相依套件與 T3 Connect 公開設定。Windows 簽章變動與平台限制說明如下。
 
+## 支援的 T3 Code 版本
+
+每個支援的版本在 `patches/<版本>/` 都有自己的 patch 組。工具會讀取已安裝 T3 Code 對應的 upstream commit，自動選用相符的那一組，所以版本不同的機器可以用同一份程式碼建置。
+
+| T3 Code | Patch 組 | 狀態 |
+| --- | --- | --- |
+| 0.1.13 | `patches/0.1.13` | 移植中 |
+| 0.1.12 | `patches/0.1.12` | 支援 |
+
+沒有專屬 patch 組的版本，會從最接近的較舊版本那組開始建置。如果那些 patch 套不上去，請見〈nightly 更新讓 patch 失效時〉；移植完成後會另存成新的一組，舊的那幾組都會保留。
+
 ## 安裝
 
 請先安裝 T3 Code（Nightly、Beta 或 Release）。需要 Git、Python **3.10 以上**、網路連線，以及約 **6 GB** 的可用空間。工具會使用 upstream 在 `engines.node` 指定的 Node 版本；如果系統上的 Node 版本不同，會另外下載一份經過校驗和驗證的私用版本。第一次建置約需 5 到 15 分鐘，視電腦效能而定。
@@ -133,7 +144,8 @@ t3code-customize uninstall   移除工具、啟動器、建置結果與快取
 
 ```sh
 python -m unittest discover -s tests -v
-python t3code-customize verify
+python t3code-customize verify            # 驗證每一組 patch
+python t3code-customize verify --patch-set 0.1.13
 ```
 
 Linux 請用 `python3`。第一個指令用測試資料驗證 App 配置、分離與合併的封存檔、更新後的回退、檔案鎖、指令包裝程式與完整性中繼資料。在 Windows 上還會測試實際的 PE 資源 API。第二個指令會把所有 patch 套用到基準 commit，並執行 `checks.json` 中的所有測試與型別檢查；它會下載 upstream 原始碼與相依套件。
