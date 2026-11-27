@@ -1,0 +1,1114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: acqxi <kacqxi@gmail.com>
+Date: Fri, 27 Nov 2026 08:02:41 +0800
+Subject: [PATCH 09/12] Performance metrics in the usage dashboard
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Server: server.getUsagePerformance reads finished provider turns with
+  turn performance from the projection store (provider thread for the
+  driver, run for the requested model when the provider reported none),
+  keeps those that started in the dashboard's window (the same day and
+  time-zone rules as the usage summary, instants when hourly), applies the
+  usage model aliases, and groups them by usage provider and model: turn
+  count, generation tokens and time of turns with at least 1 s of
+  generation, whether any count was estimated, and the TTFT and TTFA
+  samples. Diagnostics read scope, like the usage summary.
+- Web: the Model breakdown gains tok/s (token-weighted, ≈ when
+  estimated), median TTFT and TTFA (p90 in the tooltip) and measured
+  turns, merged across the selected environments before the medians.
+  Models T3 never timed, such as those only found by the usage scan, show
+  a dash. The columns show from the lg breakpoint.
+---
+ apps/server/src/auth/RpcAuthorization.ts      |   1 +
+ .../src/observability/RpcInstrumentation.ts   |   1 +
+ .../server/src/usage/usagePerformance.test.ts | 206 ++++++++++++++++++
+ apps/server/src/usage/usagePerformance.ts     | 152 +++++++++++++
+ apps/server/src/ws.ts                         |   9 +
+ apps/web/src/components/usage/UsagePage.tsx   |  79 ++++++-
+ .../components/usage/usagePerformance.test.ts |  56 +++++
+ .../src/components/usage/usagePerformance.ts  |  64 ++++++
+ apps/web/src/i18n/translations/de.json        |  11 +-
+ apps/web/src/i18n/translations/en.json        |  11 +-
+ apps/web/src/i18n/translations/es.json        |  11 +-
+ apps/web/src/i18n/translations/fr.json        |  11 +-
+ apps/web/src/i18n/translations/ja.json        |  11 +-
+ apps/web/src/i18n/translations/ko.json        |  11 +-
+ apps/web/src/i18n/translations/pt-BR.json     |  11 +-
+ apps/web/src/i18n/translations/ru.json        |  11 +-
+ apps/web/src/i18n/translations/sv.json        |  11 +-
+ apps/web/src/i18n/translations/zh.json        |  11 +-
+ apps/web/src/state/usage.ts                   |  39 ++++
+ packages/client-runtime/src/state/server.ts   |   6 +
+ packages/contracts/src/rpc.ts                 |  17 +-
+ packages/contracts/src/usage.ts               |  35 +++
+ 22 files changed, 761 insertions(+), 14 deletions(-)
+ create mode 100644 apps/server/src/usage/usagePerformance.test.ts
+ create mode 100644 apps/server/src/usage/usagePerformance.ts
+ create mode 100644 apps/web/src/components/usage/usagePerformance.test.ts
+ create mode 100644 apps/web/src/components/usage/usagePerformance.ts
+
+diff --git a/apps/server/src/auth/RpcAuthorization.ts b/apps/server/src/auth/RpcAuthorization.ts
+index 3c05f45c8f..49591d0745 100644
+--- a/apps/server/src/auth/RpcAuthorization.ts
++++ b/apps/server/src/auth/RpcAuthorization.ts
+@@ -127,6 +127,7 @@ export const RPC_REQUIRED_SCOPES = {
+   [WS_METHODS.serverGetResourceTelemetryHistory]: AuthDiagnosticsReadScope,
+   [WS_METHODS.serverRetryResourceTelemetry]: AuthDiagnosticsReadScope,
+   [WS_METHODS.serverGetUsageSummary]: AuthDiagnosticsReadScope,
++  [WS_METHODS.serverGetUsagePerformance]: AuthDiagnosticsReadScope,
+   [WS_METHODS.serverRefreshUsageRates]: AuthDiagnosticsReadScope,
+   [WS_METHODS.serverSignalProcess]: AuthEnvironmentMaintainScope,
+   [WS_METHODS.serverReportClientActivity]: AuthOrchestrationReadScope,
+diff --git a/apps/server/src/observability/RpcInstrumentation.ts b/apps/server/src/observability/RpcInstrumentation.ts
+index 33e53f6400..cbabeeb5e5 100644
+--- a/apps/server/src/observability/RpcInstrumentation.ts
++++ b/apps/server/src/observability/RpcInstrumentation.ts
+@@ -103,6 +103,7 @@ const RPC_AGGREGATES = {
+   [WS_METHODS.serverListTextGeneratorModels]: "server",
+   [WS_METHODS.serverPrepareTriage]: "server",
+   [WS_METHODS.serverGetUsageSummary]: "server",
++  [WS_METHODS.serverGetUsagePerformance]: "server",
+   [WS_METHODS.serverRefreshUsageRates]: "server",
+   [WS_METHODS.serverSignalProcess]: "server",
+   [WS_METHODS.serverReportClientActivity]: "server",
+diff --git a/apps/server/src/usage/usagePerformance.test.ts b/apps/server/src/usage/usagePerformance.test.ts
+new file mode 100644
+index 0000000000..6bce3aa1d9
+--- /dev/null
++++ b/apps/server/src/usage/usagePerformance.test.ts
+@@ -0,0 +1,206 @@
++import { assert, describe, it } from "@effect/vitest";
++import type { UsageDay } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as Schema from "effect/Schema";
++import * as SqlClient from "effect/sql/SqlClient";
++
++import * as Sqlite from "../persistence/Sqlite.ts";
++import { readUsagePerformance } from "./usagePerformance.ts";
++
++const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
++
++const performance = (overrides: Record<string, unknown> = {}) => ({
++  source: "claude_stream",
++  requestSentAt: "2026-11-20T10:00:00.000Z",
++  firstTokenMs: 800,
++  firstAnswerMs: 1_200,
++  generationMs: 10_000,
++  generationTokens: { value: 1_000, basis: "provider_exact" },
++  streamedChars: { reasoning: 0, text: 0, toolInput: 0 },
++  tools: { count: 0, wallMs: 0, longestMs: 0, open: 0 },
++  turnMs: 12_000,
++  partial: false,
++  live: false,
++  ...overrides,
++});
++
++const seedTurn = (input: {
++  readonly id: string;
++  readonly driver: string;
++  readonly startedAt: string;
++  readonly status?: string;
++  readonly model?: string;
++  readonly requestedModel?: string;
++  readonly performance?: Record<string, unknown> | null;
++}) =>
++  Effect.gen(function* () {
++    const sql = yield* SqlClient.SqlClient;
++    yield* sql`INSERT INTO orchestration_v2_projection_provider_threads ${sql.insert({
++      provider_thread_id: `pthread-${input.id}`,
++      thread_id: `thread-${input.id}`,
++      provider: input.driver,
++      driver: input.driver,
++      provider_instance_id: input.driver,
++      status: "idle",
++      updated_at: input.startedAt,
++      payload_json: "{}",
++    })}`;
++    yield* sql`INSERT INTO orchestration_v2_projection_run_attempts ${sql.insert({
++      attempt_id: `attempt-${input.id}`,
++      thread_id: `thread-${input.id}`,
++      run_id: `run-${input.id}`,
++      attempt_ordinal: 1,
++      root_node_id: `node-${input.id}`,
++      provider: input.driver,
++      provider_thread_id: `pthread-${input.id}`,
++      status: "completed",
++      payload_json: "{}",
++    })}`;
++    yield* sql`INSERT INTO orchestration_v2_projection_runs ${sql.insert({
++      run_id: `run-${input.id}`,
++      thread_id: `thread-${input.id}`,
++      ordinal: 1,
++      provider: input.driver,
++      status: "completed",
++      requested_at: input.startedAt,
++      payload_json: encodeJson({
++        modelSelection: { instanceId: input.driver, model: input.requestedModel ?? "requested" },
++      }),
++    })}`;
++    const status = input.status ?? "completed";
++    yield* sql`INSERT INTO orchestration_v2_projection_provider_turns ${sql.insert({
++      provider_turn_id: `turn-${input.id}`,
++      thread_id: `thread-${input.id}`,
++      provider_thread_id: `pthread-${input.id}`,
++      node_id: `node-${input.id}`,
++      run_attempt_id: `attempt-${input.id}`,
++      ordinal: 1,
++      status,
++      started_at: input.startedAt,
++      completed_at: input.startedAt,
++      payload_json: encodeJson({
++        id: `turn-${input.id}`,
++        providerThreadId: `pthread-${input.id}`,
++        nodeId: `node-${input.id}`,
++        runAttemptId: `attempt-${input.id}`,
++        nativeTurnRef: null,
++        ordinal: 1,
++        status,
++        startedAt: input.startedAt,
++        completedAt: input.startedAt,
++        ...(input.model === undefined ? {} : { model: input.model }),
++        ...(input.performance === null ? {} : { performance: input.performance ?? performance() }),
++      }),
++    })}`;
++  });
++
++const day = (value: string) => value as UsageDay;
++const WINDOW = { sinceDay: day("2026-11-20"), untilDay: day("2026-11-21"), timeZone: "UTC" };
++
++describe("readUsagePerformance", () => {
++  it.effect("groups finished measured turns in the window by provider and model", () =>
++    Effect.gen(function* () {
++      yield* seedTurn({
++        id: "a",
++        driver: "claudeAgent",
++        startedAt: "2026-11-20T10:00:00.000Z",
++        model: "claude-opus-5-5",
++      });
++      yield* seedTurn({
++        id: "b",
++        driver: "claudeAgent",
++        startedAt: "2026-11-21T09:00:00.000Z",
++        model: "claude-opus-5-5",
++        performance: performance({
++          firstTokenMs: 2_000,
++          generationMs: 2_000,
++          generationTokens: { value: 400, basis: "estimated" },
++        }),
++      });
++      // Under a second of streaming counts as a turn, not as speed.
++      yield* seedTurn({
++        id: "c",
++        driver: "antigravity",
++        startedAt: "2026-11-20T11:00:00.000Z",
++        requestedModel: "gemini-4-neon",
++        performance: performance({ generationMs: 300, firstAnswerMs: undefined }),
++      });
++      yield* seedTurn({
++        id: "outside",
++        driver: "claudeAgent",
++        startedAt: "2026-11-22T00:00:00.000Z",
++        model: "claude-opus-5-5",
++      });
++      yield* seedTurn({
++        id: "running",
++        driver: "claudeAgent",
++        startedAt: "2026-11-20T12:00:00.000Z",
++        status: "running",
++        model: "claude-opus-5-5",
++      });
++      yield* seedTurn({
++        id: "unmeasured",
++        driver: "codex",
++        startedAt: "2026-11-20T12:00:00.000Z",
++        model: "gpt-6.1-sol",
++        performance: null,
++      });
++
++      const summary = yield* readUsagePerformance(WINDOW, { "claude-opus-5-5": "opus" });
++      const byModel = new Map(
++        summary.models.map((model) => [`${model.provider}:${model.model}`, model]),
++      );
++      assert.deepStrictEqual([...byModel.keys()].toSorted(), [
++        "antigravity:gemini-4-neon",
++        "claude:opus",
++      ]);
++      const opus = byModel.get("claude:opus")!;
++      assert.strictEqual(opus.turns, 2);
++      assert.strictEqual(opus.generationTurns, 2);
++      assert.strictEqual(opus.generationTokens, 1_400);
++      assert.strictEqual(opus.generationMs, 12_000);
++      assert.strictEqual(opus.generationEstimated, true);
++      assert.deepStrictEqual(opus.firstTokenMs.toSorted((a, b) => a - b), [800, 2_000]);
++      const neon = byModel.get("antigravity:gemini-4-neon")!;
++      assert.strictEqual(neon.turns, 1);
++      assert.strictEqual(neon.generationTurns, 0);
++      assert.deepStrictEqual(neon.firstAnswerMs, []);
++    }).pipe(Effect.provide(Sqlite.layerMemory)),
++  );
++
++  it.effect("reads an hourly window by instant and rejects a reversed one", () =>
++    Effect.gen(function* () {
++      yield* seedTurn({
++        id: "early",
++        driver: "codex",
++        startedAt: "2026-11-20T08:00:00.000Z",
++        model: "gpt-6.1-sol",
++      });
++      yield* seedTurn({
++        id: "late",
++        driver: "codex",
++        startedAt: "2026-11-20T10:30:00.000Z",
++        model: "gpt-6.1-sol",
++      });
++      const hourly = yield* readUsagePerformance(
++        {
++          ...WINDOW,
++          sinceTime: "2026-11-20T10:00:00.000Z",
++          untilTime: "2026-11-20T11:00:00.000Z",
++        },
++        {},
++      );
++      assert.deepStrictEqual(
++        hourly.models.map((model) => [model.provider, model.model, model.turns]),
++        [["codex", "gpt-6.1-sol", 1]],
++      );
++      const reversed = yield* Effect.flip(
++        readUsagePerformance(
++          { ...WINDOW, sinceDay: day("2026-11-22"), untilDay: day("2026-11-20") },
++          {},
++        ),
++      );
++      assert.strictEqual(reversed.reason, "invalidWindow");
++    }).pipe(Effect.provide(Sqlite.layerMemory)),
++  );
++});
+diff --git a/apps/server/src/usage/usagePerformance.ts b/apps/server/src/usage/usagePerformance.ts
+new file mode 100644
+index 0000000000..3eaf6f3339
+--- /dev/null
++++ b/apps/server/src/usage/usagePerformance.ts
+@@ -0,0 +1,152 @@
++import {
++  type OrchestrationV2ProviderTurn,
++  OrchestrationV2ProviderTurnJson,
++  UsageReadError,
++  type UsageModelPerformance,
++  type UsagePerformanceInput,
++  type UsagePerformanceSummary,
++} from "@t3tools/contracts";
++import * as DateTime from "effect/DateTime";
++import * as Effect from "effect/Effect";
++import * as Option from "effect/Option";
++import * as Schema from "effect/Schema";
++import * as SqlClient from "effect/sql/SqlClient";
++
++import { resolveModelAliases, usageTimestampFilter } from "./usageAggregation.ts";
++
++/** Average speed ignores shorter streams, as the turn grid does: network bursts set their time. */
++const MIN_GENERATION_MS = 1_000;
++const DAY_MS = 86_400_000;
++
++const decodeTurn = Schema.decodeUnknownOption(
++  Schema.fromJsonString(OrchestrationV2ProviderTurnJson),
++);
++
++export interface MeasuredTurn {
++  readonly turn: OrchestrationV2ProviderTurn;
++  readonly driver: string;
++  /** What the run requested, for turns whose provider reported no model. */
++  readonly requestedModel: string | null;
++}
++
++/** The usage dashboard names Claude Code "claude"; other drivers share their usage kind's name. */
++export function usageProviderOf(driver: string): string {
++  return driver === "claudeAgent" ? "claude" : driver;
++}
++
++/**
++ * Groups measured turns by provider and model (after aliases). Speed sums generation tokens and
++ * time over turns with at least 1 s of generation; latencies stay as samples for the client.
++ */
++export function summarizeUsagePerformance(
++  turns: ReadonlyArray<MeasuredTurn>,
++  aliases: Readonly<Record<string, string>>,
++): UsagePerformanceSummary {
++  const resolved = resolveModelAliases(aliases);
++  const groups = new Map<string, UsageModelPerformance>();
++  for (const { turn, driver, requestedModel } of turns) {
++    const performance = turn.performance;
++    const raw = turn.model ?? requestedModel;
++    if (performance === undefined || performance.live || raw === null) continue;
++    const provider = usageProviderOf(driver);
++    const model = resolved.get(raw) ?? raw;
++    const key = `${provider}\0${model}`;
++    const group = groups.get(key) ?? {
++      provider,
++      model,
++      turns: 0,
++      generationTurns: 0,
++      generationTokens: 0,
++      generationMs: 0,
++      generationEstimated: false,
++      firstTokenMs: [],
++      firstAnswerMs: [],
++    };
++    const tokens = performance.generationTokens;
++    const timed =
++      tokens !== undefined &&
++      performance.generationMs !== undefined &&
++      performance.generationMs >= MIN_GENERATION_MS;
++    groups.set(key, {
++      ...group,
++      turns: group.turns + 1,
++      generationTurns: group.generationTurns + (timed ? 1 : 0),
++      generationTokens: group.generationTokens + (timed ? tokens.value : 0),
++      generationMs: group.generationMs + (timed ? performance.generationMs! : 0),
++      generationEstimated:
++        group.generationEstimated || (timed && tokens.basis !== "provider_exact"),
++      firstTokenMs:
++        performance.firstTokenMs === undefined
++          ? group.firstTokenMs
++          : [...group.firstTokenMs, performance.firstTokenMs],
++      firstAnswerMs:
++        performance.firstAnswerMs === undefined
++          ? group.firstAnswerMs
++          : [...group.firstAnswerMs, performance.firstAnswerMs],
++    });
++  }
++  return { models: [...groups.values()] };
++}
++
++interface Row {
++  readonly turn_json: string;
++  readonly driver: string | null;
++  readonly requested_model: string | null;
++}
++
++/** Finished turns with performance that started in the dashboard's window, by model. */
++export const readUsagePerformance = Effect.fn("readUsagePerformance")(function* (
++  input: UsagePerformanceInput,
++  aliases: Readonly<Record<string, string>>,
++) {
++  const sinceTime = input.sinceTime === undefined ? Option.none() : DateTime.make(input.sinceTime);
++  const untilTime = input.untilTime === undefined ? Option.none() : DateTime.make(input.untilTime);
++  const window =
++    Option.isSome(sinceTime) && Option.isSome(untilTime)
++      ? {
++          sinceTimeMs: DateTime.toEpochMillis(sinceTime.value),
++          untilTimeMs: DateTime.toEpochMillis(untilTime.value),
++        }
++      : {};
++  const sinceMs = Date.parse(`${input.sinceDay}T00:00:00Z`);
++  const untilMs = Date.parse(`${input.untilDay}T00:00:00Z`);
++  if (!Number.isFinite(sinceMs) || !Number.isFinite(untilMs) || sinceMs > untilMs) {
++    return yield* new UsageReadError({
++      reason: "invalidWindow",
++      detail: `'${input.sinceDay}' to '${input.untilDay}' is not a valid window`,
++    });
++  }
++  const inWindow = usageTimestampFilter({ ...input, ...window });
++  // A day either side covers every time zone; the exact window is applied per turn below.
++  const from = DateTime.formatIso(DateTime.makeUnsafe(sinceMs - DAY_MS));
++  const to = DateTime.formatIso(DateTime.makeUnsafe(untilMs + 2 * DAY_MS));
++  const sql = yield* SqlClient.SqlClient;
++  const rows = yield* sql<Row>`
++    SELECT
++      turn.payload_json AS turn_json,
++      provider_thread.driver AS driver,
++      json_extract(run.payload_json, '$.modelSelection.model') AS requested_model
++    FROM orchestration_v2_projection_provider_turns AS turn
++    JOIN orchestration_v2_projection_provider_threads AS provider_thread
++      ON provider_thread.provider_thread_id = turn.provider_thread_id
++    LEFT JOIN orchestration_v2_projection_run_attempts AS attempt
++      ON attempt.attempt_id = turn.run_attempt_id
++    LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = attempt.run_id
++    WHERE turn.started_at >= ${from}
++      AND turn.started_at < ${to}
++      AND turn.status IN ('completed', 'interrupted', 'failed', 'cancelled')
++      AND json_extract(turn.payload_json, '$.performance') IS NOT NULL
++  `.pipe(
++    Effect.mapError(
++      (cause) =>
++        new UsageReadError({ reason: "scanFailed", detail: "Turn history read failed", cause }),
++    ),
++  );
++  const turns = rows.flatMap((row): MeasuredTurn[] => {
++    const turn = Option.getOrUndefined(decodeTurn(row.turn_json));
++    if (turn === undefined || turn.startedAt === null || row.driver === null) return [];
++    if (!inWindow(DateTime.toEpochMillis(turn.startedAt))) return [];
++    return [{ turn, driver: row.driver, requestedModel: row.requested_model }];
++  });
++  return summarizeUsagePerformance(turns, aliases);
++});
+diff --git a/apps/server/src/ws.ts b/apps/server/src/ws.ts
+index 645942fb81..c5040663c0 100644
+--- a/apps/server/src/ws.ts
++++ b/apps/server/src/ws.ts
+@@ -160,6 +160,7 @@ import {
+   type ShellApplicationEvent,
+ } from "./orchestration-v2/ShellStream.ts";
+ import { ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION } from "./orchestration-v2/ProjectionStore.ts";
++import { readUsagePerformance } from "./usage/usagePerformance.ts";
+ import {
+   coalesceLiveUpdatedEvents,
+   coalesceThreadLiveStream,
+@@ -2887,6 +2888,14 @@ export const layerWsRpc = (
+         [WS_METHODS.serverGetResourceTelemetryHistory]: (input) =>
+           resourceTelemetry.readHistory(input),
+         [WS_METHODS.serverGetUsageSummary]: (input) => usage.readSummary(input),
++        [WS_METHODS.serverGetUsagePerformance]: (input) =>
++          serverSettings.getSettings.pipe(
++            Effect.orElseSucceed(() => null),
++            Effect.flatMap((settings) =>
++              readUsagePerformance(input, settings?.usageModelAliases ?? {}),
++            ),
++            Effect.provideService(SqlClient.SqlClient, sql),
++          ),
+         [WS_METHODS.serverRefreshUsageRates]: (_input) => usage.refreshRates,
+         [WS_METHODS.serverRetryResourceTelemetry]: (_input) => resourceTelemetry.retry,
+         [WS_METHODS.serverCheckOtlpEndpoint]: (input) => otlpEndpointCheck.check(input),
+diff --git a/apps/web/src/components/usage/UsagePage.tsx b/apps/web/src/components/usage/UsagePage.tsx
+index f4aa54b160..eb205a0289 100644
+--- a/apps/web/src/components/usage/UsagePage.tsx
++++ b/apps/web/src/components/usage/UsagePage.tsx
+@@ -12,7 +12,7 @@ import {
+ } from "@t3tools/contracts";
+ import { CircleAlertIcon, ChevronDownIcon, InfoIcon, SlidersHorizontalIcon } from "lucide-react";
+ import { T, useGT, useLocale, useMessages, Var } from "gt-react";
+-import { useEffect, useEffectEvent, useRef, useState } from "react";
++import { type ReactNode, useEffect, useEffectEvent, useRef, useState } from "react";
+ import { settlePromise } from "@t3tools/client-runtime/state/runtime";
+ import * as AsyncResult from "effect/reactivity/AsyncResult";
+ import * as Cause from "effect/Cause";
+@@ -40,7 +40,7 @@ import { primaryServerKeybindingsAtom, serverEnvironment } from "../../state/ser
+ import { isCommandPaletteOpen } from "../../commandPaletteBus";
+ import { isModelPickerOpen } from "../../modelPickerVisibility";
+ import { shortcutLabelForCommand } from "../../keybindings";
+-import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
++import { useUsage, useUsagePerformance, type EnvironmentUsageStatus } from "../../state/usage";
+ import { useAtomCommand } from "../../state/use-atom-command";
+ import {
+   enumerateDays,
+@@ -71,6 +71,7 @@ import { AppRouteModal, AppRouteModalClose } from "../AppRouteModal";
+ import { Skeleton } from "../ui/skeleton";
+ import { Toggle, ToggleGroup } from "../ui/toggle-group";
+ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
++import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+ import {
+   WorkspaceBreadcrumb,
+   WorkspaceBreadcrumbItem,
+@@ -83,6 +84,8 @@ import { UsagePriceOverrides } from "./UsagePriceOverrides";
+ import { UsageProviderChart } from "./UsageProviderChart";
+ import { SpeedPremium, UsageModelDialog } from "./UsageModelDialog";
+ import { UsageShareBar } from "./UsageShareBar";
++import { mergeUsagePerformance, type ModelPerformance } from "./usagePerformance";
++import { ESTIMATE_PREFIX, formatMs, UNAVAILABLE_TEXT } from "../chat/TurnPerformance.logic";
+ import {
+   costTypeSegments,
+   modelShare,
+@@ -609,6 +612,50 @@ export function UsagePage() {
+   );
+ }
+ 
++function HeadTip({ tip, children }: { readonly tip: string; readonly children: ReactNode }) {
++  return (
++    <Tooltip>
++      <TooltipTrigger render={<span tabIndex={0} />}>{children}</TooltipTrigger>
++      <TooltipPopup className="max-w-64">{tip}</TooltipPopup>
++    </Tooltip>
++  );
++}
++
++/** Speed and latency of the row's measured T3 turns; a dash for models T3 never timed. */
++function ModelPerformanceCells({
++  performance,
++}: {
++  readonly performance: ModelPerformance | undefined;
++}) {
++  const gt = useGT();
++  const cell = "hidden py-2.5 pl-6 lg:table-cell";
++  const latency = (median: number | null, p90: number | null) =>
++    median === null ? (
++      <td className={cell}>{UNAVAILABLE_TEXT}</td>
++    ) : (
++      <td className={cn(cell, "text-foreground")}>
++        <HeadTip tip={gt("p90 {time}", { time: formatMs(p90 ?? median) })}>
++          {formatMs(median).replace(/ (ms|s)$/, "$1")}
++        </HeadTip>
++      </td>
++    );
++  const rate = performance?.tokensPerSecond ?? null;
++  return (
++    <>
++      <td className={cn(cell, rate !== null && "text-foreground")}>
++        {rate === null
++          ? UNAVAILABLE_TEXT
++          : `${performance?.estimated ? ESTIMATE_PREFIX : ""}${rate.toFixed(rate < 10 ? 1 : 0)}`}
++      </td>
++      {latency(performance?.ttftMs ?? null, performance?.ttftP90Ms ?? null)}
++      {latency(performance?.ttfaMs ?? null, performance?.ttfaP90Ms ?? null)}
++      <td className={cn(cell, "pr-2")}>
++        {performance === undefined ? UNAVAILABLE_TEXT : performance.turns}
++      </td>
++    </>
++  );
++}
++
+ function UsageOverview({
+   merged,
+   shownWindow,
+@@ -678,6 +725,7 @@ function UsageOverview({
+     0,
+   );
+   const rankedProviders = rankProvidersByMetric(activeProviders, merged.providers, metric);
++  const performance = mergeUsagePerformance(useUsagePerformance(selectedEnvironments, shownWindow));
+ 
+   return (
+     <div aria-busy={loadingPartial} className="flex flex-col gap-6">
+@@ -941,12 +989,36 @@ function UsageOverview({
+                 <th className="py-2 pr-2 pl-6 font-normal">
+                   <T>Tokens</T>
+                 </th>
++                <th className="hidden py-2 pl-6 font-normal lg:table-cell">
++                  <HeadTip
++                    tip={gt(
++                      "Average output speed of T3 turns: generation tokens over generation time",
++                    )}
++                  >
++                    <T context="column heading, tokens per second">tok/s</T>
++                  </HeadTip>
++                </th>
++                <th className="hidden py-2 pl-6 font-normal lg:table-cell">
++                  <HeadTip tip={gt("Median time to first token of T3 turns")}>
++                    <T context="column heading, time to first token">TTFT</T>
++                  </HeadTip>
++                </th>
++                <th className="hidden py-2 pl-6 font-normal lg:table-cell">
++                  <HeadTip tip={gt("Median time to first answer text of T3 turns")}>
++                    <T context="column heading, time to first answer">TTFA</T>
++                  </HeadTip>
++                </th>
++                <th className="hidden py-2 pr-2 pl-6 font-normal lg:table-cell">
++                  <HeadTip tip={gt("T3 turns with performance measured in this window")}>
++                    <T context="column heading, measured agent turns">Turns</T>
++                  </HeadTip>
++                </th>
+               </tr>
+             </thead>
+             <tbody>
+               {breakdownModels.length === 0 ? (
+                 <tr>
+-                  <td colSpan={5} className="py-6 text-center text-muted-foreground">
++                  <td colSpan={9} className="py-6 text-center text-muted-foreground">
+                     <T>No activity in this window.</T>
+                   </td>
+                 </tr>
+@@ -1002,6 +1074,7 @@ function UsageOverview({
+                       <td className={cn("py-2.5 pr-2 pl-6", rowFigures)}>
+                         {formatTokens(model.totalTokens)}
+                       </td>
++                      <ModelPerformanceCells performance={performance.get(key)} />
+                     </tr>
+                   );
+                 })
+diff --git a/apps/web/src/components/usage/usagePerformance.test.ts b/apps/web/src/components/usage/usagePerformance.test.ts
+new file mode 100644
+index 0000000000..4c631bc61d
+--- /dev/null
++++ b/apps/web/src/components/usage/usagePerformance.test.ts
+@@ -0,0 +1,56 @@
++import type { UsageModelPerformance } from "@t3tools/contracts";
++import { describe, expect, it } from "vite-plus/test";
++
++import { mergeUsagePerformance } from "./usagePerformance";
++
++const model = (overrides: Partial<UsageModelPerformance>): UsageModelPerformance => ({
++  provider: "claude",
++  model: "claude-opus-5-5",
++  turns: 1,
++  generationTurns: 1,
++  generationTokens: 1_000,
++  generationMs: 10_000,
++  generationEstimated: false,
++  firstTokenMs: [],
++  firstAnswerMs: [],
++  ...overrides,
++});
++
++describe("mergeUsagePerformance", () => {
++  it("merges environments before taking medians and token-weighted speed", () => {
++    const merged = mergeUsagePerformance([
++      { models: [model({ turns: 2, firstTokenMs: [1_000, 3_000], firstAnswerMs: [2_000] })] },
++      null,
++      {
++        models: [
++          model({
++            generationTokens: 400,
++            generationMs: 2_000,
++            generationEstimated: true,
++            firstTokenMs: [2_000],
++          }),
++          model({
++            provider: "antigravity",
++            model: "gemini-4-neon",
++            generationMs: 0,
++            generationTokens: 0,
++          }),
++        ],
++      },
++    ]);
++    expect(merged.get("claude:claude-opus-5-5")).toEqual({
++      turns: 3,
++      tokensPerSecond: 1_400 / 12,
++      estimated: true,
++      ttftMs: 2_000,
++      ttftP90Ms: 2_800,
++      ttfaMs: 2_000,
++      ttfaP90Ms: 2_000,
++    });
++    expect(merged.get("antigravity:gemini-4-neon")).toMatchObject({
++      turns: 1,
++      tokensPerSecond: null,
++      ttftMs: null,
++    });
++  });
++});
+diff --git a/apps/web/src/components/usage/usagePerformance.ts b/apps/web/src/components/usage/usagePerformance.ts
+new file mode 100644
+index 0000000000..539a05b338
+--- /dev/null
++++ b/apps/web/src/components/usage/usagePerformance.ts
+@@ -0,0 +1,64 @@
++import type { UsagePerformanceSummary } from "@t3tools/contracts";
++
++import { percentile } from "../chat/TurnPerformanceScope.logic";
++
++/** One breakdown row's measured T3 turns, merged across the selected environments. */
++export interface ModelPerformance {
++  readonly turns: number;
++  /** Total generation tokens over total generation time; null without a timed turn. */
++  readonly tokensPerSecond: number | null;
++  readonly estimated: boolean;
++  readonly ttftMs: number | null;
++  readonly ttftP90Ms: number | null;
++  readonly ttfaMs: number | null;
++  readonly ttfaP90Ms: number | null;
++}
++
++/** Keyed like the breakdown's rows, `${provider}:${model}`; medians come after the merge. */
++export function mergeUsagePerformance(
++  summaries: ReadonlyArray<UsagePerformanceSummary | null>,
++): ReadonlyMap<string, ModelPerformance> {
++  const groups = new Map<
++    string,
++    {
++      turns: number;
++      tokens: number;
++      ms: number;
++      estimated: boolean;
++      ttft: number[];
++      ttfa: number[];
++    }
++  >();
++  for (const model of summaries.flatMap((summary) => summary?.models ?? [])) {
++    const key = `${model.provider}:${model.model}`;
++    const group = groups.get(key) ?? {
++      turns: 0,
++      tokens: 0,
++      ms: 0,
++      estimated: false,
++      ttft: [],
++      ttfa: [],
++    };
++    group.turns += model.turns;
++    group.tokens += model.generationTokens;
++    group.ms += model.generationMs;
++    group.estimated ||= model.generationEstimated;
++    group.ttft.push(...model.firstTokenMs);
++    group.ttfa.push(...model.firstAnswerMs);
++    groups.set(key, group);
++  }
++  return new Map(
++    [...groups].map(([key, group]) => [
++      key,
++      {
++        turns: group.turns,
++        tokensPerSecond: group.ms > 0 ? group.tokens / (group.ms / 1000) : null,
++        estimated: group.estimated,
++        ttftMs: percentile(group.ttft, 0.5),
++        ttftP90Ms: percentile(group.ttft, 0.9),
++        ttfaMs: percentile(group.ttfa, 0.5),
++        ttfaP90Ms: percentile(group.ttfa, 0.9),
++      },
++    ]),
++  );
++}
+diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
+index b2954355c4..3149378aea 100644
+--- a/apps/web/src/i18n/translations/de.json
++++ b/apps/web/src/i18n/translations/de.json
+@@ -13141,5 +13141,14 @@
+   "6ff57d72f5d4ddc6": "Now",
+   "00e3530c6a6565a0": "Last",
+   "af145731ba0e2fcd": "Thread",
+-  "a98c794077c44086": "Turns to show"
++  "a98c794077c44086": "Turns to show",
++  "770f553514942ef6": "p90 {time}",
++  "817c981a3a2b4a38": "Average output speed of T3 turns: generation tokens over generation time",
++  "f0cf4797b1fdb99e": "Median time to first token of T3 turns",
++  "ce33b4d7d256d299": "Median time to first answer text of T3 turns",
++  "7a15f16be748869a": "T3 turns with performance measured in this window",
++  "5559571021fbc6c7": "tok/s",
++  "6bc9093ea4cb76ba": "TTFT",
++  "2979e55ecb170657": "TTFA",
++  "77c569c8dfc00af2": "Turns"
+ }
+diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
+index fefe88c8df..c3b00b52da 100644
+--- a/apps/web/src/i18n/translations/en.json
++++ b/apps/web/src/i18n/translations/en.json
+@@ -13150,5 +13150,14 @@
+   "6ff57d72f5d4ddc6": "Now",
+   "00e3530c6a6565a0": "Last",
+   "af145731ba0e2fcd": "Thread",
+-  "a98c794077c44086": "Turns to show"
++  "a98c794077c44086": "Turns to show",
++  "770f553514942ef6": "p90 {time}",
++  "817c981a3a2b4a38": "Average output speed of T3 turns: generation tokens over generation time",
++  "f0cf4797b1fdb99e": "Median time to first token of T3 turns",
++  "ce33b4d7d256d299": "Median time to first answer text of T3 turns",
++  "7a15f16be748869a": "T3 turns with performance measured in this window",
++  "5559571021fbc6c7": "tok/s",
++  "6bc9093ea4cb76ba": "TTFT",
++  "2979e55ecb170657": "TTFA",
++  "77c569c8dfc00af2": "Turns"
+ }
+diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
+index c852c57e29..8e05aaba0d 100644
+--- a/apps/web/src/i18n/translations/es.json
++++ b/apps/web/src/i18n/translations/es.json
+@@ -13136,5 +13136,14 @@
+   "6ff57d72f5d4ddc6": "Now",
+   "00e3530c6a6565a0": "Last",
+   "af145731ba0e2fcd": "Thread",
+-  "a98c794077c44086": "Turns to show"
++  "a98c794077c44086": "Turns to show",
++  "770f553514942ef6": "p90 {time}",
++  "817c981a3a2b4a38": "Average output speed of T3 turns: generation tokens over generation time",
++  "f0cf4797b1fdb99e": "Median time to first token of T3 turns",
++  "ce33b4d7d256d299": "Median time to first answer text of T3 turns",
++  "7a15f16be748869a": "T3 turns with performance measured in this window",
++  "5559571021fbc6c7": "tok/s",
++  "6bc9093ea4cb76ba": "TTFT",
++  "2979e55ecb170657": "TTFA",
++  "77c569c8dfc00af2": "Turns"
+ }
+diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
+index 28e6eae855..989c0ebef6 100644
+--- a/apps/web/src/i18n/translations/fr.json
++++ b/apps/web/src/i18n/translations/fr.json
+@@ -13141,5 +13141,14 @@
+   "6ff57d72f5d4ddc6": "Now",
+   "00e3530c6a6565a0": "Last",
+   "af145731ba0e2fcd": "Thread",
+-  "a98c794077c44086": "Turns to show"
++  "a98c794077c44086": "Turns to show",
++  "770f553514942ef6": "p90 {time}",
++  "817c981a3a2b4a38": "Average output speed of T3 turns: generation tokens over generation time",
++  "f0cf4797b1fdb99e": "Median time to first token of T3 turns",
++  "ce33b4d7d256d299": "Median time to first answer text of T3 turns",
++  "7a15f16be748869a": "T3 turns with performance measured in this window",
++  "5559571021fbc6c7": "tok/s",
++  "6bc9093ea4cb76ba": "TTFT",
++  "2979e55ecb170657": "TTFA",
++  "77c569c8dfc00af2": "Turns"
+ }
+diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
+index d278ad2b2d..dd6f4e0bf3 100644
+--- a/apps/web/src/i18n/translations/ja.json
++++ b/apps/web/src/i18n/translations/ja.json
+@@ -13077,5 +13077,14 @@
+   "6ff57d72f5d4ddc6": "Now",
+   "00e3530c6a6565a0": "Last",
+   "af145731ba0e2fcd": "Thread",
+-  "a98c794077c44086": "Turns to show"
++  "a98c794077c44086": "Turns to show",
++  "770f553514942ef6": "p90 {time}",
++  "817c981a3a2b4a38": "Average output speed of T3 turns: generation tokens over generation time",
++  "f0cf4797b1fdb99e": "Median time to first token of T3 turns",
++  "ce33b4d7d256d299": "Median time to first answer text of T3 turns",
++  "7a15f16be748869a": "T3 turns with performance measured in this window",
++  "5559571021fbc6c7": "tok/s",
++  "6bc9093ea4cb76ba": "TTFT",
++  "2979e55ecb170657": "TTFA",
++  "77c569c8dfc00af2": "Turns"
+ }
+diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
+index 3ce54f03d4..5c792a4aaa 100644
+--- a/apps/web/src/i18n/translations/ko.json
++++ b/apps/web/src/i18n/translations/ko.json
+@@ -13074,5 +13074,14 @@
+   "6ff57d72f5d4ddc6": "Now",
+   "00e3530c6a6565a0": "Last",
+   "af145731ba0e2fcd": "Thread",
+-  "a98c794077c44086": "Turns to show"
++  "a98c794077c44086": "Turns to show",
++  "770f553514942ef6": "p90 {time}",
++  "817c981a3a2b4a38": "Average output speed of T3 turns: generation tokens over generation time",
++  "f0cf4797b1fdb99e": "Median time to first token of T3 turns",
++  "ce33b4d7d256d299": "Median time to first answer text of T3 turns",
++  "7a15f16be748869a": "T3 turns with performance measured in this window",
++  "5559571021fbc6c7": "tok/s",
++  "6bc9093ea4cb76ba": "TTFT",
++  "2979e55ecb170657": "TTFA",
++  "77c569c8dfc00af2": "Turns"
+ }
+diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
+index adce15a502..39e2457d0d 100644
+--- a/apps/web/src/i18n/translations/pt-BR.json
++++ b/apps/web/src/i18n/translations/pt-BR.json
+@@ -13141,5 +13141,14 @@
+   "6ff57d72f5d4ddc6": "Now",
+   "00e3530c6a6565a0": "Last",
+   "af145731ba0e2fcd": "Thread",
+-  "a98c794077c44086": "Turns to show"
++  "a98c794077c44086": "Turns to show",
++  "770f553514942ef6": "p90 {time}",
++  "817c981a3a2b4a38": "Average output speed of T3 turns: generation tokens over generation time",
++  "f0cf4797b1fdb99e": "Median time to first token of T3 turns",
++  "ce33b4d7d256d299": "Median time to first answer text of T3 turns",
++  "7a15f16be748869a": "T3 turns with performance measured in this window",
++  "5559571021fbc6c7": "tok/s",
++  "6bc9093ea4cb76ba": "TTFT",
++  "2979e55ecb170657": "TTFA",
++  "77c569c8dfc00af2": "Turns"
+ }
+diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
+index 47ad67c860..01328dcd3d 100644
+--- a/apps/web/src/i18n/translations/ru.json
++++ b/apps/web/src/i18n/translations/ru.json
+@@ -13140,5 +13140,14 @@
+   "6ff57d72f5d4ddc6": "Now",
+   "00e3530c6a6565a0": "Last",
+   "af145731ba0e2fcd": "Thread",
+-  "a98c794077c44086": "Turns to show"
++  "a98c794077c44086": "Turns to show",
++  "770f553514942ef6": "p90 {time}",
++  "817c981a3a2b4a38": "Average output speed of T3 turns: generation tokens over generation time",
++  "f0cf4797b1fdb99e": "Median time to first token of T3 turns",
++  "ce33b4d7d256d299": "Median time to first answer text of T3 turns",
++  "7a15f16be748869a": "T3 turns with performance measured in this window",
++  "5559571021fbc6c7": "tok/s",
++  "6bc9093ea4cb76ba": "TTFT",
++  "2979e55ecb170657": "TTFA",
++  "77c569c8dfc00af2": "Turns"
+ }
+diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
+index 870dfb4e55..42dd21d78f 100644
+--- a/apps/web/src/i18n/translations/sv.json
++++ b/apps/web/src/i18n/translations/sv.json
+@@ -13148,5 +13148,14 @@
+   "6ff57d72f5d4ddc6": "Now",
+   "00e3530c6a6565a0": "Last",
+   "af145731ba0e2fcd": "Thread",
+-  "a98c794077c44086": "Turns to show"
++  "a98c794077c44086": "Turns to show",
++  "770f553514942ef6": "p90 {time}",
++  "817c981a3a2b4a38": "Average output speed of T3 turns: generation tokens over generation time",
++  "f0cf4797b1fdb99e": "Median time to first token of T3 turns",
++  "ce33b4d7d256d299": "Median time to first answer text of T3 turns",
++  "7a15f16be748869a": "T3 turns with performance measured in this window",
++  "5559571021fbc6c7": "tok/s",
++  "6bc9093ea4cb76ba": "TTFT",
++  "2979e55ecb170657": "TTFA",
++  "77c569c8dfc00af2": "Turns"
+ }
+diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
+index 309d24d81f..136e0580f1 100644
+--- a/apps/web/src/i18n/translations/zh.json
++++ b/apps/web/src/i18n/translations/zh.json
+@@ -13155,5 +13155,14 @@
+   "6ff57d72f5d4ddc6": "Now",
+   "00e3530c6a6565a0": "Last",
+   "af145731ba0e2fcd": "Thread",
+-  "a98c794077c44086": "Turns to show"
++  "a98c794077c44086": "Turns to show",
++  "770f553514942ef6": "p90 {time}",
++  "817c981a3a2b4a38": "Average output speed of T3 turns: generation tokens over generation time",
++  "f0cf4797b1fdb99e": "Median time to first token of T3 turns",
++  "ce33b4d7d256d299": "Median time to first answer text of T3 turns",
++  "7a15f16be748869a": "T3 turns with performance measured in this window",
++  "5559571021fbc6c7": "tok/s",
++  "6bc9093ea4cb76ba": "TTFT",
++  "2979e55ecb170657": "TTFA",
++  "77c569c8dfc00af2": "Turns"
+ }
+diff --git a/apps/web/src/state/usage.ts b/apps/web/src/state/usage.ts
+index 446bd0f464..eb9397ef8d 100644
+--- a/apps/web/src/state/usage.ts
++++ b/apps/web/src/state/usage.ts
+@@ -4,6 +4,8 @@ import {
+   USAGE_CONTRACT_VERSION,
+   type EnvironmentId,
+   type UsageBucket,
++  type UsagePerformanceInput,
++  type UsagePerformanceSummary,
+   type UsageSummary,
+   type UsageProviderKind,
+   type UsageSummaryInput,
+@@ -247,3 +249,40 @@ export function useUsage(
+     refresh,
+   };
+ }
++
++const usagePerformanceAtom = Atom.family((key: string) =>
++  Atom.make((get): ReadonlyArray<UsagePerformanceSummary | null> => {
++    const { environmentIds, input } = JSON.parse(key) as {
++      readonly environmentIds: readonly EnvironmentId[];
++      readonly input: UsagePerformanceInput;
++    };
++    return environmentIds.map((environmentId) =>
++      AsyncResult.getOrElse(
++        get(serverEnvironment.usagePerformance({ environmentId, input })),
++        () => null,
++      ),
++    );
++  }).pipe(Atom.withLabel(`web-usage:performance:${key}`)),
++);
++
++/** Measured T3 turns per model in the dashboard's window, for the environments it shows. */
++export function useUsagePerformance(
++  environments: readonly Pick<EnvironmentUsageStatus, "environmentId" | "canReadDiagnostics">[],
++  window: UsageSummaryInput,
++): ReadonlyArray<UsagePerformanceSummary | null> {
++  const input: UsagePerformanceInput = {
++    sinceDay: window.sinceDay,
++    untilDay: window.untilDay,
++    timeZone: window.timeZone,
++    // Instants bound the window only when hourly, as for the usage summary.
++    ...(window.resolution === "hour" &&
++    window.sinceTime !== undefined &&
++    window.untilTime !== undefined
++      ? { sinceTime: window.sinceTime, untilTime: window.untilTime }
++      : {}),
++  };
++  const environmentIds = environments
++    .filter((environment) => environment.canReadDiagnostics)
++    .map((environment) => environment.environmentId);
++  return useAtomValue(usagePerformanceAtom(JSON.stringify({ environmentIds, input })));
++}
+diff --git a/packages/client-runtime/src/state/server.ts b/packages/client-runtime/src/state/server.ts
+index 492a9e9268..83e3bf01d1 100644
+--- a/packages/client-runtime/src/state/server.ts
++++ b/packages/client-runtime/src/state/server.ts
+@@ -1734,6 +1734,12 @@ export function createServerEnvironmentAtoms<R, E>(
+       tag: WS_METHODS.subscribeResourceTelemetry,
+       idleTtlMs: 0,
+     }),
++    // Measured turns by model over the dashboard's window; cheap, read from the projection store.
++    usagePerformance: createEnvironmentRpcQueryAtomFamily(runtime, {
++      label: "environment-data:server:usage-performance",
++      tag: WS_METHODS.serverGetUsagePerformance,
++      staleTimeMs: 60_000,
++    }),
+     resourceTelemetryHistory: createEnvironmentRpcQueryAtomFamily(runtime, {
+       label: "environment-data:server:resource-telemetry-history",
+       tag: WS_METHODS.serverGetResourceTelemetryHistory,
+diff --git a/packages/contracts/src/rpc.ts b/packages/contracts/src/rpc.ts
+index f99279b911..6efc909c36 100644
+--- a/packages/contracts/src/rpc.ts
++++ b/packages/contracts/src/rpc.ts
+@@ -413,7 +413,14 @@ import {
+   ProviderConsumeResetCreditInput,
+   ProviderConsumeResetCreditResult,
+ } from "./providerUsageLimits.ts";
+-import { UsagePricing, UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
++import {
++  UsagePerformanceInput,
++  UsagePerformanceSummary,
++  UsagePricing,
++  UsageReadError,
++  UsageSummary,
++  UsageSummaryInput,
++} from "./usage.ts";
+ import {
+   StorageCleanupReport,
+   DatabaseReclaimError,
+@@ -641,6 +648,7 @@ export const WS_METHODS = {
+   serverSignalProcess: "server.signalProcess",
+   serverReportClientActivity: "server.reportClientActivity",
+   serverGetUsageSummary: "server.getUsageSummary",
++  serverGetUsagePerformance: "server.getUsagePerformance",
+   serverRefreshUsageRates: "server.refreshUsageRates",
+ 
+   workflowsSubscribe: "workflows.subscribe",
+@@ -1197,6 +1205,12 @@ const WsServerGetUsageSummaryRpc = Rpc.make(WS_METHODS.serverGetUsageSummary, {
+   error: Schema.Union([EnvironmentAuthorizationError, UsageReadError]),
+ });
+ 
++const WsServerGetUsagePerformanceRpc = Rpc.make(WS_METHODS.serverGetUsagePerformance, {
++  payload: UsagePerformanceInput,
++  success: UsagePerformanceSummary,
++  error: Schema.Union([EnvironmentAuthorizationError, UsageReadError]),
++});
++
+ const WsServerRefreshUsageRatesRpc = Rpc.make(WS_METHODS.serverRefreshUsageRates, {
+   payload: Schema.Struct({}),
+   success: UsagePricing,
+@@ -2577,6 +2591,7 @@ export const WsRpcGroup = RpcGroup.make(
+   WsServerListTextGeneratorModelsRpc,
+   WsServerPrepareTriageRpc,
+   WsServerGetUsageSummaryRpc,
++  WsServerGetUsagePerformanceRpc,
+   WsServerRefreshUsageRatesRpc,
+   WsServerSignalProcessRpc,
+   WsWorkflowsSubscribeRpc,
+diff --git a/packages/contracts/src/usage.ts b/packages/contracts/src/usage.ts
+index 427d6c93af..27f3211aa6 100644
+--- a/packages/contracts/src/usage.ts
++++ b/packages/contracts/src/usage.ts
+@@ -163,6 +163,41 @@ export const UsageSummary = Schema.Struct({
+ });
+ export type UsageSummary = typeof UsageSummary.Type;
+ 
++/** The dashboard's window, read the same way as UsageSummaryInput. */
++export const UsagePerformanceInput = Schema.Struct({
++  sinceDay: UsageDay,
++  untilDay: UsageDay,
++  timeZone: TrimmedNonEmptyString,
++  sinceTime: Schema.optional(TrimmedNonEmptyString),
++  untilTime: Schema.optional(TrimmedNonEmptyString),
++});
++export type UsagePerformanceInput = typeof UsagePerformanceInput.Type;
++
++/**
++ * Measured T3 turns of one model in the window. Speed sums only turns with at least 1 s of
++ * generation; latencies are the raw samples, so several environments merge before the median.
++ */
++export const UsageModelPerformance = Schema.Struct({
++  /** A usage provider kind ("claude", "codex", …) when the driver has one, else the driver. */
++  provider: TrimmedNonEmptyString,
++  /** After usage model aliases, as the breakdown names it. */
++  model: TrimmedNonEmptyString,
++  turns: NonNegativeInt,
++  generationTurns: NonNegativeInt,
++  generationTokens: NonNegativeInt,
++  generationMs: Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0)),
++  /** Some generation counts were estimated from streamed characters. */
++  generationEstimated: Schema.Boolean,
++  firstTokenMs: Schema.Array(Schema.Number),
++  firstAnswerMs: Schema.Array(Schema.Number),
++});
++export type UsageModelPerformance = typeof UsageModelPerformance.Type;
++
++export const UsagePerformanceSummary = Schema.Struct({
++  models: ForwardCompatibleArray(UsageModelPerformance),
++});
++export type UsagePerformanceSummary = typeof UsagePerformanceSummary.Type;
++
+ export class UsageReadError extends Schema.TaggedError<UsageReadError>()("UsageReadError", {
+   reason: Schema.Literals(["scanFailed", "invalidWindow"]),
+   detail: TrimmedNonEmptyString,

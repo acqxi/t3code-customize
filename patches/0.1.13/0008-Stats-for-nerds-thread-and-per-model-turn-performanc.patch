@@ -1,0 +1,1308 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: acqxi <kacqxi@gmail.com>
+Date: Fri, 27 Nov 2026 07:46:01 +0800
+Subject: [PATCH 08/12] Stats for nerds: thread and per-model turn performance
+
+- The turn performance grid (the composer's last-turn popover and Thread
+  details) gets a compact scope switch beside its title: Last turn, This
+  thread (every finished main-agent turn, across provider sessions), and
+  one entry per model once the thread has used two. The choice is kept
+  per place in statsForNerdsPerformanceScopes ("last", "thread" or
+  "model:<id>"); a model the thread never ran falls back to the last turn.
+- Aggregates: TTFT and TTFA are medians with p90 in the tooltip; average
+  tok/s is total generation tokens over total generation time of turns
+  with at least 1 s of generation, estimated once any count was; peak is
+  the highest turn peak; tokens, tool time and turn time are sums, partial
+  when some turns did not report; cache hit is cached over input of the
+  turns reporting both. Context and live speed are left out. The header
+  shows the turn count, and the provider and model when one ran them all.
+- A dense "micro" Toggle size for chips beside a popover title.
+---
+ apps/web/src/components/ChatView.tsx          |   3 +
+ .../src/components/chat/TurnPerformance.tsx   | 236 ++++++++++-
+ .../chat/TurnPerformanceScope.logic.test.ts   | 237 +++++++++++
+ .../chat/TurnPerformanceScope.logic.ts        | 377 ++++++++++++++++++
+ apps/web/src/components/ui/toggle.tsx         |   3 +
+ apps/web/src/i18n/translations/de.json        |   8 +-
+ apps/web/src/i18n/translations/en.json        |   8 +-
+ apps/web/src/i18n/translations/es.json        |   8 +-
+ apps/web/src/i18n/translations/fr.json        |   8 +-
+ apps/web/src/i18n/translations/ja.json        |   8 +-
+ apps/web/src/i18n/translations/ko.json        |   8 +-
+ apps/web/src/i18n/translations/pt-BR.json     |   8 +-
+ apps/web/src/i18n/translations/ru.json        |   8 +-
+ apps/web/src/i18n/translations/sv.json        |   8 +-
+ apps/web/src/i18n/translations/zh.json        |   8 +-
+ packages/contracts/src/settings.ts            |   5 +
+ 16 files changed, 923 insertions(+), 18 deletions(-)
+ create mode 100644 apps/web/src/components/chat/TurnPerformanceScope.logic.test.ts
+ create mode 100644 apps/web/src/components/chat/TurnPerformanceScope.logic.ts
+
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index bc4e437c2c..fb31fb29b8 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -383,6 +383,7 @@ import {
+   selectComposerPerformanceTurns,
+   type TurnPerformanceSource,
+ } from "./chat/TurnPerformance.logic";
++import { selectThreadPerformanceTurns } from "./chat/TurnPerformanceScope.logic";
+ import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+ import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
+ import { ComposerSurface } from "./chat/ComposerSurface";
+@@ -1715,6 +1716,7 @@ export default function ChatView(props: ChatViewProps) {
+     const latest = {
+       current: current === null ? null : sourceOf(current),
+       previous: previous === null ? null : sourceOf(previous),
++      history: selectThreadPerformanceTurns(serverProjection).map(sourceOf),
+     };
+     const composer = settings.statsForNerdsShowInComposer ? latest : null;
+     const threadDetails = resolveThreadDetailsVisibility(settings).performance
+@@ -4280,6 +4282,7 @@ export default function ChatView(props: ChatViewProps) {
+                                 threadRef={routeThreadDetailRef}
+                                 current={turnPerformance.composer.current}
+                                 previous={turnPerformance.composer.previous}
++                                history={turnPerformance.composer.history}
+                                 hiddenMetrics={turnPerformance.hiddenMetrics}
+                               />
+                             ) : null
+diff --git a/apps/web/src/components/chat/TurnPerformance.tsx b/apps/web/src/components/chat/TurnPerformance.tsx
+index 03caaf8c89..75cffc411c 100644
+--- a/apps/web/src/components/chat/TurnPerformance.tsx
++++ b/apps/web/src/components/chat/TurnPerformance.tsx
+@@ -3,8 +3,14 @@ import { ProviderDriverKind } from "@t3tools/contracts";
+ import { msg, useGT, useMessages } from "gt-react";
+ import { createContext, use, useEffect, useRef, useState, type ReactNode } from "react";
+ 
++import {
++  getClientSettings,
++  updateClientSettings,
++  useClientSettings,
++} from "../../hooks/useSettings";
+ import { readThreadStreamedTurnItems } from "../../state/entities";
+ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
++import { Toggle, ToggleGroup } from "../ui/toggle-group";
+ import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+ import { composerFloatingLayerProps } from "./composerEventScope";
+ import { ThreadDetailsSection } from "./ThreadDetailsSection";
+@@ -29,6 +35,15 @@ import {
+   type TurnPerformanceMetricId,
+   type TurnPerformanceSource,
+ } from "./TurnPerformance.logic";
++import {
++  aggregateTurnPerformance,
++  resolveTurnPerformanceScope,
++  selectScopeSources,
++  serializeTurnPerformanceScope,
++  threadModels,
++  type TurnPerformancePlace,
++  type TurnPerformanceScope,
++} from "./TurnPerformanceScope.logic";
+ 
+ const LIVE_SAMPLE_MS = 500;
+ 
+@@ -224,11 +239,15 @@ export function TurnPerformanceGrid({
+   source,
+   metrics,
+   live,
++  turnCount,
+ }: {
+   source: TurnPerformanceSource;
+   metrics: ReadonlyArray<TurnPerformanceMetric>;
+   live: boolean;
++  /** Set when the grid sums several turns; shown in the header. */
++  turnCount?: number;
+ }) {
++  const gt = useGT();
+   const byId = new Map(metrics.map((metric) => [metric.id, metric]));
+   const badges = TURN_PERFORMANCE_LAYOUT.header.flatMap((id) => {
+     const metric = byId.get(id);
+@@ -265,6 +284,11 @@ export function TurnPerformanceGrid({
+         {badges.map((metric) => (
+           <MetricCell key={metric.id} metric={metric} badge />
+         ))}
++        {turnCount !== undefined ? (
++          <span className="text-2xs text-muted-foreground tabular-nums">
++            {gt("{count, plural, one {# turn} other {# turns}}", { count: turnCount })}
++          </span>
++        ) : null}
+       </div>
+       {TURN_PERFORMANCE_LAYOUT.groups.map((group) => {
+         const cells = group.metrics.flatMap((id) => {
+@@ -320,17 +344,29 @@ export function TurnPerformanceBreakdown({
+   source,
+   metrics,
+   live = false,
++  titleAside,
++  turnCount,
+ }: {
+   title: string;
+   source: TurnPerformanceSource;
+   metrics: ReadonlyArray<TurnPerformanceMetric>;
+   live?: boolean;
++  titleAside?: ReactNode;
++  turnCount?: number;
+ }) {
+   const gt = useGT();
+   return (
+     <div className="flex flex-col gap-2.5 text-xs">
+-      <h3 className="font-medium">{title}</h3>
+-      <TurnPerformanceGrid source={source} metrics={metrics} live={live} />
++      <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
++        <h3 className="font-medium">{title}</h3>
++        {titleAside}
++      </div>
++      <TurnPerformanceGrid
++        source={source}
++        metrics={metrics}
++        live={live}
++        {...(turnCount === undefined ? {} : { turnCount })}
++      />
+       <p className="text-2xs text-muted-foreground">
+         {gt(
+           "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured.",
+@@ -349,6 +385,7 @@ function TurnPerformanceSummary({
+   source,
+   ariaLabel,
+   className,
++  popup,
+ }: {
+   label: ReactNode;
+   live: boolean;
+@@ -358,6 +395,8 @@ function TurnPerformanceSummary({
+   source: TurnPerformanceSource;
+   ariaLabel: string;
+   className?: string;
++  /** Replaces the single-turn breakdown, such as the scoped one of the last turn. */
++  popup?: ReactNode;
+ }) {
+   return (
+     <Popover>
+@@ -383,7 +422,9 @@ function TurnPerformanceSummary({
+         <InlineMetrics metrics={inline} />
+       </PopoverTrigger>
+       <PopoverPopup {...composerFloatingLayerProps} side="top" align="start" width="md">
+-        <TurnPerformanceBreakdown title={title} source={source} metrics={metrics} live={live} />
++        {popup ?? (
++          <TurnPerformanceBreakdown title={title} source={source} metrics={metrics} live={live} />
++        )}
+       </PopoverPopup>
+     </Popover>
+   );
+@@ -442,9 +483,11 @@ function CurrentTurnSummary({
+ 
+ function PreviousTurnSummary({
+   source,
++  history,
+   hidden,
+ }: {
+   source: TurnPerformanceSource;
++  history: ReadonlyArray<TurnPerformanceSource>;
+   hidden: ReadonlySet<string>;
+ }) {
+   const metrics = filterVisibleMetrics(
+@@ -456,6 +499,7 @@ function PreviousTurnSummary({
+     }),
+     hidden,
+   );
++  const title = `Previous turn · ${source.turn.status}`;
+   const inline = pickInlineMetrics(metrics, COMPOSER_INLINE_PRIORITY.previous);
+   if (inline.length === 0 && metrics.length === 0) return null;
+   return (
+@@ -464,10 +508,20 @@ function PreviousTurnSummary({
+       live={false}
+       metrics={metrics}
+       inline={inline}
+-      title={`Previous turn · ${source.turn.status}`}
++      title={title}
+       source={source}
+       ariaLabel="Previous turn performance details"
+       className="shrink-[8]"
++      popup={
++        <ScopedBreakdown
++          place="composer"
++          title={title}
++          source={source}
++          metrics={metrics}
++          history={history}
++          hidden={hidden}
++        />
++      }
+     />
+   );
+ }
+@@ -481,11 +535,14 @@ export function ComposerTurnPerformance({
+   threadRef,
+   current,
+   previous,
++  history,
+   hiddenMetrics,
+ }: {
+   threadRef: ScopedThreadRef | null;
+   current: TurnPerformanceSource | null;
+   previous: TurnPerformanceSource | null;
++  /** Finished turns of the thread, for the thread and per-model scopes. */
++  history: ReadonlyArray<TurnPerformanceSource>;
+   hiddenMetrics: ReadonlySet<string>;
+ }) {
+   if (current === null && previous === null) return null;
+@@ -508,6 +565,7 @@ export function ComposerTurnPerformance({
+         <PreviousTurnSummary
+           key={`${threadKey}:${previous.turn.id}`}
+           source={previous}
++          history={history}
+           hidden={hiddenMetrics}
+         />
+       )}
+@@ -519,6 +577,7 @@ export interface ThreadDetailsPerformanceInput {
+   readonly threadRef: ScopedThreadRef | null;
+   readonly current: TurnPerformanceSource | null;
+   readonly previous: TurnPerformanceSource | null;
++  readonly history: ReadonlyArray<TurnPerformanceSource>;
+   readonly hiddenMetrics: ReadonlySet<string>;
+ }
+ 
+@@ -527,6 +586,7 @@ export function ThreadDetailsTurnPerformance({
+   threadRef,
+   current,
+   previous,
++  history,
+   hiddenMetrics,
+ }: ThreadDetailsPerformanceInput) {
+   const source = current ?? previous;
+@@ -537,6 +597,7 @@ export function ThreadDetailsTurnPerformance({
+       key={`${threadKey}:${source.turn.id}`}
+       threadRef={threadRef}
+       source={source}
++      history={history}
+       hidden={hiddenMetrics}
+     />
+   );
+@@ -545,15 +606,20 @@ export function ThreadDetailsTurnPerformance({
+ function ThreadDetailsTurnPerformanceRows({
+   threadRef,
+   source,
++  history,
+   hidden,
+ }: {
+   threadRef: ScopedThreadRef | null;
+   source: TurnPerformanceSource;
++  history: ReadonlyArray<TurnPerformanceSource>;
+   hidden: ReadonlySet<string>;
+ }) {
+   const gt = useGT();
+   const running = isTurnRunning(source.turn);
+   const metrics = useTurnMetrics(threadRef, source, hidden);
++  const scoped = useTurnPerformanceScope("threadDetails", history);
++  const aggregated =
++    scoped.scope.kind === "last" ? null : scopedMetrics(scoped.scope, history, hidden);
+   return (
+     <ThreadDetailsSection
+       headingId="thread-details-performance-heading"
+@@ -561,15 +627,169 @@ function ThreadDetailsTurnPerformanceRows({
+       showHeading={false}
+     >
+       <div data-thread-details-performance={source.turn.id} className="space-y-1.5 px-2.5">
+-        <p className="text-2xs text-muted-foreground">
+-          {running ? gt("Current turn") : gt("Last turn", { $context: "previous agent turn" })}
+-        </p>
+-        <TurnPerformanceGrid source={source} metrics={metrics} live={running} />
++        <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
++          <p className="text-2xs text-muted-foreground">
++            {aggregated !== null
++              ? scoped.scope.kind === "model"
++                ? scoped.scope.model
++                : gt("This thread")
++              : running
++                ? gt("Current turn")
++                : gt("Last turn", { $context: "previous agent turn" })}
++          </p>
++          <TurnPerformanceScopeSelector
++            scoped={scoped}
++            lastLabel={running ? gt("Now", { $context: "the running turn" }) : undefined}
++          />
++        </div>
++        {aggregated !== null ? (
++          <TurnPerformanceGrid
++            source={aggregated.source}
++            metrics={aggregated.metrics}
++            live={false}
++            turnCount={aggregated.count}
++          />
++        ) : (
++          <TurnPerformanceGrid source={source} metrics={metrics} live={running} />
++        )}
+       </div>
+     </ThreadDetailsSection>
+   );
+ }
+ 
++type ScopedPerformance = ReturnType<typeof useTurnPerformanceScope>;
++
++/** The scope chosen for one place, kept in client settings; model scopes need two models. */
++function useTurnPerformanceScope(
++  place: TurnPerformancePlace,
++  history: ReadonlyArray<TurnPerformanceSource>,
++) {
++  const stored = useClientSettings((settings) => settings.statsForNerdsPerformanceScopes[place]);
++  const all = threadModels(history);
++  const models = all.length > 1 ? all : [];
++  const scope = resolveTurnPerformanceScope(stored, models);
++  const setScope = (next: TurnPerformanceScope) => {
++    void updateClientSettings({
++      statsForNerdsPerformanceScopes: {
++        ...getClientSettings().statsForNerdsPerformanceScopes,
++        [place]: serializeTurnPerformanceScope(next),
++      },
++    });
++  };
++  // A thread scope needs turns to sum; with one finished turn it equals the last turn.
++  return { scope, models, setScope, available: history.length > 1 };
++}
++
++function scopedMetrics(
++  scope: Exclude<TurnPerformanceScope, { kind: "last" }>,
++  history: ReadonlyArray<TurnPerformanceSource>,
++  hidden: ReadonlySet<string>,
++) {
++  const sources = selectScopeSources(history, scope);
++  const latest = sources.at(-1);
++  if (latest === undefined) return null;
++  const providers = new Set(sources.map((entry) => entry.providerName));
++  return {
++    count: sources.length,
++    metrics: filterVisibleMetrics(aggregateTurnPerformance(sources), hidden),
++    // The header names the provider only when one ran every turn.
++    source:
++      providers.size === 1
++        ? latest
++        : { ...latest, driver: undefined, providerName: `${providers.size} providers` },
++  };
++}
++
++/** Last turn, this thread, or one model of it; compact enough to sit beside the title. */
++function TurnPerformanceScopeSelector({
++  scoped,
++  lastLabel,
++}: {
++  scoped: ScopedPerformance;
++  lastLabel?: string | undefined;
++}) {
++  const gt = useGT();
++  if (!scoped.available) return null;
++  const value = serializeTurnPerformanceScope(scoped.scope);
++  const options: ReadonlyArray<{ value: string; label: string; scope: TurnPerformanceScope }> = [
++    {
++      value: "last",
++      label: lastLabel ?? gt("Last", { $context: "the last agent turn" }),
++      scope: { kind: "last" },
++    },
++    {
++      value: "thread",
++      label: gt("Thread", { $context: "every turn of this thread" }),
++      scope: { kind: "thread" },
++    },
++    ...scoped.models.map((model) => ({
++      value: `model:${model}`,
++      label: model,
++      scope: { kind: "model", model } as const,
++    })),
++  ];
++  return (
++    <ToggleGroup
++      aria-label={gt("Turns to show")}
++      size="micro"
++      className="flex-wrap"
++      value={[value]}
++      onValueChange={(next) => {
++        const option = options.find((candidate) => candidate.value === next[0]);
++        if (option) scoped.setScope(option.scope);
++      }}
++    >
++      {options.map((option) => (
++        <Toggle key={option.value} value={option.value} title={option.label}>
++          {option.label}
++        </Toggle>
++      ))}
++    </ToggleGroup>
++  );
++}
++
++/** The composer's last-turn popover, switchable to the whole thread or one model. */
++function ScopedBreakdown({
++  place,
++  title,
++  source,
++  metrics,
++  history,
++  hidden,
++}: {
++  place: TurnPerformancePlace;
++  title: string;
++  source: TurnPerformanceSource;
++  metrics: ReadonlyArray<TurnPerformanceMetric>;
++  history: ReadonlyArray<TurnPerformanceSource>;
++  hidden: ReadonlySet<string>;
++}) {
++  const gt = useGT();
++  const scoped = useTurnPerformanceScope(place, history);
++  const selector = <TurnPerformanceScopeSelector scoped={scoped} />;
++  const aggregated =
++    scoped.scope.kind === "last" ? null : scopedMetrics(scoped.scope, history, hidden);
++  if (aggregated === null || scoped.scope.kind === "last") {
++    return (
++      <TurnPerformanceBreakdown
++        title={title}
++        source={source}
++        metrics={metrics}
++        titleAside={selector}
++      />
++    );
++  }
++  return (
++    <TurnPerformanceBreakdown
++      title={scoped.scope.kind === "model" ? scoped.scope.model : gt("This thread")}
++      source={aggregated.source}
++      metrics={aggregated.metrics}
++      titleAside={selector}
++      turnCount={aggregated.count}
++    />
++  );
++}
++
+ export interface TurnPerformanceTimelineValue {
+   readonly threadId: ThreadId;
+   /** This thread's own provider turns; items from other threads never resolve. */
+diff --git a/apps/web/src/components/chat/TurnPerformanceScope.logic.test.ts b/apps/web/src/components/chat/TurnPerformanceScope.logic.test.ts
+new file mode 100644
+index 0000000000..322cddb9f9
+--- /dev/null
++++ b/apps/web/src/components/chat/TurnPerformanceScope.logic.test.ts
+@@ -0,0 +1,237 @@
++import {
++  NodeId,
++  ProviderInstanceId,
++  ProviderThreadId,
++  ProviderTurnId,
++  type OrchestrationV2ProviderTurn,
++  type OrchestrationV2TurnPerformance,
++} from "@t3tools/contracts";
++import * as DateTime from "effect/DateTime";
++import { describe, expect, it } from "vite-plus/test";
++
++import type { TurnPerformanceSource } from "./TurnPerformance.logic";
++import {
++  aggregateTurnPerformance,
++  percentile,
++  resolveTurnPerformanceScope,
++  selectScopeSources,
++  selectThreadPerformanceTurns,
++  serializeTurnPerformanceScope,
++  threadModels,
++  tokenWeightedRate,
++} from "./TurnPerformanceScope.logic";
++
++const start = DateTime.makeUnsafe("2026-11-27T10:00:00Z");
++
++function perf(
++  overrides: Partial<OrchestrationV2TurnPerformance> = {},
++): OrchestrationV2TurnPerformance {
++  return {
++    source: "claude_stream",
++    requestSentAt: start,
++    streamedChars: { reasoning: 0, text: 0, toolInput: 0 },
++    tools: { count: 0, wallMs: 0, longestMs: 0, open: 0 },
++    partial: false,
++    live: false,
++    ...overrides,
++  };
++}
++
++let ordinal = 0;
++function source(
++  model: string,
++  turn: Partial<OrchestrationV2ProviderTurn> = {},
++  providerName = "Claude",
++): TurnPerformanceSource {
++  ordinal += 1;
++  return {
++    turn: {
++      id: ProviderTurnId.make(`turn-${ordinal}`),
++      providerThreadId: ProviderThreadId.make("pthread"),
++      nodeId: NodeId.make("main"),
++      runAttemptId: null,
++      nativeTurnRef: null,
++      ordinal,
++      status: "completed",
++      startedAt: start,
++      completedAt: DateTime.makeUnsafe("2026-11-27T10:00:30Z"),
++      model,
++      ...turn,
++    },
++    driver: "claudeAgent",
++    providerName,
++    modelSelection: { instanceId: ProviderInstanceId.make("claude"), model, options: [] },
++  };
++}
++
++const usage = (inputTokens: number, outputTokens: number, cachedInputTokens: number) => ({
++  usageStatus: "complete" as const,
++  usageScope: "main_agent" as const,
++  inputTokens,
++  outputTokens,
++  cachedInputTokens,
++  hasSubagents: false,
++});
++
++const row = (rows: ReturnType<typeof aggregateTurnPerformance>, id: string) =>
++  rows.find((candidate) => candidate.id === id);
++
++describe("turn performance scope", () => {
++  it("round-trips the stored scope and falls back to the last turn for unknown models", () => {
++    const models = ["claude-opus-5-5", "gemini-4-neon"];
++    expect(resolveTurnPerformanceScope(undefined, models)).toEqual({ kind: "last" });
++    expect(resolveTurnPerformanceScope("thread", models)).toEqual({ kind: "thread" });
++    const model = resolveTurnPerformanceScope("model:gemini-4-neon", models);
++    expect(model).toEqual({ kind: "model", model: "gemini-4-neon" });
++    expect(serializeTurnPerformanceScope(model)).toBe("model:gemini-4-neon");
++    expect(resolveTurnPerformanceScope("model:gpt-6.1-sol", models)).toEqual({ kind: "last" });
++  });
++
++  it("lists models in first-use order and filters a model scope to its turns", () => {
++    const turns = [source("claude-opus-5-5"), source("gemini-4-neon"), source("claude-opus-5-5")];
++    expect(threadModels(turns)).toEqual(["claude-opus-5-5", "gemini-4-neon"]);
++    expect(selectScopeSources(turns, { kind: "model", model: "claude-opus-5-5" })).toHaveLength(2);
++    expect(selectScopeSources(turns, { kind: "thread" })).toHaveLength(3);
++  });
++
++  it("keeps finished main-agent turns of every provider session", () => {
++    const base = source("m").turn;
++    const turns = selectThreadPerformanceTurns({
++      nodes: [
++        { id: NodeId.make("main"), kind: "root_turn", parentNodeId: null },
++        { id: NodeId.make("child"), kind: "root_turn", parentNodeId: NodeId.make("main") },
++      ] as never,
++      providerTurns: [
++        {
++          ...base,
++          id: ProviderTurnId.make("b"),
++          startedAt: DateTime.makeUnsafe("2026-11-27T11:00:00Z"),
++        },
++        { ...base, id: ProviderTurnId.make("a"), providerThreadId: ProviderThreadId.make("old") },
++        { ...base, id: ProviderTurnId.make("running"), status: "running" },
++        { ...base, id: ProviderTurnId.make("child"), nodeId: NodeId.make("child") },
++        { ...base, id: ProviderTurnId.make("dropped"), promptDropped: true },
++      ],
++    });
++    expect(turns.map((turn) => turn.id)).toEqual(["a", "b"]);
++  });
++});
++
++describe("aggregate turn performance", () => {
++  it("takes the median latency with p90 in the tooltip", () => {
++    const rows = aggregateTurnPerformance(
++      [1_000, 2_000, 3_000, 10_000].map((ms) =>
++        source("m", { performance: perf({ firstTokenMs: ms, firstAnswerMs: ms + 500 }) }),
++      ),
++    );
++    expect(row(rows, "ttft")).toMatchObject({ precision: "exact", value: 2_500 });
++    expect(row(rows, "ttft")?.reason).toContain("p90 7.9 s");
++    expect(row(rows, "ttfa")?.value).toBe(3_000);
++  });
++
++  it("weights speed by tokens and skips turns under a second of streaming", () => {
++    const rows = aggregateTurnPerformance([
++      source("m", {
++        performance: perf({
++          generationMs: 10_000,
++          generationTokens: { value: 1_000, basis: "provider_exact" },
++        }),
++      }),
++      source("m", {
++        performance: perf({
++          generationMs: 2_000,
++          generationTokens: { value: 400, basis: "provider_exact" },
++        }),
++      }),
++      // 500 tokens in 0.2 s would read 2,500 tok/s.
++      source("m", {
++        performance: perf({
++          generationMs: 200,
++          generationTokens: { value: 500, basis: "provider_exact" },
++        }),
++      }),
++    ]);
++    // (1000 + 400) / 12 s, not the mean of 100 and 200 tok/s.
++    expect(row(rows, "avgTps")).toMatchObject({ precision: "exact", value: 1_400 / 12 });
++    expect(tokenWeightedRate([{ tokens: 10, ms: 500 }])).toBeNull();
++  });
++
++  it("marks speed estimated once any turn's count is estimated", () => {
++    const rows = aggregateTurnPerformance([
++      source("m", {
++        performance: perf({
++          generationMs: 4_000,
++          generationTokens: { value: 400, basis: "provider_exact" },
++        }),
++      }),
++      source("m", {
++        performance: perf({
++          generationMs: 4_000,
++          generationTokens: { value: 200, basis: "estimated" },
++        }),
++      }),
++    ]);
++    expect(row(rows, "avgTps")).toMatchObject({ precision: "estimated", display: "≈75 tok/s" });
++  });
++
++  it("sums tokens, tool and turn time and computes cache hit over the scope", () => {
++    const rows = aggregateTurnPerformance([
++      source("m", {
++        turnTokenUsage: usage(1_000, 100, 900),
++        performance: perf({
++          turnMs: 20_000,
++          tools: { count: 1, wallMs: 3_000, longestMs: 3_000, open: 0 },
++        }),
++      }),
++      source("m", {
++        turnTokenUsage: usage(3_000, 50, 1_500),
++        performance: perf({ turnMs: 5_000, tools: { count: 0, wallMs: 0, longestMs: 0, open: 0 } }),
++      }),
++    ]);
++    expect(row(rows, "inputTokens")?.value).toBe(4_000);
++    expect(row(rows, "outputTokens")?.value).toBe(150);
++    expect(row(rows, "cachedTokens")?.value).toBe(2_400);
++    expect(row(rows, "cacheHitRate")?.value).toBe(60);
++    expect(row(rows, "toolTime")?.value).toBe(3_000);
++    expect(row(rows, "turnTime")).toMatchObject({ value: 25_000, partial: false });
++    expect(row(rows, "peakTps")?.precision).toBe("unavailable");
++    expect(row(rows, "context")).toBeUndefined();
++  });
++
++  it("flags a sum some turns did not report as partial and takes the highest peak", () => {
++    const rows = aggregateTurnPerformance([
++      source("m", {
++        turnTokenUsage: usage(1_000, 100, 0),
++        performance: perf({
++          peakTokensPerSecond: { value: 120, windowMs: 2_000, basis: "estimated" },
++        }),
++      }),
++      source("m", {
++        performance: perf({
++          peakTokensPerSecond: { value: 258, windowMs: 2_000, basis: "estimated" },
++        }),
++      }),
++    ]);
++    expect(row(rows, "inputTokens")).toMatchObject({ value: 1_000, partial: true });
++    expect(row(rows, "inputTokens")?.reason).toContain("1 of 2 turns");
++    expect(row(rows, "peakTps")).toMatchObject({ precision: "estimated", value: 258 });
++  });
++
++  it("names one model and provider, or counts several", () => {
++    const one = aggregateTurnPerformance([source("claude-opus-5-5"), source("claude-opus-5-5")]);
++    expect(row(one, "model")?.text).toBe("claude-opus-5-5");
++    expect(row(one, "provider")?.text).toBe("Claude");
++    const mixed = aggregateTurnPerformance([
++      source("claude-opus-5-5"),
++      source("gemini-4-neon", {}, "Antigravity"),
++    ]);
++    expect(row(mixed, "model")?.text).toBe("2 models");
++    expect(row(mixed, "provider")?.text).toBe("2 providers");
++  });
++
++  it("computes percentiles by interpolation", () => {
++    expect(percentile([], 0.5)).toBeNull();
++    expect(percentile([5], 0.9)).toBe(5);
++    expect(percentile([4, 1, 3, 2], 0.5)).toBe(2.5);
++  });
++});
+diff --git a/apps/web/src/components/chat/TurnPerformanceScope.logic.ts b/apps/web/src/components/chat/TurnPerformanceScope.logic.ts
+new file mode 100644
+index 0000000000..36145747c2
+--- /dev/null
++++ b/apps/web/src/components/chat/TurnPerformanceScope.logic.ts
+@@ -0,0 +1,377 @@
++import type {
++  OrchestrationV2ProviderTurn,
++  OrchestrationV2ThreadProjection,
++} from "@t3tools/contracts";
++
++import * as DateTime from "effect/DateTime";
++
++import {
++  deriveTurnCachePercentage,
++  deriveTurnElapsedMs,
++  formatCachePercentage,
++} from "./ComposerStats.logic";
++import {
++  deriveReasoningEffort,
++  deriveSpeedMode,
++  ESTIMATE_PREFIX,
++  formatMs,
++  formatTokenCount,
++  formatTokensPerSecond,
++  isTurnSettled,
++  MIN_EXACT_GENERATION_MS,
++  TURN_PERFORMANCE_METRIC_IDS,
++  UNAVAILABLE_TEXT,
++  type MetricPrecision,
++  type TurnPerformanceMetric,
++  type TurnPerformanceMetricId,
++  type TurnPerformanceSource,
++} from "./TurnPerformance.logic";
++
++/**
++ * Which turns the performance grid covers: the last turn, every finished turn of the thread, or
++ * the finished turns of one model. Stored per place as "last", "thread" or "model:<model id>".
++ */
++export type TurnPerformanceScope =
++  | { readonly kind: "last" }
++  | { readonly kind: "thread" }
++  | { readonly kind: "model"; readonly model: string };
++
++export type TurnPerformancePlace = "composer" | "threadDetails";
++
++export function serializeTurnPerformanceScope(scope: TurnPerformanceScope): string {
++  return scope.kind === "model" ? `model:${scope.model}` : scope.kind;
++}
++
++/** The stored scope, or the last turn when it names a model this thread never ran. */
++export function resolveTurnPerformanceScope(
++  stored: string | undefined,
++  models: ReadonlyArray<string>,
++): TurnPerformanceScope {
++  if (stored === "thread") return { kind: "thread" };
++  if (stored?.startsWith("model:")) {
++    const model = stored.slice("model:".length);
++    if (models.includes(model)) return { kind: "model", model };
++  }
++  return { kind: "last" };
++}
++
++/** The model a turn ran: what the provider reported, else what the run requested. */
++export function turnModelOf(source: TurnPerformanceSource): string | null {
++  return source.turn.model ?? source.modelSelection?.model ?? null;
++}
++
++/** Finished main-agent turns of every provider session in the thread, oldest first. */
++export function selectThreadPerformanceTurns(
++  projection: Pick<OrchestrationV2ThreadProjection, "nodes" | "providerTurns">,
++): ReadonlyArray<OrchestrationV2ProviderTurn> {
++  const mainNodes = new Set(
++    projection.nodes
++      .filter((node) => node.kind === "root_turn" && node.parentNodeId === null)
++      .map((node) => node.id),
++  );
++  const startOf = (turn: OrchestrationV2ProviderTurn) =>
++    turn.startedAt === null ? 0 : DateTime.toEpochMillis(turn.startedAt);
++  return projection.providerTurns
++    .filter(
++      (turn) =>
++        mainNodes.has(turn.nodeId) &&
++        isTurnSettled(turn) &&
++        turn.startedAt !== null &&
++        turn.promptDropped !== true,
++    )
++    .toSorted((a, b) => startOf(a) - startOf(b));
++}
++
++/** Models in first-use order; the selector offers one scope per model once there are two. */
++export function threadModels(sources: ReadonlyArray<TurnPerformanceSource>): ReadonlyArray<string> {
++  const models: string[] = [];
++  for (const source of sources) {
++    const model = turnModelOf(source);
++    if (model !== null && !models.includes(model)) models.push(model);
++  }
++  return models;
++}
++
++export function selectScopeSources(
++  sources: ReadonlyArray<TurnPerformanceSource>,
++  scope: Exclude<TurnPerformanceScope, { kind: "last" }>,
++): ReadonlyArray<TurnPerformanceSource> {
++  return scope.kind === "thread"
++    ? sources
++    : sources.filter((source) => turnModelOf(source) === scope.model);
++}
++
++/** Linear-interpolated percentile of unsorted values; null when there are none. */
++export function percentile(values: ReadonlyArray<number>, fraction: number): number | null {
++  if (values.length === 0) return null;
++  const sorted = values.toSorted((a, b) => a - b);
++  const position = (sorted.length - 1) * Math.max(0, Math.min(1, fraction));
++  const below = Math.floor(position);
++  const above = Math.ceil(position);
++  return sorted[below]! + (sorted[above]! - sorted[below]!) * (position - below);
++}
++
++/** Token-weighted speed: total generation tokens over total generation time. */
++export function tokenWeightedRate(
++  windows: ReadonlyArray<{ readonly tokens: number; readonly ms: number }>,
++): number | null {
++  const counted = windows.filter((window) => window.ms >= MIN_EXACT_GENERATION_MS);
++  const ms = counted.reduce((sum, window) => sum + window.ms, 0);
++  if (ms <= 0) return null;
++  return counted.reduce((sum, window) => sum + window.tokens, 0) / (ms / 1000);
++}
++
++const finite = (value: number | undefined | null): value is number =>
++  typeof value === "number" && Number.isFinite(value);
++
++function aggregate(
++  id: TurnPerformanceMetricId,
++  precision: MetricPrecision,
++  value: number | string | null,
++  text: string,
++  reason: string,
++  partial = false,
++): TurnPerformanceMetric {
++  if (precision === "unavailable") {
++    return { id, precision, value: null, text: "", display: UNAVAILABLE_TEXT, reason, partial };
++  }
++  return {
++    id,
++    precision,
++    value,
++    text,
++    display: precision === "estimated" ? `${ESTIMATE_PREFIX}${text}` : text,
++    reason,
++    partial,
++  };
++}
++
++const none = (id: TurnPerformanceMetricId, reason: string) =>
++  aggregate(id, "unavailable", null, "", reason);
++
++const ofTurns = (count: number, total: number) =>
++  count === total ? `${total} turn${total === 1 ? "" : "s"}` : `${count} of ${total} turns`;
++
++/** Median with p90 for a latency: how long a typical turn waited, and a slow one. */
++function latency(
++  id: "ttft" | "ttfa",
++  sources: ReadonlyArray<TurnPerformanceSource>,
++  pick: (source: TurnPerformanceSource) => number | undefined,
++  what: string,
++): TurnPerformanceMetric {
++  const measured = sources.filter((source) => finite(pick(source)));
++  const values = measured.map((source) => pick(source)!);
++  const median = percentile(values, 0.5);
++  if (median === null) return none(id, `No turn in this scope measured ${what}.`);
++  const p90 = percentile(values, 0.9)!;
++  return aggregate(
++    id,
++    "exact",
++    median,
++    formatMs(median),
++    `Median ${what} over ${ofTurns(measured.length, sources.length)}; p90 ${formatMs(p90)}.`,
++    measured.some((source) => source.turn.performance?.partial === true),
++  );
++}
++
++function sum(
++  id: TurnPerformanceMetricId,
++  sources: ReadonlyArray<TurnPerformanceSource>,
++  pick: (source: TurnPerformanceSource) => number | undefined,
++  format: (value: number) => string,
++  what: string,
++): TurnPerformanceMetric {
++  const reported = sources.filter((source) => finite(pick(source)));
++  if (reported.length === 0) return none(id, `No turn in this scope reported ${what}.`);
++  const total = reported.reduce((acc, source) => acc + pick(source)!, 0);
++  return aggregate(
++    id,
++    "exact",
++    total,
++    format(total),
++    `Sum of ${what} over ${ofTurns(reported.length, sources.length)}.`,
++    reported.length < sources.length ||
++      reported.some((source) => source.turn.turnTokenUsage?.usageStatus === "partial"),
++  );
++}
++
++const usageOf = (source: TurnPerformanceSource) => {
++  const usage = source.turn.turnTokenUsage;
++  return usage === undefined || usage.usageStatus === "unavailable" ? undefined : usage;
++};
++
++const turnTimeOf = (source: TurnPerformanceSource) =>
++  source.turn.performance?.turnMs ?? deriveTurnElapsedMs(source.turn, 0) ?? undefined;
++
++/** One value shared by every turn, or null when they differ or none has one. */
++function shared<T>(values: ReadonlyArray<T | null>): T | null {
++  const first = values[0] ?? null;
++  return first !== null && values.every((value) => value === first) ? first : null;
++}
++
++/**
++ * The grid's metrics over several finished turns, in catalog order. Latencies are medians, speed
++ * is token-weighted, peak is the maximum, counts and times are sums. Context and live speed
++ * describe one moment, so they are left out.
++ */
++export function aggregateTurnPerformance(
++  sources: ReadonlyArray<TurnPerformanceSource>,
++): ReadonlyArray<TurnPerformanceMetric> {
++  const rows: TurnPerformanceMetric[] = [];
++  rows.push(
++    latency(
++      "ttft",
++      sources,
++      (source) => source.turn.performance?.firstTokenMs,
++      "time to first token",
++    ),
++    latency(
++      "ttfa",
++      sources,
++      (source) => source.turn.performance?.firstAnswerMs,
++      "time to first answer",
++    ),
++  );
++
++  // Total tokens over total time, so long replies weigh more; estimated if any count was.
++  const generation = sources.flatMap((source) => {
++    const performance = source.turn.performance;
++    const tokens = performance?.generationTokens;
++    return performance !== undefined && tokens !== undefined && finite(performance.generationMs)
++      ? [{ tokens: tokens.value, ms: performance.generationMs, basis: tokens.basis, source }]
++      : [];
++  });
++  const timed = generation.filter((window) => window.ms >= MIN_EXACT_GENERATION_MS);
++  const rate = tokenWeightedRate(timed);
++  rows.push(
++    rate === null
++      ? none("avgTps", "No turn in this scope streamed for at least 1 s with a token count.")
++      : aggregate(
++          "avgTps",
++          timed.every((window) => window.basis === "provider_exact") ? "exact" : "estimated",
++          rate,
++          formatTokensPerSecond(rate),
++          `${formatTokenCount(timed.reduce((acc, window) => acc + window.tokens, 0))} tokens over ${formatMs(timed.reduce((acc, window) => acc + window.ms, 0))} of generation, ${ofTurns(timed.length, sources.length)}; turns under 1 s of streaming are left out.`,
++          timed.some((window) => window.source.turn.performance?.partial === true),
++        ),
++  );
++
++  const peaks = sources.flatMap((source) => {
++    const peak = source.turn.performance?.peakTokensPerSecond?.value;
++    return finite(peak) ? [peak] : [];
++  });
++  rows.push(
++    peaks.length === 0
++      ? none("peakTps", "No turn in this scope streamed long enough for a peak.")
++      : aggregate(
++          "peakTps",
++          "estimated",
++          Math.max(...peaks),
++          formatTokensPerSecond(Math.max(...peaks)),
++          `Highest turn peak over ${ofTurns(peaks.length, sources.length)}.`,
++        ),
++  );
++
++  // A sum over turns where some did not report is partial.
++  rows.push(
++    sum("inputTokens", sources, (s) => usageOf(s)?.inputTokens, formatTokenCount, "input tokens"),
++    sum(
++      "outputTokens",
++      sources,
++      (s) => usageOf(s)?.outputTokens,
++      formatTokenCount,
++      "output tokens",
++    ),
++    sum(
++      "reasoningTokens",
++      sources,
++      (s) => usageOf(s)?.reasoningTokens,
++      formatTokenCount,
++      "reasoning tokens",
++    ),
++    sum(
++      "cachedTokens",
++      sources,
++      (s) => usageOf(s)?.cachedInputTokens,
++      formatTokenCount,
++      "cached input tokens",
++    ),
++  );
++
++  // Cached over input of the turns that report both, not a mean of per-turn rates.
++  const cacheTurns = sources.filter(
++    (source) => deriveTurnCachePercentage(usageOf(source)) !== null,
++  );
++  const input = cacheTurns.reduce((acc, source) => acc + usageOf(source)!.inputTokens!, 0);
++  const cached = cacheTurns.reduce((acc, source) => acc + usageOf(source)!.cachedInputTokens!, 0);
++  const hit = input > 0 ? (cached / input) * 100 : null;
++  rows.push(
++    hit === null
++      ? none("cacheHitRate", "No turn in this scope reported cached and total input.")
++      : aggregate(
++          "cacheHitRate",
++          "exact",
++          hit,
++          formatCachePercentage(hit),
++          `Cached ÷ total input over ${ofTurns(cacheTurns.length, sources.length)}: ${formatTokenCount(cached)} of ${formatTokenCount(input)} tokens.`,
++          cacheTurns.length < sources.length,
++        ),
++  );
++
++  const toolTime = sum(
++    "toolTime",
++    sources,
++    (source) => source.turn.performance?.tools.wallMs,
++    formatMs,
++    "tool wall time",
++  );
++  rows.push(
++    sources.some((source) => (source.turn.performance?.tools.open ?? 0) > 0)
++      ? { ...toolTime, partial: true }
++      : toolTime,
++    sum("turnTime", sources, turnTimeOf, formatMs, "turn time"),
++  );
++
++  const providers = [...new Set(sources.map((source) => source.providerName))];
++  rows.push(
++    providers.length === 1
++      ? aggregate(
++          "provider",
++          "exact",
++          providers[0]!,
++          providers[0]!,
++          "Provider that ran these turns.",
++        )
++      : aggregate(
++          "provider",
++          "exact",
++          providers.length,
++          `${providers.length} providers`,
++          providers.join(", "),
++        ),
++  );
++  const models = threadModels(sources);
++  rows.push(
++    models.length === 0
++      ? none("model", "No turn in this scope reported a model.")
++      : models.length === 1
++        ? aggregate("model", "exact", models[0]!, models[0]!, "Model that ran these turns.")
++        : aggregate("model", "exact", models.length, `${models.length} models`, models.join(", ")),
++  );
++  const effort = shared(sources.map((source) => deriveReasoningEffort(source.modelSelection)));
++  if (effort !== null) {
++    rows.push(aggregate("reasoningEffort", "exact", effort, effort, "Effort of every turn here."));
++  }
++  const speed = shared(
++    sources.map((source) => deriveSpeedMode(source.modelSelection, source.driver)),
++  );
++  if (speed !== null) {
++    rows.push(aggregate("speedMode", "exact", speed, speed, "Speed mode of every turn here."));
++  }
++
++  const byId = new Map(rows.map((row) => [row.id, row]));
++  return TURN_PERFORMANCE_METRIC_IDS.flatMap((id) => {
++    const row = byId.get(id);
++    return row === undefined ? [] : [row];
++  });
++}
+diff --git a/apps/web/src/components/ui/toggle.tsx b/apps/web/src/components/ui/toggle.tsx
+index afe51f0f69..0b1f30809e 100644
+--- a/apps/web/src/components/ui/toggle.tsx
++++ b/apps/web/src/components/ui/toggle.tsx
+@@ -16,6 +16,9 @@ const toggleVariants = cva(
+           "h-7 min-w-7 rounded-md px-[calc(--spacing(1)-1px)] text-xs before:rounded-[calc(var(--radius-md)-1px)] [&_svg:not([class*='size-'])]:size-3.5",
+         default: "h-9 min-w-9 px-[calc(--spacing(2)-1px)] sm:h-8 sm:min-w-8",
+         lg: "h-10 min-w-10 px-[calc(--spacing(2.5)-1px)] sm:h-9 sm:min-w-9",
++        // Dense chips beside a popover title, such as the turn performance scope.
++        micro:
++          "block h-5 min-w-0 max-w-28 truncate rounded-md px-1.5 text-2xs leading-5 before:rounded-[calc(var(--radius-md)-1px)] sm:text-2xs",
+         segmented:
+           "h-6 min-w-0 rounded-md px-2.5 text-xs before:rounded-[calc(var(--radius-md)-1px)]",
+         sm: "h-8 min-w-8 px-[calc(--spacing(1.5)-1px)] sm:h-7 sm:min-w-7",
+diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
+index 3d076694e1..b2954355c4 100644
+--- a/apps/web/src/i18n/translations/de.json
++++ b/apps/web/src/i18n/translations/de.json
+@@ -13135,5 +13135,11 @@
+   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+   "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
+   "8ea44c7f1633179e": "Show metrics",
+-  "4a4030032575944d": "Metrics"
++  "4a4030032575944d": "Metrics",
++  "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
++  "0fdf303b060c2739": "This thread",
++  "6ff57d72f5d4ddc6": "Now",
++  "00e3530c6a6565a0": "Last",
++  "af145731ba0e2fcd": "Thread",
++  "a98c794077c44086": "Turns to show"
+ }
+diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
+index abf34c64ba..fefe88c8df 100644
+--- a/apps/web/src/i18n/translations/en.json
++++ b/apps/web/src/i18n/translations/en.json
+@@ -13144,5 +13144,11 @@
+   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+   "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
+   "8ea44c7f1633179e": "Show metrics",
+-  "4a4030032575944d": "Metrics"
++  "4a4030032575944d": "Metrics",
++  "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
++  "0fdf303b060c2739": "This thread",
++  "6ff57d72f5d4ddc6": "Now",
++  "00e3530c6a6565a0": "Last",
++  "af145731ba0e2fcd": "Thread",
++  "a98c794077c44086": "Turns to show"
+ }
+diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
+index 92a63988a6..c852c57e29 100644
+--- a/apps/web/src/i18n/translations/es.json
++++ b/apps/web/src/i18n/translations/es.json
+@@ -13130,5 +13130,11 @@
+   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+   "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
+   "8ea44c7f1633179e": "Show metrics",
+-  "4a4030032575944d": "Metrics"
++  "4a4030032575944d": "Metrics",
++  "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
++  "0fdf303b060c2739": "This thread",
++  "6ff57d72f5d4ddc6": "Now",
++  "00e3530c6a6565a0": "Last",
++  "af145731ba0e2fcd": "Thread",
++  "a98c794077c44086": "Turns to show"
+ }
+diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
+index 33f44e877d..28e6eae855 100644
+--- a/apps/web/src/i18n/translations/fr.json
++++ b/apps/web/src/i18n/translations/fr.json
+@@ -13135,5 +13135,11 @@
+   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+   "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
+   "8ea44c7f1633179e": "Show metrics",
+-  "4a4030032575944d": "Metrics"
++  "4a4030032575944d": "Metrics",
++  "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
++  "0fdf303b060c2739": "This thread",
++  "6ff57d72f5d4ddc6": "Now",
++  "00e3530c6a6565a0": "Last",
++  "af145731ba0e2fcd": "Thread",
++  "a98c794077c44086": "Turns to show"
+ }
+diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
+index 251763793a..d278ad2b2d 100644
+--- a/apps/web/src/i18n/translations/ja.json
++++ b/apps/web/src/i18n/translations/ja.json
+@@ -13071,5 +13071,11 @@
+   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+   "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
+   "8ea44c7f1633179e": "Show metrics",
+-  "4a4030032575944d": "Metrics"
++  "4a4030032575944d": "Metrics",
++  "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
++  "0fdf303b060c2739": "This thread",
++  "6ff57d72f5d4ddc6": "Now",
++  "00e3530c6a6565a0": "Last",
++  "af145731ba0e2fcd": "Thread",
++  "a98c794077c44086": "Turns to show"
+ }
+diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
+index 94ee4d8cd0..3ce54f03d4 100644
+--- a/apps/web/src/i18n/translations/ko.json
++++ b/apps/web/src/i18n/translations/ko.json
+@@ -13068,5 +13068,11 @@
+   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+   "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
+   "8ea44c7f1633179e": "Show metrics",
+-  "4a4030032575944d": "Metrics"
++  "4a4030032575944d": "Metrics",
++  "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
++  "0fdf303b060c2739": "This thread",
++  "6ff57d72f5d4ddc6": "Now",
++  "00e3530c6a6565a0": "Last",
++  "af145731ba0e2fcd": "Thread",
++  "a98c794077c44086": "Turns to show"
+ }
+diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
+index bd165b28f1..adce15a502 100644
+--- a/apps/web/src/i18n/translations/pt-BR.json
++++ b/apps/web/src/i18n/translations/pt-BR.json
+@@ -13135,5 +13135,11 @@
+   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+   "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
+   "8ea44c7f1633179e": "Show metrics",
+-  "4a4030032575944d": "Metrics"
++  "4a4030032575944d": "Metrics",
++  "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
++  "0fdf303b060c2739": "This thread",
++  "6ff57d72f5d4ddc6": "Now",
++  "00e3530c6a6565a0": "Last",
++  "af145731ba0e2fcd": "Thread",
++  "a98c794077c44086": "Turns to show"
+ }
+diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
+index 7ebc7cba9c..47ad67c860 100644
+--- a/apps/web/src/i18n/translations/ru.json
++++ b/apps/web/src/i18n/translations/ru.json
+@@ -13134,5 +13134,11 @@
+   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+   "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
+   "8ea44c7f1633179e": "Show metrics",
+-  "4a4030032575944d": "Metrics"
++  "4a4030032575944d": "Metrics",
++  "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
++  "0fdf303b060c2739": "This thread",
++  "6ff57d72f5d4ddc6": "Now",
++  "00e3530c6a6565a0": "Last",
++  "af145731ba0e2fcd": "Thread",
++  "a98c794077c44086": "Turns to show"
+ }
+diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
+index 707bfcf807..870dfb4e55 100644
+--- a/apps/web/src/i18n/translations/sv.json
++++ b/apps/web/src/i18n/translations/sv.json
+@@ -13142,5 +13142,11 @@
+   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+   "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
+   "8ea44c7f1633179e": "Show metrics",
+-  "4a4030032575944d": "Metrics"
++  "4a4030032575944d": "Metrics",
++  "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
++  "0fdf303b060c2739": "This thread",
++  "6ff57d72f5d4ddc6": "Now",
++  "00e3530c6a6565a0": "Last",
++  "af145731ba0e2fcd": "Thread",
++  "a98c794077c44086": "Turns to show"
+ }
+diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
+index 30430d30dd..309d24d81f 100644
+--- a/apps/web/src/i18n/translations/zh.json
++++ b/apps/web/src/i18n/translations/zh.json
+@@ -13149,5 +13149,11 @@
+   "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
+   "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
+   "8ea44c7f1633179e": "Show metrics",
+-  "4a4030032575944d": "Metrics"
++  "4a4030032575944d": "Metrics",
++  "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
++  "0fdf303b060c2739": "This thread",
++  "6ff57d72f5d4ddc6": "Now",
++  "00e3530c6a6565a0": "Last",
++  "af145731ba0e2fcd": "Thread",
++  "a98c794077c44086": "Turns to show"
+ }
+diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
+index 8b8544ee55..418bc11b0d 100644
+--- a/packages/contracts/src/settings.ts
++++ b/packages/contracts/src/settings.ts
+@@ -548,6 +548,10 @@ export const ClientSettingsSchema = Schema.Struct({
+   statsForNerdsUsageLimitsDisplay: Schema.Literals(["left", "used"]).pipe(
+     Schema.withDecodingDefault(Effect.succeed("left" as const)),
+   ),
++  // Turns the performance grid covers per place: "last", "thread" or "model:<model id>".
++  statsForNerdsPerformanceScopes: Schema.Record(Schema.String, Schema.String).pipe(
++    Schema.withDecodingDefault(Effect.succeed({})),
++  ),
+ 
+   composerRichTextEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+   sendShortcut: Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"]).pipe(
+@@ -2193,6 +2197,7 @@ export const ClientSettingsPatch = Schema.Struct({
+   statsForNerdsShowPerReply: Schema.optionalKey(Schema.Boolean),
+   statsForNerdsUsageLimitsScope: Schema.optionalKey(Schema.Literals(["current", "all"])),
+   statsForNerdsUsageLimitsDisplay: Schema.optionalKey(Schema.Literals(["left", "used"])),
++  statsForNerdsPerformanceScopes: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+   composerRichTextEnabled: Schema.optionalKey(Schema.Boolean),
+   sendShortcut: Schema.optionalKey(Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"])),
+   followUpBehavior: Schema.optionalKey(Schema.Literals(["queue", "steer"])),

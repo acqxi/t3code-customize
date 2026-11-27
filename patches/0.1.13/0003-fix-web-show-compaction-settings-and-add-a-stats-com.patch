@@ -1,0 +1,774 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler South <tsouth2@gmail.com>
+Date: Sat, 10 Oct 2026 12:40:14 -0400
+Subject: [PATCH 03/12] fix(web): show compaction settings and add a stats
+ compact action
+
+---
+ apps/web/src/components/ChatView.tsx          | 55 ++++++++++-
+ .../chat/ComposerStats.logic.test.ts          | 96 +++++++++++++++++++
+ .../components/chat/ComposerStats.logic.ts    | 52 ++++++++++
+ .../web/src/components/chat/ComposerStats.tsx | 73 ++++++++++++--
+ apps/web/src/i18n/translations/de.json        |  8 +-
+ apps/web/src/i18n/translations/en.json        |  8 +-
+ apps/web/src/i18n/translations/es.json        |  8 +-
+ apps/web/src/i18n/translations/fr.json        |  8 +-
+ apps/web/src/i18n/translations/ja.json        |  8 +-
+ apps/web/src/i18n/translations/ko.json        |  8 +-
+ apps/web/src/i18n/translations/pt-BR.json     |  8 +-
+ apps/web/src/i18n/translations/ru.json        |  8 +-
+ apps/web/src/i18n/translations/sv.json        |  8 +-
+ apps/web/src/i18n/translations/zh.json        |  8 +-
+ apps/web/src/lib/contextWindow.test.ts        | 59 +++++++++++-
+ .../client-runtime/src/state/contextWindow.ts | 23 +++--
+ 16 files changed, 406 insertions(+), 32 deletions(-)
+
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index e21e969615..385c19b0a7 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -1614,20 +1614,40 @@ export default function ChatView(props: ChatViewProps) {
+     const usageLimits = activeUsageLimits
+       ? { limits: activeUsageLimits, providerName: activeProviderName }
+       : null;
+-    if (!serverProjection) return { turn: null, compactions: [], context: null, usageLimits };
++    if (!serverProjection)
++      return {
++        turn: null,
++        compactions: [],
++        context: null,
++        usageLimits,
++        contextDriver: undefined,
++        configuredClaudeThreshold: undefined,
++      };
+     const turns = selectComposerStatsTurns(serverProjection);
+     const contextUsage = turns.findLast((turn) => turn.tokenUsage !== undefined)?.tokenUsage;
++    const providerThread = serverProjection.providerThreads.find(
++      (thread) => thread.id === serverProjection.thread.activeProviderThreadId,
++    );
++    const providerConfig = providerThread
++      ? settings.providerInstances[providerThread.providerInstanceId]?.config
++      : undefined;
++    const configuredClaudeThreshold =
++      providerConfig !== null &&
++      typeof providerConfig === "object" &&
++      "autoCompactWindow" in providerConfig
++        ? providerConfig.autoCompactWindow
++        : undefined;
+     const compactions = selectRecordedCompactions(serverProjection.turnItems, turns);
+     return {
+       turn: turns.at(-1) ?? null,
+       compactions,
+       usageLimits,
++      contextDriver: providerThread?.driver,
++      configuredClaudeThreshold,
+       context: deriveLatestContextWindowSnapshot(
+         compactions.map((item) => ({ item })),
+         contextUsage,
+-        serverProjection.providerThreads.find(
+-          (thread) => thread.id === serverProjection.thread.activeProviderThreadId,
+-        ),
++        providerThread,
+       ),
+     };
+   })();
+@@ -2701,6 +2721,15 @@ export default function ChatView(props: ChatViewProps) {
+     pendingUserInputs.length > 0;
+   // A typed /compact queues behind a running turn, so only the immediate compaction waits for idle.
+   const compactDisabled = compactThreadUnavailable || isWorking;
++  const compactDisabledReason = compactDisabled
++    ? !canOperateThread
++      ? gt("This connection cannot change threads.")
++      : !activeProject
++        ? gt("Choose a project before compacting")
++        : !manualCompactionProviderAvailable
++          ? gt("Compaction is unavailable for this provider")
++          : gt("Compacting is unavailable right now")
++    : null;
+   const freshSessionAvailable =
+     activeMessageCount > 0 && serverConfig?.environment.capabilities.freshContext === true;
+   const freshSessionArmed = useFreshSessionArmed(routeThreadKey);
+@@ -4135,7 +4164,23 @@ export default function ChatView(props: ChatViewProps) {
+                     </div>
+                     {/* Opaque so timeline content scrolling under the overlay can't show through the stats line. */}
+                     <div className={composerStats !== null ? "bg-background" : undefined}>
+-                      {composerStats !== null && <ComposerStats {...composerStats} />}
++                      {composerStats !== null && (
++                        <ComposerStats
++                          {...composerStats}
++                          onCompact={() => composerRef.current?.compactContext()}
++                          compactDisabled={compactDisabled}
++                          compactDisabledReason={
++                            pendingApprovals.length > 0
++                              ? gt("Resolve the pending approval first.")
++                              : pendingUserInputs.length > 0
++                                ? gt("Answer the pending question first.")
++                                : isWorking
++                                  ? gt("Wait for the current turn to finish.")
++                                  : compactDisabledReason
++                          }
++                          isCompacting={isCompacting}
++                        />
++                      )}
+                       <div
+                         aria-hidden
+                         className="h-[calc(env(safe-area-inset-bottom)+1rem)] sm:h-[calc(env(safe-area-inset-bottom)+1.25rem)]"
+diff --git a/apps/web/src/components/chat/ComposerStats.logic.test.ts b/apps/web/src/components/chat/ComposerStats.logic.test.ts
+index 479e94b193..79b01fd80e 100644
+--- a/apps/web/src/components/chat/ComposerStats.logic.test.ts
++++ b/apps/web/src/components/chat/ComposerStats.logic.test.ts
+@@ -14,6 +14,7 @@ import { describe, expect, it } from "vite-plus/test";
+ import {
+   composerLimitDisplay,
+   composerLimitsFreshness,
++  deriveContextCompaction,
+   deriveResponseRate,
+   deriveTurnCachePercentage,
+   formatCachePercentage,
+@@ -437,3 +438,98 @@ describe("composer limit display", () => {
+     expect(display.dimmed).toBe(true);
+   });
+ });
++
++describe("context compaction pressure", () => {
++  const context = {
++    usedTokens: 360_000,
++    usedPercentage: 36,
++    autoCompactThreshold: null,
++    compactsAutomatically: null,
++  };
++
++  it("keeps window fullness separate from Claude's configured 400k limit", () => {
++    expect(deriveContextCompaction(context, "claudeAgent", "400000")).toMatchObject({
++      threshold: 400_000,
++      source: "configured",
++      remainingTokens: 40_000,
++      thresholdPercentage: 90,
++      pressurePercentage: 90,
++      status: "Claude setting",
++    });
++    expect(context.usedPercentage).toBe(36);
++  });
++
++  it("prefers an actual provider threshold over a newly configured limit", () => {
++    expect(
++      deriveContextCompaction(
++        { ...context, autoCompactThreshold: 500_000 },
++        "claudeAgent",
++        "400000",
++      ),
++    ).toMatchObject({ threshold: 500_000, source: "reported", remainingTokens: 140_000 });
++  });
++
++  it("does not apply Claude's configuration to Codex or another driver", () => {
++    for (const driver of ["codex", "opencode", undefined]) {
++      expect(deriveContextCompaction(context, driver, "400000")).toMatchObject({
++        threshold: null,
++        source: null,
++        remainingTokens: null,
++        pressurePercentage: 36,
++      });
++    }
++    expect(deriveContextCompaction(context, "codex", "400000").status).toContain(
++      "Managed by Codex",
++    );
++  });
++
++  it("does not invent a default threshold or accept invalid settings", () => {
++    for (const value of [
++      undefined,
++      "",
++      "NaN",
++      "Infinity",
++      "99999",
++      "1000001",
++      "400000oops",
++      400000,
++    ]) {
++      expect(deriveContextCompaction(context, "claudeAgent", value)).toMatchObject({
++        threshold: null,
++        source: null,
++      });
++    }
++  });
++
++  it("honors a provider report that automatic compaction is off", () => {
++    expect(
++      deriveContextCompaction(
++        { ...context, compactsAutomatically: false, autoCompactThreshold: 300_000 },
++        "claudeAgent",
++        "400000",
++      ),
++    ).toMatchObject({ status: "Reported off", threshold: null, pressurePercentage: 36 });
++  });
++
++  it("shows a setting without inventing occupancy", () => {
++    expect(deriveContextCompaction(null, "claudeAgent", "400000")).toMatchObject({
++      threshold: 400_000,
++      source: "configured",
++      remainingTokens: null,
++      thresholdPercentage: null,
++    });
++  });
++
++  it("clamps remaining tokens and warns at the smaller window limit", () => {
++    expect(
++      deriveContextCompaction({ ...context, usedTokens: 420_000 }, "claudeAgent", "400000"),
++    ).toMatchObject({ remainingTokens: 0, pressurePercentage: 105 });
++    expect(
++      deriveContextCompaction(
++        { ...context, usedTokens: 180_000, usedPercentage: 90 },
++        "claudeAgent",
++        "400000",
++      ),
++    ).toMatchObject({ remainingTokens: 220_000, pressurePercentage: 90 });
++  });
++});
+diff --git a/apps/web/src/components/chat/ComposerStats.logic.ts b/apps/web/src/components/chat/ComposerStats.logic.ts
+index 5ea95d163a..7d344f7d90 100644
+--- a/apps/web/src/components/chat/ComposerStats.logic.ts
++++ b/apps/web/src/components/chat/ComposerStats.logic.ts
+@@ -8,6 +8,7 @@ import type {
+ } from "@t3tools/contracts";
+ import * as DateTime from "effect/DateTime";
+ import type { ThreadStructureTurnItem } from "@t3tools/client-runtime/state/shell";
++import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
+ 
+ /** Provider turn ordinals are scoped to a provider thread; children have their own nodes. */
+ export function selectComposerStatsTurns(projection: {
+@@ -250,3 +251,54 @@ export function composerLimitDisplay(
+     dimmed: freshness.status !== "fresh",
+   };
+ }
++
++/** A configured limit is a launch setting, not proof of the running query's limit. */
++export function deriveContextCompaction(
++  context: Pick<
++    ContextWindowSnapshot,
++    "usedTokens" | "usedPercentage" | "autoCompactThreshold" | "compactsAutomatically"
++  > | null,
++  driver: string | undefined,
++  configuredClaudeThreshold: unknown,
++) {
++  const configured =
++    driver === "claudeAgent" &&
++    typeof configuredClaudeThreshold === "string" &&
++    /^\d+$/.test(configuredClaudeThreshold.trim())
++      ? Number(configuredClaudeThreshold)
++      : null;
++  const validConfigured =
++    configured !== null && configured >= 100_000 && configured <= 1_000_000 ? configured : null;
++  const reported = context?.autoCompactThreshold;
++  const validReported =
++    context?.compactsAutomatically !== false &&
++    typeof reported === "number" &&
++    Number.isFinite(reported) &&
++    reported > 0
++      ? reported
++      : null;
++  const threshold =
++    context?.compactsAutomatically === false ? null : (validReported ?? validConfigured);
++  const source = threshold === null ? null : validReported !== null ? "reported" : "configured";
++  const usedTokens = context?.usedTokens;
++  const remainingTokens =
++    threshold !== null && usedTokens !== undefined ? Math.max(0, threshold - usedTokens) : null;
++  const thresholdPercentage =
++    threshold !== null && usedTokens !== undefined ? (usedTokens / threshold) * 100 : null;
++  const pressurePercentage = Math.max(context?.usedPercentage ?? 0, thresholdPercentage ?? 0);
++  const status =
++    context?.compactsAutomatically === false
++      ? "Reported off"
++      : threshold !== null
++        ? source === "reported"
++          ? "Provider reported"
++          : "Claude setting"
++        : driver === "claudeAgent"
++          ? "Claude default (threshold not reported)"
++          : driver === "codex"
++            ? "Managed by Codex (threshold not reported)"
++            : context?.compactsAutomatically === true
++              ? "On (threshold not reported)"
++              : "Not reported";
++  return { threshold, source, remainingTokens, thresholdPercentage, pressurePercentage, status };
++}
+diff --git a/apps/web/src/components/chat/ComposerStats.tsx b/apps/web/src/components/chat/ComposerStats.tsx
+index 6eb19aa279..acd6dd6b27 100644
+--- a/apps/web/src/components/chat/ComposerStats.tsx
++++ b/apps/web/src/components/chat/ComposerStats.tsx
+@@ -11,6 +11,7 @@ import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+ 
+ import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
+ import { formatContextWindowTokens } from "~/lib/contextWindow";
++import { Button } from "../ui/button";
+ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+ import { composerFloatingLayerProps } from "./composerEventScope";
+@@ -19,6 +20,7 @@ import {
+   composerLimitDisplay,
+   composerLimitSourceLabel,
+   composerLimitsFreshness,
++  deriveContextCompaction,
+   deriveResponseRate,
+   deriveTurnCachePercentage,
+   formatCachePercentage,
+@@ -235,7 +237,7 @@ function UsageLimitsSummary({
+           <button
+             type="button"
+             aria-label="Usage limit details"
+-            className="inline-flex flex-wrap items-center gap-x-4 rounded-sm text-left outline-offset-2"
++            className="inline-flex flex-wrap items-center gap-x-4 rounded-sm text-left -outline-offset-2"
+           />
+         }
+       >
+@@ -279,12 +281,25 @@ export function ComposerStats({
+   turn,
+   compactions,
+   usageLimits,
++  contextDriver,
++  configuredClaudeThreshold,
++  onCompact,
++  compactDisabled,
++  compactDisabledReason,
++  isCompacting,
+ }: {
+   context: ContextWindowSnapshot | null;
+   turn: OrchestrationV2ProviderTurn | null;
+   compactions: ReadonlyArray<Extract<OrchestrationV2TurnItem, { type: "compaction" }>>;
+   usageLimits: { limits: ServerProviderUsageLimits; providerName: string } | null;
++  contextDriver: string | undefined;
++  configuredClaudeThreshold: unknown;
++  onCompact: () => void;
++  compactDisabled: boolean;
++  compactDisabledReason: string | null;
++  isCompacting: boolean;
+ }) {
++  const compaction = deriveContextCompaction(context, contextDriver, configuredClaudeThreshold);
+   const responseRate = deriveResponseRate(turn);
+   const estimated = turn?.responseThroughput?.basis === "codex_active_windows_estimate";
+   const usage = turn?.turnTokenUsage;
+@@ -302,7 +317,8 @@ export function ComposerStats({
+     !hasTokens &&
+     responseRate === null &&
+     compactions.length === 0 &&
+-    selectComposerLimitWindows(usageLimits?.limits).length === 0
++    selectComposerLimitWindows(usageLimits?.limits).length === 0 &&
++    compactDisabled
+   )
+     return null;
+   const count = (value: number | undefined) =>
+@@ -328,7 +344,7 @@ export function ComposerStats({
+               <button
+                 type="button"
+                 aria-label="Turn token details"
+-                className="inline-flex items-center gap-1 rounded-sm text-left outline-offset-2"
++                className="inline-flex items-center gap-1 rounded-sm text-left -outline-offset-2"
+               />
+             }
+           >
+@@ -393,7 +409,7 @@ export function ComposerStats({
+             render={
+               <span
+                 tabIndex={0}
+-                className="inline-flex items-center gap-1 rounded-sm outline-offset-2"
++                className="inline-flex items-center gap-1 rounded-sm -outline-offset-2"
+               />
+             }
+           >
+@@ -411,7 +427,7 @@ export function ComposerStats({
+   }
+ 
+   // Context is per thread, so it sits with the turn stats; the left side is account limits.
+-  if (context !== null || compactions.length > 0) {
++  if (context !== null || compactions.length > 0 || !compactDisabled || isCompacting) {
+     stats.unshift({
+       key: "context",
+       node: (
+@@ -424,13 +440,13 @@ export function ComposerStats({
+               <button
+                 type="button"
+                 aria-label="Context usage details"
+-                className="inline-flex items-center rounded-sm text-left outline-offset-2"
++                className="inline-flex items-center rounded-sm text-left -outline-offset-2"
+               />
+             }
+           >
+             <span className="inline-flex items-center gap-1">
+               {context?.usedPercentage != null ? (
+-                <span className={TONE_TEXT[toneOf(context.usedPercentage)]}>
++                <span className={TONE_TEXT[toneOf(compaction.pressurePercentage)]}>
+                   {Math.round(context.usedPercentage)}%
+                 </span>
+               ) : (
+@@ -445,7 +461,7 @@ export function ComposerStats({
+                 <h3 className="font-medium">Context usage</h3>
+                 <span className="text-muted-foreground tabular-nums">
+                   {context?.usedPercentage != null
+-                    ? `${Math.round(context.usedPercentage)}% full`
++                    ? `${Math.round(context.usedPercentage)}% of window`
+                     : "Not reported"}
+                 </span>
+               </div>
+@@ -457,11 +473,37 @@ export function ComposerStats({
+                   {context ? count(context.usedTokens) : "Not reported"}
+                 </Detail>
+                 <Detail label="Window size">{count(context?.maxTokens ?? undefined)}</Detail>
+-                <Detail label="Remaining tokens">
++                <Detail label="Window remaining">
+                   {count(context?.remainingTokens ?? undefined)}
+                 </Detail>
++                <Detail label="Auto-compact">{compaction.status}</Detail>
++                {compaction.threshold !== null && (
++                  <>
++                    <Detail
++                      label={
++                        compaction.source === "configured"
++                          ? "Configured threshold"
++                          : "Reported threshold"
++                      }
++                    >
++                      {count(compaction.threshold)} tokens
++                    </Detail>
++                    <Detail label="Tokens to threshold">
++                      {compaction.remainingTokens === null
++                        ? "Not reported"
++                        : count(compaction.remainingTokens)}
++                    </Detail>
++                  </>
++                )}
+                 <Detail label="Recorded compactions">{compactions.length}</Detail>
+               </dl>
++              {compaction.source === "configured" && (
++                <p className="text-muted-foreground">
++                  Claude's current setting applies when a query starts. A running query may use an
++                  earlier setting. Tokens to threshold use the latest context report, not a
++                  countdown.
++                </p>
++              )}
+               {compactions.length > 0 && (
+                 <div className="space-y-1.5">
+                   <p className="font-medium">Recent compactions</p>
+@@ -499,6 +541,19 @@ export function ComposerStats({
+                 Compactions count completed events in the loaded main-agent history for this
+                 provider session.
+               </p>
++              <div className="flex flex-col gap-1.5">
++                <Button
++                  size="xs"
++                  variant="outline"
++                  disabled={compactDisabled || isCompacting}
++                  onClick={onCompact}
++                >
++                  {isCompacting ? "Compacting…" : "Compact now"}
++                </Button>
++                {compactDisabled && !isCompacting && compactDisabledReason && (
++                  <p className="text-muted-foreground">{compactDisabledReason}</p>
++                )}
++              </div>
+               {context && (
+                 <p className="text-muted-foreground">
+                   Reported{" "}
+diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
+index 290326d81c..e0439b0c88 100644
+--- a/apps/web/src/i18n/translations/de.json
++++ b/apps/web/src/i18n/translations/de.json
+@@ -13022,5 +13022,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
+index 93868ae9c7..acf50b7442 100644
+--- a/apps/web/src/i18n/translations/en.json
++++ b/apps/web/src/i18n/translations/en.json
+@@ -13031,5 +13031,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
+index 94ad634d03..66c7c67acf 100644
+--- a/apps/web/src/i18n/translations/es.json
++++ b/apps/web/src/i18n/translations/es.json
+@@ -13017,5 +13017,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
+index 520bedb4dd..8a7addd84d 100644
+--- a/apps/web/src/i18n/translations/fr.json
++++ b/apps/web/src/i18n/translations/fr.json
+@@ -13022,5 +13022,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
+index 26d22b594f..6fa8933f35 100644
+--- a/apps/web/src/i18n/translations/ja.json
++++ b/apps/web/src/i18n/translations/ja.json
+@@ -12958,5 +12958,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
+index 4281b23a3f..673da47cc4 100644
+--- a/apps/web/src/i18n/translations/ko.json
++++ b/apps/web/src/i18n/translations/ko.json
+@@ -12955,5 +12955,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
+index 3e4f435cd3..0baaa5c8c6 100644
+--- a/apps/web/src/i18n/translations/pt-BR.json
++++ b/apps/web/src/i18n/translations/pt-BR.json
+@@ -13022,5 +13022,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
+index 3091ccdd39..8266f32309 100644
+--- a/apps/web/src/i18n/translations/ru.json
++++ b/apps/web/src/i18n/translations/ru.json
+@@ -13021,5 +13021,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
+index d9e710b587..fa7bd04a43 100644
+--- a/apps/web/src/i18n/translations/sv.json
++++ b/apps/web/src/i18n/translations/sv.json
+@@ -13029,5 +13029,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
+index 17246bdba5..d95d971d27 100644
+--- a/apps/web/src/i18n/translations/zh.json
++++ b/apps/web/src/i18n/translations/zh.json
+@@ -13036,5 +13036,11 @@
+   "01ff459d89a7efb4": "Stats for nerds",
+   "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage"
++  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
++  "f3e82ffb3e22c609": "Choose a project before compacting",
++  "38baeebc3b47b857": "Compaction is unavailable for this provider",
++  "d35c2d635ba3a859": "Compacting is unavailable right now",
++  "9b2ef56a4b9002a4": "Resolve the pending approval first.",
++  "61177a366aed53ed": "Answer the pending question first.",
++  "670969dbcf386a31": "Wait for the current turn to finish."
+ }
+diff --git a/apps/web/src/lib/contextWindow.test.ts b/apps/web/src/lib/contextWindow.test.ts
+index a9bef5448f..4212a4de7c 100644
+--- a/apps/web/src/lib/contextWindow.test.ts
++++ b/apps/web/src/lib/contextWindow.test.ts
+@@ -47,9 +47,27 @@ const compactionEntry = (providerThreadId: string | null) =>
+ 
+ describe("V2 context window presentation", () => {
+   it("uses retained compaction token data when available", () => {
+-    const snapshot = deriveLatestContextWindowSnapshot([compactionEntry(null)]);
++    const entries = [
++      {
++        item: {
++          ...compactionEntry(null).item,
++          startedAt: DateTime.makeUnsafe("2026-06-19T23:59:00.000Z"),
++          completedAt: DateTime.makeUnsafe("2026-06-20T00:00:00.000Z"),
++        },
++      },
++    ] as const;
++    const snapshot = deriveLatestContextWindowSnapshot(entries);
++    expect(snapshot?.updatedAt).toBe("2026-06-20T00:00:00.000Z");
++    for (const status of ["running", "failed"] as const) {
++      expect(
++        deriveLatestContextWindowSnapshot(
++          entries.map((entry) => ({ item: { ...entry.item, status } })),
++        ),
++      ).toBeNull();
++    }
+     expect(snapshot?.usedTokens).toBe(2_000);
+-    expect(snapshot?.totalProcessedTokens).toBe(10_000);
++    expect(snapshot?.totalProcessedTokens).toBeNull();
++    expect(snapshot?.compactsAutomatically).toBeNull();
+   });
+ 
+   it("ignores a retired provider thread's compaction after a provider switch", () => {
+@@ -308,3 +326,40 @@ describe("latestProviderTurnTokenUsage", () => {
+     }
+   });
+ });
++
++describe("compaction policy metadata", () => {
++  it("preserves reported policy alongside newer turn occupancy", () => {
++    const snapshot = deriveLatestContextWindowSnapshot(
++      [],
++      {
++        usedTokens: 360_000,
++        maxTokens: 1_000_000,
++        updatedAt: "2026-10-10T12:00:00.000Z",
++      },
++      {
++        id: ProviderThreadId.make("policy-thread"),
++        contextUsage: {
++          usedTokens: 300_000,
++          autoCompactThreshold: 400_000,
++          compactsAutomatically: true,
++        },
++        updatedAt: DateTime.makeUnsafe("2026-10-10T11:00:00.000Z"),
++      },
++    );
++    expect(snapshot).toMatchObject({
++      usedTokens: 360_000,
++      usedPercentage: 36,
++      autoCompactThreshold: 400_000,
++      compactsAutomatically: true,
++    });
++  });
++
++  it("does not assume automatic compaction from a usage report", () => {
++    expect(
++      deriveLatestContextWindowSnapshot([], {
++        usedTokens: 42_000,
++        updatedAt: "2026-10-10T12:00:00.000Z",
++      }),
++    ).toMatchObject({ compactsAutomatically: null, autoCompactThreshold: null });
++  });
++});
+diff --git a/packages/client-runtime/src/state/contextWindow.ts b/packages/client-runtime/src/state/contextWindow.ts
+index 37374b79b1..8947c26419 100644
+--- a/packages/client-runtime/src/state/contextWindow.ts
++++ b/packages/client-runtime/src/state/contextWindow.ts
+@@ -101,7 +101,8 @@ function compactionSnapshot(
+     maxTokens !== null && maxTokens > 0 ? Math.min(100, (usedTokens / maxTokens) * 100) : null;
+   return {
+     usedTokens,
+-    totalProcessedTokens: asFiniteNumber(item.beforeTokenCount),
++    // The pre-compaction count is not a processed total.
++    totalProcessedTokens: null,
+     maxTokens,
+     remainingTokens: maxTokens !== null ? Math.max(0, Math.round(maxTokens - usedTokens)) : null,
+     usedPercentage,
+@@ -117,7 +118,8 @@ function compactionSnapshot(
+     lastReasoningOutputTokens: null,
+     toolUses: null,
+     durationMs: null,
+-    compactsAutomatically: true,
++    // A compaction record says nothing about the automatic policy.
++    compactsAutomatically: null,
+     autoCompactThreshold: null,
+     cost: null,
+     updatedAt,
+@@ -181,8 +183,12 @@ export function deriveLatestContextWindowSnapshot(
+       lastReasoningOutputTokens: null,
+       toolUses: null,
+       durationMs: null,
+-      compactsAutomatically: true,
+-      autoCompactThreshold: liveUsage.autoCompactThreshold ?? null,
++      // A usage report alone does not say compaction is automatic; keep the thread's reported policy.
++      compactsAutomatically: providerThread?.contextUsage?.compactsAutomatically ?? null,
++      autoCompactThreshold:
++        liveUsage.autoCompactThreshold ??
++        providerThread?.contextUsage?.autoCompactThreshold ??
++        null,
+       cost: null,
+       updatedAt: liveUsage.updatedAt,
+     };
+@@ -224,13 +230,18 @@ export function deriveLatestContextWindowSnapshot(
+   }
+   for (let index = entries.length - 1; index >= 0; index -= 1) {
+     const item = entries[index]?.item;
+-    if (item?.type !== "compaction" || isRetiredProviderThreadItem(item, providerThread)) {
++    // A running or failed compaction has not produced the context it reports.
++    if (
++      item?.type !== "compaction" ||
++      item.status !== "completed" ||
++      isRetiredProviderThreadItem(item, providerThread)
++    ) {
+       continue;
+     }
+     const snapshot = compactionSnapshot(
+       item,
+       null,
+-      DateTime.formatIso(item.startedAt ?? item.updatedAt),
++      DateTime.formatIso(item.completedAt ?? item.updatedAt),
+     );
+     if (snapshot !== null) return snapshot;
+   }

@@ -27,7 +27,7 @@ different releases build from the same checkout.
 
 | T3 Code | Patch set | Status |
 | --- | --- | --- |
-| 0.1.13 | `patches/0.1.13` | being ported |
+| 0.1.13 | `patches/0.1.13` | supported |
 | 0.1.12 | `patches/0.1.12` | supported |
 
 A release without its own set is built from the closest older set. If those patches

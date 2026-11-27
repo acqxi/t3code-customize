@@ -1,0 +1,3885 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: acqxi <kacqxi@gmail.com>
+Date: Fri, 27 Nov 2026 01:35:59 +0800
+Subject: [PATCH 06/12] Performance metrics: composer, per-reply history
+
+Stats for nerds turn performance in the web UI, coded against the
+OrchestrationV2TurnPerformance contract.
+
+- TurnPerformance.logic.ts: one provider turn -> metric rows (ttft, ttfa,
+  liveTps, avgTps, peakTps, tokens, cache hit rate, context, tool time,
+  turn time, provider, model, effort, speed), each exact / estimated /
+  unavailable with a tooltip reason. avgTps uses generation windows only
+  (exact only for provider_exact), legacy responseThroughput only under
+  its own label. Client-side live tokens/s sampler (2 s window, keyed by
+  thread + provider turn).
+- Composer: one footer line while it fits, usage limits on the left and
+  the running turn (elapsed, live tok/s, TTFT/TTFA), the previous
+  completed turn and context on the right, each with a full breakdown on
+  hover. Each side is a clipped line in priority order, so a narrow
+  window drops the lowest-priority items before the right side wraps.
+  The stats line hands its tok/s and cache chips to the turn summaries
+  when they are shown.
+- Timeline: the provider turn that produced each reply, right-aligned on
+  the reply's action row (copy, fork, reply, time), with the breakdown on
+  hover. It stays visible when the actions fade out and drops metrics in
+  the composer's priority order instead of wrapping.
+- Details: a compact grid instead of one row per metric. The provider
+  icon, model, effort and speed head it as badges; short labels from the
+  catalog (TTFT, Avg, Out, Hit%, ...) group timing, speed and tokens in
+  three columns with compact numbers (332k, 1.8k); context is one bar.
+  Each cell opens its full name, exact value and how it was measured on
+  hover, click, tap or keyboard.
+- Both follow the composer and per-reply settings and the hidden metric
+  list (all shown by default). New catalog keys in every web locale.
+---
+ apps/web/src/components/ChatView.tsx          | 275 +++---
+ .../web/src/components/chat/ComposerStats.tsx |  63 +-
+ .../components/chat/TimelineAssistantRows.tsx |  83 +-
+ .../chat/TurnPerformance.catalog.ts           | 120 +++
+ .../chat/TurnPerformance.logic.test.ts        | 795 ++++++++++++++++
+ .../components/chat/TurnPerformance.logic.ts  | 863 ++++++++++++++++++
+ .../src/components/chat/TurnPerformance.tsx   | 601 ++++++++++++
+ apps/web/src/i18n/translations/de.json        |  74 +-
+ apps/web/src/i18n/translations/en.json        |  74 +-
+ apps/web/src/i18n/translations/es.json        |  74 +-
+ apps/web/src/i18n/translations/fr.json        |  74 +-
+ apps/web/src/i18n/translations/ja.json        |  74 +-
+ apps/web/src/i18n/translations/ko.json        |  74 +-
+ apps/web/src/i18n/translations/pt-BR.json     |  74 +-
+ apps/web/src/i18n/translations/ru.json        |  74 +-
+ apps/web/src/i18n/translations/sv.json        |  74 +-
+ apps/web/src/i18n/translations/zh.json        |  74 +-
+ apps/web/src/state/entities.ts                |   5 +
+ 18 files changed, 3375 insertions(+), 170 deletions(-)
+ create mode 100644 apps/web/src/components/chat/TurnPerformance.catalog.ts
+ create mode 100644 apps/web/src/components/chat/TurnPerformance.logic.test.ts
+ create mode 100644 apps/web/src/components/chat/TurnPerformance.logic.ts
+ create mode 100644 apps/web/src/components/chat/TurnPerformance.tsx
+
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index 2ccfb7c4e9..1973773e7b 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -366,6 +366,17 @@ import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEn
+ import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
+ import { ComposerStats } from "./chat/ComposerStats";
+ import { selectComposerStatsTurns, selectRecordedCompactions } from "./chat/ComposerStats.logic";
++import {
++  ComposerTurnPerformance,
++  TurnPerformanceTimelineCtx,
++  type TurnPerformanceTimelineValue,
++} from "./chat/TurnPerformance";
++import {
++  hiddenMetricSet,
++  resolveTurnPerformanceSource,
++  selectComposerPerformanceTurns,
++  type TurnPerformanceSource,
++} from "./chat/TurnPerformance.logic";
+ import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+ import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
+ import { ComposerSurface } from "./chat/ComposerSurface";
+@@ -1665,6 +1676,41 @@ export default function ChatView(props: ChatViewProps) {
+       ),
+     };
+   })();
++  // Stats for nerds turn performance: only this thread's own provider turns, keyed by turn id.
++  const turnPerformance = (() => {
++    if (!settings.statsForNerdsEnabled || serverProjection === null) return null;
++    const providerNameOf = (instanceId: string | undefined) => {
++      const provider = providerStatuses.find((candidate) => candidate.instanceId === instanceId);
++      return provider?.displayName?.trim() || instanceId || "This provider";
++    };
++    const accentColorOf = (instanceId: string | undefined) =>
++      providerStatuses.find((candidate) => candidate.instanceId === instanceId)?.accentColor;
++    const sourceOf = (turn: (typeof serverProjection.providerTurns)[number]) =>
++      resolveTurnPerformanceSource(serverProjection, turn, providerNameOf, accentColorOf);
++    const hiddenMetrics = hiddenMetricSet(settings.statsForNerdsHiddenMetrics);
++    const { current, previous } = selectComposerPerformanceTurns(
++      selectComposerStatsTurns(serverProjection),
++    );
++    const composer = settings.statsForNerdsShowInComposer
++      ? {
++          current: current === null ? null : sourceOf(current),
++          previous: previous === null ? null : sourceOf(previous),
++        }
++      : null;
++    const timeline: TurnPerformanceTimelineValue | null = settings.statsForNerdsShowPerReply
++      ? {
++          threadId: serverProjection.thread.id,
++          sources: new Map(
++            serverProjection.providerTurns.map((turn): [typeof turn.id, TurnPerformanceSource] => [
++              turn.id,
++              sourceOf(turn),
++            ]),
++          ),
++          hiddenMetrics,
++        }
++      : null;
++    return { composer, timeline, hiddenMetrics };
++  })();
+   const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection);
+   const activeWorkStartedAt =
+     deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
+@@ -3727,114 +3773,116 @@ export default function ChatView(props: ChatViewProps) {
+               className="relative flex min-h-0 flex-1 flex-col bg-background"
+             >
+               <WorkspaceMutationIdContext value={workspaceMutationId}>
+-                <ThreadTimeline
+-                  pendingApprovals={pendingApprovals}
+-                  heldApprovalRequestIds={heldApprovalRequestIds}
+-                  respondingRequestIds={respondingRequestIds}
+-                  onRespondToApproval={onRespondToApprovalStable}
+-                  canOperateThread={canOperateThread}
+-                  threadDetailRef={routeThreadDetailRef}
+-                  entriesInput={timelineEntriesInput}
+-                  draftEntries={isServerThread ? null : draftTimelineEntries}
+-                  activeThreadKey={activeThreadKey}
+-                  syncing={threadSyncPhase !== null}
+-                  detailLoading={threadDetailLoading}
+-                  citationRequest={citationRequest}
+-                  citationHistory={citationHistory}
+-                  onCiteAssistantText={citeAssistantTextStable}
+-                  onReplyToResponse={replyToResponseStable}
+-                  {...(activeProject && !runsOutsideHostCheckout
+-                    ? { onRunShellCommand: parentPanel?.runShellCommand ?? runShellCommandStable }
+-                    : {})}
+-                  isWorking={isWorking}
+-                  runlessWorkActive={runlessWorkStartedAt !== null}
+-                  isCompacting={isCompacting}
+-                  awaitingUser={
+-                    activePendingApproval !== null
+-                      ? "approval"
+-                      : activePendingUserInput !== null ||
+-                          // A secret request has no runtime request; the shell carries it.
+-                          activeThreadShell?.hasPendingUserInput === true
+-                        ? "input"
++                <TurnPerformanceTimelineCtx value={turnPerformance?.timeline ?? null}>
++                  <ThreadTimeline
++                    pendingApprovals={pendingApprovals}
++                    heldApprovalRequestIds={heldApprovalRequestIds}
++                    respondingRequestIds={respondingRequestIds}
++                    onRespondToApproval={onRespondToApprovalStable}
++                    canOperateThread={canOperateThread}
++                    threadDetailRef={routeThreadDetailRef}
++                    entriesInput={timelineEntriesInput}
++                    draftEntries={isServerThread ? null : draftTimelineEntries}
++                    activeThreadKey={activeThreadKey}
++                    syncing={threadSyncPhase !== null}
++                    detailLoading={threadDetailLoading}
++                    citationRequest={citationRequest}
++                    citationHistory={citationHistory}
++                    onCiteAssistantText={citeAssistantTextStable}
++                    onReplyToResponse={replyToResponseStable}
++                    {...(activeProject && !runsOutsideHostCheckout
++                      ? { onRunShellCommand: parentPanel?.runShellCommand ?? runShellCommandStable }
++                      : {})}
++                    isWorking={isWorking}
++                    runlessWorkActive={runlessWorkStartedAt !== null}
++                    isCompacting={isCompacting}
++                    awaitingUser={
++                      activePendingApproval !== null
++                        ? "approval"
++                        : activePendingUserInput !== null ||
++                            // A secret request has no runtime request; the shell carries it.
++                            activeThreadShell?.hasPendingUserInput === true
++                          ? "input"
++                          : null
++                    }
++                    awaitingRequestId={
++                      activePendingApproval?.requestId ?? activePendingUserInput?.requestId ?? null
++                    }
++                    activeTurnStartedAt={activeWorkStartedAt}
++                    providerStartingLabel={
++                      providerStartingRun?.providerStartingLabelMsg
++                        ? messages(providerStartingRun.providerStartingLabelMsg)
+                         : null
+-                  }
+-                  awaitingRequestId={
+-                    activePendingApproval?.requestId ?? activePendingUserInput?.requestId ?? null
+-                  }
+-                  activeTurnStartedAt={activeWorkStartedAt}
+-                  providerStartingLabel={
+-                    providerStartingRun?.providerStartingLabelMsg
+-                      ? messages(providerStartingRun.providerStartingLabelMsg)
+-                      : null
+-                  }
+-                  providerStarting={
+-                    providerStartingRun?.providerStartingLabelMsg
+-                      ? (providerStartingRun.providerStarting ?? null)
+-                      : null
+-                  }
+-                  worktreeSetup={worktreeSetup}
+-                  onCancelWorktreeSetup={onCancelWorktreeSetupStable}
+-                  retryableWorkspacePreparationRunIds={retryableWorkspacePreparationRunIds}
+-                  onRetryWorkspacePreparation={onRetryWorkspacePreparationStable}
+-                  {...(draftId
+-                    ? { onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocallyStable }
+-                    : {})}
+-                  {...(onOpenWorktreeSetupTerminal ? { onOpenWorktreeSetupTerminal } : {})}
+-                  isPreparingWorktree={isPreparingWorktree}
+-                  footer={timelineFooter}
+-                  listRef={legendListRef}
+-                  runs={serverProjection?.runs ?? []}
+-                  latestRun={activeActivityRun}
+-                  usageLimitRunId={usageLimitRunId}
+-                  announcedRun={announcedRun(activeActivityRun, serverProjection?.runs ?? [])}
+-                  detailBehindShell={isDetailBehindShell(
+-                    activeLatestRun,
+-                    activeThreadShell?.latestRun ?? null,
+-                  )}
+-                  runningRunId={activeRunningTurnId}
+-                  turnDiffSummaries={turnDiffSummaries}
+-                  activeThreadEnvironmentId={
+-                    displayedThreadRef?.environmentId ?? activeThread.environmentId
+-                  }
+-                  routeThreadKey={displayedTimelineKey}
+-                  displayThreadKey={displayedTimelineKey}
+-                  announceTurnStatus={!isProviderSubagent}
+-                  onOpenToolDiff={parentPanel?.openToolDiff ?? onOpenToolDiffStable}
+-                  // A fork would promote the side chat.
+-                  {...(embedded ? {} : { onForkFromRun: onForkFromRunStable })}
+-                  onOpenThread={onOpenRelatedThreadStable}
+-                  parentThreadLink={parentThreadLink}
+-                  workflowOpening={workflowOpening}
+-                  supportsConversationRollback={supportsConversationRollback}
+-                  threadStartCheckpointAvailable={threadStartCheckpointAvailable}
+-                  availableRevertTurnCounts={availableRevertTurnCounts}
+-                  onRevertToTurnCount={onRevertTimelineTurnStable}
+-                  onUseArtifactTemplate={insertArtifactTemplateStable}
+-                  onSendAppMessage={sendAppMessageStable}
+-                  isRevertingCheckpoint={isRevertingCheckpoint}
+-                  onImageExpand={onExpandTimelineImageStable}
+-                  onFileOpen={openFileAttachmentStable}
+-                  onFileDownload={downloadFileAttachmentStable}
+-                  markdownCwd={gitCwd ?? undefined}
+-                  resolvedTheme={resolvedTheme}
+-                  timestampFormat={timestampFormat}
+-                  workspaceRoot={activeWorkspaceRoot}
+-                  skills={timelineSkills}
+-                  anchorMessageId={timelineAnchorMessageId}
+-                  onAnchorReady={onTimelineAnchorReadyStable}
+-                  onAnchorSizeChanged={onTimelineAnchorSizeChangedStable}
+-                  contentInsetEndAdjustment={composerTimelineInset}
+-                  liveFollowEnabled={timelineLiveFollowEnabled}
+-                  onIsAtEndChange={onIsAtEndChangeStable}
+-                  onViewportAttach={attachTimelineViewport}
+-                  onFooterGrow={onTimelineFooterGrowStable}
+-                  hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
+-                  emptyPlaceholderInset={composerReservedHeight}
+-                  topFadeEnabled={!hasTimelineTopBanner}
+-                  {...(threadHistoryControls === undefined
+-                    ? {}
+-                    : { historyControls: threadHistoryControls })}
+-                />
++                    }
++                    providerStarting={
++                      providerStartingRun?.providerStartingLabelMsg
++                        ? (providerStartingRun.providerStarting ?? null)
++                        : null
++                    }
++                    worktreeSetup={worktreeSetup}
++                    onCancelWorktreeSetup={onCancelWorktreeSetupStable}
++                    retryableWorkspacePreparationRunIds={retryableWorkspacePreparationRunIds}
++                    onRetryWorkspacePreparation={onRetryWorkspacePreparationStable}
++                    {...(draftId
++                      ? { onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocallyStable }
++                      : {})}
++                    {...(onOpenWorktreeSetupTerminal ? { onOpenWorktreeSetupTerminal } : {})}
++                    isPreparingWorktree={isPreparingWorktree}
++                    footer={timelineFooter}
++                    listRef={legendListRef}
++                    runs={serverProjection?.runs ?? []}
++                    latestRun={activeActivityRun}
++                    usageLimitRunId={usageLimitRunId}
++                    announcedRun={announcedRun(activeActivityRun, serverProjection?.runs ?? [])}
++                    detailBehindShell={isDetailBehindShell(
++                      activeLatestRun,
++                      activeThreadShell?.latestRun ?? null,
++                    )}
++                    runningRunId={activeRunningTurnId}
++                    turnDiffSummaries={turnDiffSummaries}
++                    activeThreadEnvironmentId={
++                      displayedThreadRef?.environmentId ?? activeThread.environmentId
++                    }
++                    routeThreadKey={displayedTimelineKey}
++                    displayThreadKey={displayedTimelineKey}
++                    announceTurnStatus={!isProviderSubagent}
++                    onOpenToolDiff={parentPanel?.openToolDiff ?? onOpenToolDiffStable}
++                    // A fork would promote the side chat.
++                    {...(embedded ? {} : { onForkFromRun: onForkFromRunStable })}
++                    onOpenThread={onOpenRelatedThreadStable}
++                    parentThreadLink={parentThreadLink}
++                    workflowOpening={workflowOpening}
++                    supportsConversationRollback={supportsConversationRollback}
++                    threadStartCheckpointAvailable={threadStartCheckpointAvailable}
++                    availableRevertTurnCounts={availableRevertTurnCounts}
++                    onRevertToTurnCount={onRevertTimelineTurnStable}
++                    onUseArtifactTemplate={insertArtifactTemplateStable}
++                    onSendAppMessage={sendAppMessageStable}
++                    isRevertingCheckpoint={isRevertingCheckpoint}
++                    onImageExpand={onExpandTimelineImageStable}
++                    onFileOpen={openFileAttachmentStable}
++                    onFileDownload={downloadFileAttachmentStable}
++                    markdownCwd={gitCwd ?? undefined}
++                    resolvedTheme={resolvedTheme}
++                    timestampFormat={timestampFormat}
++                    workspaceRoot={activeWorkspaceRoot}
++                    skills={timelineSkills}
++                    anchorMessageId={timelineAnchorMessageId}
++                    onAnchorReady={onTimelineAnchorReadyStable}
++                    onAnchorSizeChanged={onTimelineAnchorSizeChangedStable}
++                    contentInsetEndAdjustment={composerTimelineInset}
++                    liveFollowEnabled={timelineLiveFollowEnabled}
++                    onIsAtEndChange={onIsAtEndChangeStable}
++                    onViewportAttach={attachTimelineViewport}
++                    onFooterGrow={onTimelineFooterGrowStable}
++                    hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
++                    emptyPlaceholderInset={composerReservedHeight}
++                    topFadeEnabled={!hasTimelineTopBanner}
++                    {...(threadHistoryControls === undefined
++                      ? {}
++                      : { historyControls: threadHistoryControls })}
++                  />
++                </TurnPerformanceTimelineCtx>
+               </WorkspaceMutationIdContext>
+ 
+               {showScrollToBottom && !isThreadFindActive && (
+@@ -4200,6 +4248,19 @@ export default function ChatView(props: ChatViewProps) {
+                             getDisabledReason: getModelDisabledReason,
+                             onSwitch: onProviderModelSelectStable,
+                           }}
++                          showTurnChips={turnPerformance?.composer == null}
++                          performance={
++                            turnPerformance?.composer != null &&
++                            (turnPerformance.composer.current !== null ||
++                              turnPerformance.composer.previous !== null) ? (
++                              <ComposerTurnPerformance
++                                threadRef={routeThreadDetailRef}
++                                current={turnPerformance.composer.current}
++                                previous={turnPerformance.composer.previous}
++                                hiddenMetrics={turnPerformance.hiddenMetrics}
++                              />
++                            ) : null
++                          }
+                         />
+                       )}
+                       <div
+diff --git a/apps/web/src/components/chat/ComposerStats.tsx b/apps/web/src/components/chat/ComposerStats.tsx
+index b81c19079d..4273e4ef05 100644
+--- a/apps/web/src/components/chat/ComposerStats.tsx
++++ b/apps/web/src/components/chat/ComposerStats.tsx
+@@ -240,7 +240,7 @@ function UsageLimitsSummary({
+           <button
+             type="button"
+             aria-label="Usage limit details"
+-            className="inline-flex flex-wrap items-center gap-x-4 rounded-sm text-left -outline-offset-2"
++            className="flex h-4 min-w-0 flex-wrap items-center gap-x-4 overflow-hidden rounded-sm text-left -outline-offset-2"
+           />
+         }
+       >
+@@ -319,13 +319,13 @@ function SubscriptionSwitchChip({
+             onClick={() => {
+               if (disabledReason === null) onSwitch(suggestion.instanceId, suggestion.model);
+             }}
+-            className={`inline-flex items-center gap-1 rounded-sm border px-1.5 -outline-offset-2 ${tone} ${
++            className={`inline-flex min-w-0 max-w-56 shrink-0 items-center gap-1 rounded-sm border px-1.5 -outline-offset-2 ${tone} ${
+               disabledReason !== null ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+             }`}
+           />
+         }
+       >
+-        <span>
++        <span className="truncate">
+           {suggestion.modelName} on {suggestion.providerName}
+         </span>
+         <span aria-hidden="true">→</span>
+@@ -353,6 +353,8 @@ export function ComposerStats({
+   compactDisabledReason,
+   isCompacting,
+   subscriptionSwitch = null,
++  showTurnChips = true,
++  performance = null,
+ }: {
+   context: ContextWindowSnapshot | null;
+   turn: OrchestrationV2ProviderTurn | null;
+@@ -365,6 +367,10 @@ export function ComposerStats({
+   compactDisabledReason: string | null;
+   isCompacting: boolean;
+   subscriptionSwitch?: SubscriptionSwitchInput | null;
++  /** False when the turn performance in this line shows this turn's rate and cache instead. */
++  showTurnChips?: boolean;
++  /** Turn performance, placed on the right next to context. */
++  performance?: ReactNode;
+ }) {
+   const compaction = deriveContextCompaction(context, contextDriver, configuredClaudeThreshold);
+   const responseRate = deriveResponseRate(turn);
+@@ -386,6 +392,7 @@ export function ComposerStats({
+     compactions.length === 0 &&
+     selectComposerLimitWindows(usageLimits?.limits).length === 0 &&
+     subscriptionSwitch === null &&
++    performance === null &&
+     compactDisabled
+   )
+     return null;
+@@ -399,7 +406,7 @@ export function ComposerStats({
+       : `${estimated ? "≈" : ""}${responseRate.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+   // T3 already shows turn time inline in the timeline, so the line shows tok/s and
+   // keeps elapsed time in the details popover.
+-  if (turn !== null && (hasElapsed || hasTokens || rateText !== null)) {
++  if (showTurnChips && turn !== null && (hasElapsed || hasTokens || rateText !== null)) {
+     stats.push({
+       key: "turn",
+       node: (
+@@ -468,7 +475,7 @@ export function ComposerStats({
+       ),
+     });
+   }
+-  if (cachePercentage !== null) {
++  if (showTurnChips && cachePercentage !== null) {
+     stats.push({
+       key: "cache",
+       node: (
+@@ -637,29 +644,43 @@ export function ComposerStats({
+     });
+   }
+ 
++  // One line while it fits: limits on the left, turn performance and context on the right. Each
++  // side drops its lowest-priority items before the right side wraps below.
+   return (
+     <div
+       data-composer-stats="true"
+       aria-label="Stats for nerds"
+       className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 pt-1.5 text-2xs leading-4 text-muted-foreground tabular-nums"
+     >
+-      {usageLimits && (
+-        <UsageLimitsSummary limits={usageLimits.limits} providerName={usageLimits.providerName} />
++      {(usageLimits || subscriptionSwitch) && (
++        <div className="flex min-w-0 max-w-max flex-[1_1_0%] items-center gap-x-3">
++          {usageLimits && (
++            <UsageLimitsSummary
++              limits={usageLimits.limits}
++              providerName={usageLimits.providerName}
++            />
++          )}
++          {subscriptionSwitch && <SubscriptionSwitchChip {...subscriptionSwitch} />}
++        </div>
+       )}
+-      {subscriptionSwitch && <SubscriptionSwitchChip {...subscriptionSwitch} />}
+-      {stats.length > 0 && (
+-        <span className="ms-auto inline-flex flex-wrap items-center gap-x-2.5">
+-          {stats.map(({ key, node }, index) => (
+-            <Fragment key={key}>
+-              {index > 0 && (
+-                <span aria-hidden="true" className="text-muted-foreground/40">
+-                  ·
+-                </span>
+-              )}
+-              {node}
+-            </Fragment>
+-          ))}
+-        </span>
++      {(performance !== null || stats.length > 0) && (
++        <div className="ms-auto flex min-w-0 flex-[1_1_14rem] items-center justify-end gap-x-4">
++          {performance}
++          {stats.length > 0 && (
++            <span className="inline-flex shrink-0 items-center gap-x-2.5">
++              {stats.map(({ key, node }, index) => (
++                <Fragment key={key}>
++                  {index > 0 && (
++                    <span aria-hidden="true" className="text-muted-foreground/40">
++                      ·
++                    </span>
++                  )}
++                  {node}
++                </Fragment>
++              ))}
++            </span>
++          )}
++        </div>
+       )}
+     </div>
+   );
+diff --git a/apps/web/src/components/chat/TimelineAssistantRows.tsx b/apps/web/src/components/chat/TimelineAssistantRows.tsx
+index cf3796d786..e36e23d4f7 100644
+--- a/apps/web/src/components/chat/TimelineAssistantRows.tsx
++++ b/apps/web/src/components/chat/TimelineAssistantRows.tsx
+@@ -3,7 +3,7 @@ import { MessageId, type TurnItemId } from "@t3tools/contracts";
+ import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
+ import { agentWorkingDirectories } from "@t3tools/client-runtime/workspace-basename-lookup";
+ import { T, useGT, useMessages } from "gt-react";
+-import { use, useState } from "react";
++import { use, useState, type ReactNode } from "react";
+ import { type ChatMessage } from "../../types";
+ import ChatMarkdown from "../ChatMarkdown";
+ import { GitForkIcon, ReplyIcon } from "lucide-react";
+@@ -24,6 +24,7 @@ import { useV2ItemSupport } from "../../state/v2ItemSupport";
+ import { TimelineRowCtx, TimelineRowActivityCtx, type TimelineRow } from "./timelineRowContext";
+ import { MESSAGE_HEADING_LEVEL, MessageAuthorHeading } from "./TimelineRowParts";
+ import { SharedTooltipTrigger } from "../ui/shared-tooltip";
++import { ReplyTurnPerformance } from "./TurnPerformance";
+ 
+ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+   const ctx = use(TimelineRowCtx);
+@@ -82,6 +83,12 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
+             message={row.message}
+             showCopyButton={row.showAssistantCopyButton}
+             copyStreaming={row.assistantCopyStreaming}
++            trailing={
++              <ReplyTurnPerformance
++                sourceThreadId={row.projectedItem?.sourceThreadId}
++                providerTurnId={row.projectedItem?.item.providerTurnId}
++              />
++            }
+           />
+         ) : null}
+       </div>
+@@ -188,6 +195,12 @@ export function AssistantMetaTimelineRow({
+         showCopyButton={row.showAssistantCopyButton}
+         copyStreaming={row.assistantCopyStreaming}
+         alwaysVisible
++        trailing={
++          <ReplyTurnPerformance
++            sourceThreadId={row.projectedItem?.sourceThreadId}
++            providerTurnId={row.projectedItem?.item.providerTurnId}
++          />
++        }
+       />
+     </div>
+   );
+@@ -200,6 +213,7 @@ function AssistantMessageMeta({
+   showCopyButton,
+   copyStreaming,
+   alwaysVisible = false,
++  trailing = null,
+ }: {
+   className?: string;
+   projectedItem?: Extract<TimelineRow, { kind: "message" }>["projectedItem"];
+@@ -207,42 +221,47 @@ function AssistantMessageMeta({
+   showCopyButton: boolean;
+   copyStreaming: boolean;
+   alwaysVisible?: boolean;
++  /** Shown right-aligned on the same row and always visible, such as the reply's turn stats. */
++  trailing?: ReactNode;
+ }) {
+   const ctx = use(TimelineRowCtx);
+   const m = useMessages();
+ 
+   return (
+-    <div
+-      className={cn(
+-        "flex items-center gap-2 text-xs tabular-nums transition-opacity duration-200",
+-        alwaysVisible
+-          ? "opacity-100"
+-          : "opacity-0 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover/assistant:opacity-100",
+-        className,
+-      )}
+-    >
+-      {projectedItem && projectedItem.item.status !== "completed" ? (
+-        <AssistantStatusBadge status={projectedItem.item.status} />
+-      ) : null}
+-      <AssistantCopyButton
+-        message={message}
+-        showCopyButton={showCopyButton}
+-        streaming={copyStreaming}
+-      />
+-      {projectedItem?.item.type === "assistant_message" ? (
+-        <AssistantForkButton projectedItem={projectedItem} />
+-      ) : null}
+-      {!message.streaming && projectedItem ? (
+-        <AssistantReplyButton message={message} itemId={projectedItem.sourceItemId} />
+-      ) : null}
+-      {!message.streaming && (
+-        <SharedTooltipTrigger
+-          render={<p className="text-muted-foreground text-xs tabular-nums" />}
+-          label={formatChatTimestampTooltip(message.updatedAt, ctx.timestampFormat, m)}
+-        >
+-          {formatDayAwareTimestamp(message.updatedAt, ctx.timestampFormat, undefined, undefined, m)}
+-        </SharedTooltipTrigger>
+-      )}
++    <div className={cn("flex min-w-0 items-center gap-3", className)}>
++      {/* Only the actions fade in on hover; they keep their space, so nothing shifts. */}
++      <div
++        className={cn(
++          "flex shrink-0 items-center gap-2 text-xs tabular-nums transition-opacity duration-200",
++          alwaysVisible
++            ? "opacity-100"
++            : "opacity-0 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover/assistant:opacity-100",
++        )}
++      >
++        {projectedItem && projectedItem.item.status !== "completed" ? (
++          <AssistantStatusBadge status={projectedItem.item.status} />
++        ) : null}
++        <AssistantCopyButton
++          message={message}
++          showCopyButton={showCopyButton}
++          streaming={copyStreaming}
++        />
++        {projectedItem?.item.type === "assistant_message" ? (
++          <AssistantForkButton projectedItem={projectedItem} />
++        ) : null}
++        {!message.streaming && projectedItem ? (
++          <AssistantReplyButton message={message} itemId={projectedItem.sourceItemId} />
++        ) : null}
++        {!message.streaming && (
++          <SharedTooltipTrigger
++            render={<p className="text-muted-foreground text-xs tabular-nums" />}
++            label={formatChatTimestampTooltip(message.updatedAt, ctx.timestampFormat, m)}
++          >
++            {formatDayAwareTimestamp(message.updatedAt, ctx.timestampFormat, undefined, undefined, m)}
++          </SharedTooltipTrigger>
++        )}
++      </div>
++      {trailing}
+     </div>
+   );
+ }
+diff --git a/apps/web/src/components/chat/TurnPerformance.catalog.ts b/apps/web/src/components/chat/TurnPerformance.catalog.ts
+new file mode 100644
+index 0000000000..eee613334e
+--- /dev/null
++++ b/apps/web/src/components/chat/TurnPerformance.catalog.ts
+@@ -0,0 +1,120 @@
++import { msg } from "gt-react";
++
++import type { TurnPerformanceMetricId } from "./TurnPerformance.logic";
++
++/** Labels for Stats for nerds turn metrics; resolve with `useMessages()`. */
++export const TURN_PERFORMANCE_METRIC_LABELS: Record<
++  TurnPerformanceMetricId,
++  {
++    /** Grid cell label, learned over time; the full label is in the cell's tooltip. */
++    readonly abbr: string;
++    readonly label: string;
++    readonly short: string;
++    readonly description: string;
++  }
++> = {
++  ttft: {
++    abbr: msg("TTFT", { $context: "short label of a turn performance metric" }),
++    label: msg("Time to first token"),
++    short: msg("TTFT"),
++    description: msg("Request sent to the first generated token, including reasoning."),
++  },
++  ttfa: {
++    abbr: msg("TTFA", { $context: "short label of a turn performance metric" }),
++    label: msg("Time to first answer"),
++    short: msg("TTFA"),
++    description: msg("Request sent to the first visible answer text."),
++  },
++  liveTps: {
++    abbr: msg("Live", { $context: "short label of a turn performance metric" }),
++    label: msg("Live tokens/s"),
++    short: msg("live"),
++    description: msg("Estimated rate over the last 2 seconds while a turn runs."),
++  },
++  avgTps: {
++    abbr: msg("Avg", { $context: "short label of a turn performance metric" }),
++    label: msg("Average tokens/s"),
++    short: msg("avg"),
++    description: msg("Generation tokens over active generation time, never over turn duration."),
++  },
++  peakTps: {
++    abbr: msg("Peak", { $context: "short label of a turn performance metric" }),
++    label: msg("Peak tokens/s"),
++    short: msg("peak"),
++    description: msg("Highest estimated rate over a 2 second window."),
++  },
++  inputTokens: {
++    abbr: msg("In", { $context: "short label of a turn performance metric" }),
++    label: msg("Input tokens"),
++    short: msg("in"),
++    description: msg("Provider-reported input, including cache reads and writes."),
++  },
++  outputTokens: {
++    abbr: msg("Out", { $context: "short label of a turn performance metric" }),
++    label: msg("Output tokens"),
++    short: msg("out"),
++    description: msg("Provider-reported output, including reasoning."),
++  },
++  reasoningTokens: {
++    abbr: msg("Rsn", { $context: "short label of a turn performance metric" }),
++    label: msg("Reasoning tokens"),
++    short: msg("reasoning"),
++    description: msg("Provider-reported reasoning tokens, when reported separately."),
++  },
++  cachedTokens: {
++    abbr: msg("Cache", { $context: "short label of a turn performance metric" }),
++    label: msg("Cached tokens"),
++    short: msg("cached in"),
++    description: msg("Input served from the prompt cache."),
++  },
++  cacheHitRate: {
++    abbr: msg("Hit%", { $context: "short label of a turn performance metric" }),
++    label: msg("Cache hit rate"),
++    short: msg("cached"),
++    description: msg("Cached input divided by total input."),
++  },
++  context: {
++    abbr: msg("Ctx", { $context: "short label of a turn performance metric" }),
++    label: msg("Context usage"),
++    short: msg("context"),
++    description: msg("Context occupancy and window size."),
++  },
++  toolTime: {
++    abbr: msg("Tools", { $context: "short label of a turn performance metric" }),
++    label: msg("Tool time"),
++    short: msg("tools"),
++    description: msg("Wall-clock time waiting on tools, with overlaps merged."),
++  },
++  turnTime: {
++    abbr: msg("Turn", { $context: "short label of a turn performance metric" }),
++    label: msg("Turn time"),
++    short: msg("turn"),
++    description: msg("Request sent to the end of the turn."),
++  },
++  provider: {
++    abbr: msg("Prov", { $context: "short label of a turn performance metric" }),
++    label: msg("Provider"),
++    short: msg("provider"),
++    description: msg("Provider that ran the turn."),
++  },
++  model: {
++    abbr: msg("Model", { $context: "short label of a turn performance metric" }),
++    label: msg("Model"),
++    short: msg("model"),
++    description: msg("Requested model, and the reported one when it differs."),
++  },
++  reasoningEffort: {
++    abbr: msg("Effort", { $context: "short label of a turn performance metric" }),
++    label: msg("Reasoning effort"),
++    short: msg("effort"),
++    description: msg("Reasoning effort requested for the turn."),
++  },
++  speedMode: {
++    abbr: msg("Speed", { $context: "short label of a turn performance metric" }),
++    label: msg("Speed mode"),
++    short: msg("speed"),
++    description: msg("Claude fast mode or Codex service tier."),
++  },
++};
++
++export const LEGACY_RESPONSE_RATE_LABEL = msg("Response rate");
+diff --git a/apps/web/src/components/chat/TurnPerformance.logic.test.ts b/apps/web/src/components/chat/TurnPerformance.logic.test.ts
+new file mode 100644
+index 0000000000..dc408d0e4d
+--- /dev/null
++++ b/apps/web/src/components/chat/TurnPerformance.logic.test.ts
+@@ -0,0 +1,795 @@
++import {
++  NodeId,
++  ProviderInstanceId,
++  ProviderThreadId,
++  ProviderTurnId,
++  type ModelSelection,
++  type OrchestrationV2ProviderTurn,
++  type OrchestrationV2TurnPerformance,
++} from "@t3tools/contracts";
++import * as DateTime from "effect/DateTime";
++import { describe, expect, it } from "vite-plus/test";
++
++import { decodeMsg } from "gt-react";
++
++import { TURN_PERFORMANCE_METRIC_LABELS } from "./TurnPerformance.catalog";
++import {
++  COMPOSER_INLINE_PRIORITY,
++  compactMetricText,
++  formatCompactContext,
++  formatCompactCount,
++  TURN_PERFORMANCE_LAYOUT,
++  TURN_PERFORMANCE_METRIC_IDS,
++  countTurnStreamedChars,
++  createLiveRateSampler,
++  deriveAverageTps,
++  deriveReasoningEffort,
++  deriveSpeedMode,
++  deriveTurnPerformanceMetrics,
++  filterVisibleMetrics,
++  hiddenMetricSet,
++  liveRateKey,
++  pickInlineMetrics,
++  resolveTurnPerformanceSource,
++  selectComposerPerformanceTurns,
++  toggleHiddenMetric,
++  type TurnPerformanceInput,
++  type TurnPerformanceMetric,
++  type TurnPerformanceMetricId,
++} from "./TurnPerformance.logic";
++
++const start = DateTime.makeUnsafe("2026-10-03T10:00:00Z");
++const end = DateTime.makeUnsafe("2026-10-03T10:00:30Z");
++const nowMs = DateTime.toEpochMillis(end);
++
++function perf(
++  overrides: Partial<OrchestrationV2TurnPerformance> = {},
++): OrchestrationV2TurnPerformance {
++  return {
++    source: "claude_stream",
++    requestSentAt: start,
++    streamedChars: { reasoning: 0, text: 0, toolInput: 0 },
++    tools: { count: 0, wallMs: 0, longestMs: 0, open: 0 },
++    partial: false,
++    live: false,
++    ...overrides,
++  };
++}
++
++function turn(overrides: Partial<OrchestrationV2ProviderTurn> = {}): OrchestrationV2ProviderTurn {
++  return {
++    id: ProviderTurnId.make("turn-1"),
++    providerThreadId: ProviderThreadId.make("pthread-1"),
++    nodeId: NodeId.make("node-1"),
++    runAttemptId: null,
++    nativeTurnRef: null,
++    ordinal: 1,
++    status: "completed",
++    startedAt: start,
++    completedAt: end,
++    ...overrides,
++  };
++}
++
++function selection(model: string, options: ModelSelection["options"] = []): ModelSelection {
++  return { instanceId: ProviderInstanceId.make("claude"), model, options };
++}
++
++function metrics(input: Partial<TurnPerformanceInput> & { turn: OrchestrationV2ProviderTurn }) {
++  return deriveTurnPerformanceMetrics({
++    driver: "claudeAgent",
++    providerName: "Claude",
++    modelSelection: null,
++    context: null,
++    liveTokensPerSecond: null,
++    nowMs,
++    ...input,
++  });
++}
++
++function byId(
++  rows: ReadonlyArray<TurnPerformanceMetric>,
++  id: TurnPerformanceMetricId,
++): TurnPerformanceMetric {
++  const row = rows.find((candidate) => candidate.id === id);
++  if (!row) throw new Error(`missing metric ${id}`);
++  return row;
++}
++
++describe("time to first token / answer", () => {
++  it("is exact when the adapter timed it, and names the first token kind", () => {
++    const rows = metrics({
++      turn: turn({ performance: perf({ firstTokenMs: 820, firstTokenKind: "reasoning" }) }),
++    });
++    const ttft = byId(rows, "ttft");
++    expect(ttft.precision).toBe("exact");
++    expect(ttft.value).toBe(820);
++    expect(ttft.display).toBe("820 ms");
++    expect(ttft.reason).toContain("reasoning");
++  });
++
++  it("is unavailable, naming the provider, without stream timing", () => {
++    const rows = metrics({ turn: turn(), providerName: "OpenCode", driver: "opencode" });
++    for (const id of ["ttft", "ttfa", "peakTps", "toolTime"] as const) {
++      const row = byId(rows, id);
++      expect(row.precision).toBe("unavailable");
++      expect(row.display).toBe("—");
++      expect(row.value).toBeNull();
++      expect(row.reason).toContain("OpenCode");
++    }
++  });
++
++  it("TTFA is unavailable when a settled turn produced no answer text", () => {
++    const rows = metrics({ turn: turn({ performance: perf({ firstTokenMs: 400 }) }) });
++    expect(byId(rows, "ttfa").precision).toBe("unavailable");
++    expect(byId(rows, "ttfa").reason).toContain("no answer text");
++  });
++
++  it("formats seconds with one decimal and marks partial measurements", () => {
++    const rows = metrics({
++      turn: turn({ performance: perf({ firstAnswerMs: 1_430, partial: true }) }),
++    });
++    expect(byId(rows, "ttfa").display).toBe("1.4 s");
++    expect(byId(rows, "ttfa").partial).toBe(true);
++    expect(byId(rows, "ttfa").reason).toContain("Partial");
++  });
++});
++
++describe("average tokens/s", () => {
++  it("is exact only for provider_exact generation tokens", () => {
++    const exact = deriveAverageTps(
++      turn({
++        performance: perf({
++          generationMs: 4_000,
++          generationWindows: 2,
++          generationTokens: { value: 400, basis: "provider_exact" },
++        }),
++      }),
++      "Claude",
++    );
++    expect(exact.precision).toBe("exact");
++    expect(exact.value).toBe(100);
++    expect(exact.display).toBe("100 tok/s");
++
++    for (const basis of ["provider_total", "estimated"] as const) {
++      const estimated = deriveAverageTps(
++        turn({
++          performance: perf({ generationMs: 4_000, generationTokens: { value: 400, basis } }),
++        }),
++        "Codex",
++      );
++      expect(estimated.precision).toBe("estimated");
++      expect(estimated.value).toBe(100);
++      expect(estimated.display).toBe("≈100 tok/s");
++    }
++  });
++
++  it("is unavailable under a second of streaming, even with exact tokens", () => {
++    // Sub-second replies arrive in a few network bursts, so no rate is reliable.
++    const burst = deriveAverageTps(
++      turn({
++        performance: perf({
++          generationMs: 266.6,
++          generationWindows: 2,
++          generationTokens: { value: 164, basis: "provider_exact" },
++        }),
++      }),
++      "Claude",
++    );
++    expect(burst.precision).toBe("unavailable");
++    expect(burst.display).toBe("—");
++    expect(burst.reason).toContain("too short to time");
++    const steady = deriveAverageTps(
++      turn({
++        performance: perf({
++          generationMs: 9_666.3,
++          generationTokens: { value: 1_420, basis: "provider_exact" },
++        }),
++      }),
++      "Claude",
++    );
++    expect(steady.precision).toBe("exact");
++    expect(Math.round(Number(steady.value))).toBe(147);
++  });
++
++  it("never divides by turn duration", () => {
++    // 30 s turn, 3 s of generation: the rate must use the 3 s.
++    const row = deriveAverageTps(
++      turn({
++        performance: perf({
++          turnMs: 30_000,
++          generationMs: 3_000,
++          generationTokens: { value: 300, basis: "provider_exact" },
++        }),
++        turnTokenUsage: {
++          usageScope: "main_agent",
++          usageStatus: "complete",
++          inputTokens: 10,
++          outputTokens: 300,
++          hasSubagents: false,
++        },
++      }),
++      "Claude",
++    );
++    expect(row.value).toBe(100);
++
++    // Turn duration and output tokens alone never produce a rate.
++    const noWindows = deriveAverageTps(
++      turn({
++        performance: perf({ turnMs: 30_000 }),
++        turnTokenUsage: {
++          usageScope: "main_agent",
++          usageStatus: "complete",
++          inputTokens: 10,
++          outputTokens: 300,
++          hasSubagents: false,
++        },
++      }),
++      "Claude",
++    );
++    expect(noWindows.precision).toBe("unavailable");
++    expect(noWindows.value).toBeNull();
++  });
++
++  it("falls back to legacy response throughput only under its own label", () => {
++    const legacy = deriveAverageTps(
++      turn({
++        nativeTurnRef: { driver: "claudeAgent", nativeId: "x", strength: "strong" } as never,
++        responseThroughput: {
++          outputTokens: 500,
++          elapsedMs: 5_000,
++          responseCount: 1,
++          partial: false,
++        },
++      }),
++      "Claude",
++    );
++    expect(legacy.variant).toBe("legacyResponseRate");
++    expect(legacy.value).toBe(100);
++
++    const codexLegacy = deriveAverageTps(
++      turn({
++        nativeTurnRef: { driver: "codex", nativeId: "x", strength: "strong" } as never,
++        responseThroughput: {
++          basis: "codex_active_windows_estimate",
++          outputTokens: 500,
++          elapsedMs: 5_000,
++          responseCount: 1,
++          partial: false,
++        },
++      }),
++      "Codex",
++    );
++    expect(codexLegacy.variant).toBe("legacyResponseRate");
++    expect(codexLegacy.precision).toBe("estimated");
++
++    // With performance present, the legacy value is never used.
++    const withPerformance = deriveAverageTps(
++      turn({
++        nativeTurnRef: { driver: "claudeAgent", nativeId: "x", strength: "strong" } as never,
++        responseThroughput: {
++          outputTokens: 500,
++          elapsedMs: 5_000,
++          responseCount: 1,
++          partial: false,
++        },
++        performance: perf(),
++      }),
++      "Claude",
++    );
++    expect(withPerformance.precision).toBe("unavailable");
++    expect(withPerformance.variant).toBeUndefined();
++  });
++
++  it("is unavailable without performance or legacy throughput", () => {
++    expect(deriveAverageTps(turn(), "Pi").precision).toBe("unavailable");
++    expect(deriveAverageTps(turn(), "Pi").reason).toContain("Pi");
++  });
++});
++
++describe("peak tokens/s", () => {
++  it("is always estimated and shows its window", () => {
++    for (const basis of ["calibrated_estimate", "estimated"] as const) {
++      const row = byId(
++        metrics({
++          turn: turn({
++            performance: perf({ peakTokensPerSecond: { value: 152.4, windowMs: 2_000, basis } }),
++          }),
++        }),
++        "peakTps",
++      );
++      expect(row.precision).toBe("estimated");
++      expect(row.display).toBe("≈152 tok/s");
++      expect(row.reason).toContain("2000 ms");
++    }
++  });
++
++  it("is unavailable for short turns", () => {
++    const row = byId(metrics({ turn: turn({ performance: perf() }) }), "peakTps");
++    expect(row.precision).toBe("unavailable");
++  });
++});
++
++describe("live tokens/s", () => {
++  it("appears only while the turn runs, always estimated", () => {
++    const running = metrics({
++      turn: turn({ status: "running", completedAt: null }),
++      liveTokensPerSecond: 42,
++    });
++    expect(byId(running, "liveTps").precision).toBe("estimated");
++    expect(byId(running, "liveTps").display).toBe("≈42 tok/s");
++
++    const done = metrics({ turn: turn(), liveTokensPerSecond: 42 });
++    expect(done.some((row) => row.id === "liveTps")).toBe(false);
++  });
++
++  it("is unavailable while measuring", () => {
++    const rows = metrics({ turn: turn({ status: "running", completedAt: null }) });
++    expect(byId(rows, "liveTps").precision).toBe("unavailable");
++  });
++});
++
++describe("live rate sampler", () => {
++  const key = liveRateKey("env:thread-a", "turn-1");
++
++  it("measures growth over the last 2 seconds at 4 characters per token", () => {
++    const sampler = createLiveRateSampler();
++    expect(sampler.sample(key, 0, 0)).toBeNull();
++    expect(sampler.sample(key, 400, 1_000)).toBe(100);
++    expect(sampler.sample(key, 800, 2_000)).toBe(100);
++    // Only the last 2 s count: 400 → 800 chars between 1 s and 3 s is 400 chars over 2 s.
++    expect(sampler.sample(key, 800, 3_000)).toBe(50);
++    // Nothing streamed for 2 s (tools running): the live rate drops to zero.
++    expect(sampler.sample(key, 800, 5_000)).toBe(0);
++    expect(sampler.sample(key, 1_600, 6_000)).toBe(100);
++  });
++
++  it("needs half a second of samples before reporting", () => {
++    const sampler = createLiveRateSampler();
++    sampler.sample(key, 0, 0);
++    expect(sampler.sample(key, 100, 200)).toBeNull();
++    expect(sampler.sample(key, 200, 500)).toBe(100);
++  });
++
++  it("starts over for a new turn and never mixes threads", () => {
++    const sampler = createLiveRateSampler();
++    sampler.sample(key, 0, 0);
++    sampler.sample(key, 4_000, 1_000);
++    // Thread B's turn with the same provider turn id begins with its own baseline.
++    const otherThread = liveRateKey("env:thread-b", "turn-1");
++    expect(sampler.sample(otherThread, 9_000, 1_500)).toBeNull();
++    expect(sampler.sample(otherThread, 9_400, 2_500)).toBe(100);
++    // Next turn on thread A: earlier characters never inflate the rate.
++    const nextTurn = liveRateKey("env:thread-a", "turn-2");
++    expect(sampler.sample(nextTurn, 0, 3_000)).toBeNull();
++    expect(sampler.sample(nextTurn, 200, 4_000)).toBe(50);
++  });
++
++  it("resets when text shrinks or on reset()", () => {
++    const sampler = createLiveRateSampler();
++    sampler.sample(key, 1_000, 0);
++    sampler.sample(key, 1_400, 1_000);
++    expect(sampler.sample(key, 100, 1_500)).toBeNull();
++    sampler.reset();
++    expect(sampler.sample(key, 500, 2_000)).toBeNull();
++  });
++
++  it("counts answer and reasoning text of the one provider turn only", () => {
++    const turnId = ProviderTurnId.make("turn-1");
++    const other = ProviderTurnId.make("turn-2");
++    expect(
++      countTurnStreamedChars(
++        [
++          { type: "assistant_message", providerTurnId: turnId, text: "hello" },
++          { type: "reasoning", providerTurnId: turnId, text: "think" },
++          { type: "tool_call", providerTurnId: turnId, text: "ignored" },
++          { type: "assistant_message", providerTurnId: other, text: "other turn" },
++          { type: "assistant_message", providerTurnId: null, text: "runless" },
++        ],
++        turnId,
++      ),
++    ).toBe(10);
++  });
++});
++
++describe("tokens and cache", () => {
++  const usage = {
++    usageScope: "main_agent",
++    usageStatus: "complete",
++    inputTokens: 10_000,
++    outputTokens: 1_200,
++    cachedInputTokens: 9_996,
++    cacheCreationTokens: 4,
++    hasSubagents: false,
++  } as const;
++
++  it("reports provider counts as exact", () => {
++    const rows = metrics({ turn: turn({ turnTokenUsage: usage }) });
++    expect(byId(rows, "inputTokens")).toMatchObject({ precision: "exact", display: "10,000" });
++    expect(byId(rows, "outputTokens")).toMatchObject({ precision: "exact", display: "1,200" });
++    expect(byId(rows, "cachedTokens")).toMatchObject({ precision: "exact", display: "9,996" });
++  });
++
++  it("computes cache hit rate from cached ÷ total input, one decimal, never rounding to 100%", () => {
++    const rows = metrics({ turn: turn({ turnTokenUsage: usage }) });
++    expect(byId(rows, "cacheHitRate").display).toBe("99.9%");
++    const full = metrics({
++      turn: turn({ turnTokenUsage: { ...usage, cachedInputTokens: 10_000 } }),
++    });
++    expect(byId(full, "cacheHitRate").display).toBe("100%");
++    const none = metrics({ turn: turn({ turnTokenUsage: { ...usage, cachedInputTokens: 0 } }) });
++    expect(byId(none, "cacheHitRate").display).toBe("0%");
++    const tenth = metrics({
++      turn: turn({ turnTokenUsage: { ...usage, inputTokens: 1_000, cachedInputTokens: 998 } }),
++    });
++    expect(byId(tenth, "cacheHitRate").display).toBe("99.8%");
++  });
++
++  it("cache hit rate is unavailable with zero input, missing cache counts or impossible counts", () => {
++    const zero = metrics({
++      turn: turn({ turnTokenUsage: { ...usage, inputTokens: 0, cachedInputTokens: 0 } }),
++    });
++    expect(byId(zero, "cacheHitRate").precision).toBe("unavailable");
++    const { cachedInputTokens: _omit, ...withoutCache } = usage;
++    const missing = metrics({ turn: turn({ turnTokenUsage: withoutCache }) });
++    expect(byId(missing, "cacheHitRate").precision).toBe("unavailable");
++    const impossible = metrics({
++      turn: turn({ turnTokenUsage: { ...usage, cachedInputTokens: 20_000 } }),
++    });
++    expect(byId(impossible, "cacheHitRate").precision).toBe("unavailable");
++  });
++
++  it("Claude reasoning tokens are unavailable, Codex reports them", () => {
++    const claude = metrics({ turn: turn({ turnTokenUsage: usage }) });
++    expect(byId(claude, "reasoningTokens").precision).toBe("unavailable");
++    expect(byId(claude, "reasoningTokens").reason).toContain("Claude");
++    const codex = metrics({
++      turn: turn({ turnTokenUsage: { ...usage, reasoningTokens: 300 } }),
++      driver: "codex",
++      providerName: "Codex",
++    });
++    expect(byId(codex, "reasoningTokens")).toMatchObject({ precision: "exact", value: 300 });
++  });
++
++  it("usage marked unavailable shows every count as unavailable", () => {
++    const rows = metrics({
++      turn: turn({
++        turnTokenUsage: {
++          usageScope: "main_agent",
++          usageStatus: "unavailable",
++          hasSubagents: false,
++        },
++      }),
++    });
++    for (const id of ["inputTokens", "outputTokens", "cachedTokens", "cacheHitRate"] as const) {
++      expect(byId(rows, id).precision).toBe("unavailable");
++    }
++  });
++
++  it("partial usage stays exact but is flagged", () => {
++    const rows = metrics({
++      turn: turn({
++        turnTokenUsage: {
++          usageScope: "main_agent",
++          usageStatus: "partial",
++          outputTokens: 50,
++          hasSubagents: false,
++        },
++      }),
++    });
++    expect(byId(rows, "outputTokens")).toMatchObject({ precision: "exact", partial: true });
++    expect(byId(rows, "inputTokens").precision).toBe("unavailable");
++  });
++});
++
++describe("context, tools and turn time", () => {
++  it("shows context occupancy when reported", () => {
++    const rows = metrics({ turn: turn(), context: { usedTokens: 50_000, maxTokens: 200_000 } });
++    expect(byId(rows, "context")).toMatchObject({ precision: "exact", value: 25 });
++    expect(byId(rows, "context").display).toBe("25% (50,000 / 200,000)");
++    expect(byId(metrics({ turn: turn() }), "context").precision).toBe("unavailable");
++  });
++
++  it("tool time is the merged wall time, partial when calls stay open", () => {
++    const rows = metrics({
++      turn: turn({
++        performance: perf({ tools: { count: 3, wallMs: 4_200, longestMs: 3_000, open: 1 } }),
++      }),
++    });
++    const tools = byId(rows, "toolTime");
++    expect(tools).toMatchObject({
++      precision: "exact",
++      value: 4_200,
++      display: "4.2 s",
++      partial: true,
++    });
++    expect(tools.reason).toContain("3 tool calls");
++    expect(tools.reason).toContain("3.0 s");
++  });
++
++  it("turn time prefers the adapter's measurement, else T3's start and end", () => {
++    expect(
++      byId(metrics({ turn: turn({ performance: perf({ turnMs: 12_345 }) }) }), "turnTime"),
++    ).toMatchObject({ precision: "exact", value: 12_345 });
++    expect(byId(metrics({ turn: turn() }), "turnTime")).toMatchObject({
++      precision: "exact",
++      value: 30_000,
++    });
++  });
++
++  it("a running turn shows elapsed time from the request", () => {
++    const rows = metrics({
++      turn: turn({ status: "running", completedAt: null, performance: perf({ live: true }) }),
++      nowMs: DateTime.toEpochMillis(start) + 5_000,
++    });
++    expect(byId(rows, "turnTime")).toMatchObject({ precision: "exact", value: 5_000 });
++  });
++});
++
++describe("provider, model, effort and speed", () => {
++  it("shows the requested model, and the reported one when it differs", () => {
++    const same = metrics({ turn: turn({ model: "opus" }), modelSelection: selection("opus") });
++    expect(byId(same, "model").display).toBe("opus");
++    const differs = metrics({
++      turn: turn({ model: "sonnet" }),
++      modelSelection: selection("opus"),
++    });
++    expect(byId(differs, "model").display).toBe("opus → sonnet");
++    expect(byId(metrics({ turn: turn() }), "model").precision).toBe("unavailable");
++  });
++
++  it("reads effort from any provider's effort option", () => {
++    expect(deriveReasoningEffort(selection("m", [{ id: "effort", value: "high" }]))).toBe("high");
++    expect(deriveReasoningEffort(selection("m", [{ id: "reasoningEffort", value: "low" }]))).toBe(
++      "low",
++    );
++    expect(deriveReasoningEffort(selection("m"))).toBeNull();
++    expect(deriveReasoningEffort(null)).toBeNull();
++  });
++
++  it("maps Claude fast mode and Codex priority tier to Fast", () => {
++    expect(deriveSpeedMode(selection("m", [{ id: "fastMode", value: true }]), "claudeAgent")).toBe(
++      "Fast",
++    );
++    expect(
++      deriveSpeedMode(selection("m", [{ id: "serviceTier", value: "priority" }]), "codex"),
++    ).toBe("Fast");
++    expect(
++      deriveSpeedMode(selection("m", [{ id: "serviceTier", value: "default" }]), "codex"),
++    ).toBe("Standard");
++    expect(deriveSpeedMode(selection("m"), "claudeAgent")).toBe("Standard");
++    expect(deriveSpeedMode(selection("m"), "opencode")).toBeNull();
++  });
++});
++
++describe("unknown providers", () => {
++  it("show turn time and usage, and the rest as unavailable without throwing", () => {
++    const rows = metrics({
++      turn: turn({
++        nativeTurnRef: null,
++        turnTokenUsage: {
++          usageScope: "main_agent",
++          usageStatus: "complete",
++          inputTokens: 100,
++          outputTokens: 20,
++          hasSubagents: false,
++        },
++      }),
++      driver: undefined,
++      providerName: "Mystery",
++    });
++    expect(rows.map((row) => row.id)).toEqual(
++      TURN_PERFORMANCE_METRIC_IDS.filter((id) => id !== "liveTps"),
++    );
++    expect(byId(rows, "turnTime").precision).toBe("exact");
++    expect(byId(rows, "outputTokens").precision).toBe("exact");
++    for (const id of ["ttft", "ttfa", "avgTps", "peakTps", "toolTime", "speedMode"] as const) {
++      expect(byId(rows, id).precision).toBe("unavailable");
++      expect(byId(rows, id).display).toBe("—");
++    }
++  });
++
++  it("a turn that never started degrades instead of crashing", () => {
++    const rows = metrics({
++      turn: turn({ status: "pending", startedAt: null, completedAt: null }),
++      providerName: "",
++    });
++    expect(byId(rows, "turnTime").precision).toBe("unavailable");
++    expect(byId(rows, "provider").precision).toBe("unavailable");
++  });
++});
++
++describe("hidden metrics", () => {
++  it("filters hidden ids and ignores unknown ones", () => {
++    const hidden = hiddenMetricSet(["ttft", "cacheHitRate", "fromANewerBuild"]);
++    expect([...hidden].toSorted()).toEqual(["cacheHitRate", "ttft"]);
++    const rows = filterVisibleMetrics(
++      metrics({ turn: turn({ performance: perf({ firstTokenMs: 1 }) }) }),
++      hidden,
++    );
++    expect(rows.some((row) => row.id === "ttft")).toBe(false);
++    expect(rows.some((row) => row.id === "cacheHitRate")).toBe(false);
++    expect(rows.some((row) => row.id === "turnTime")).toBe(true);
++  });
++
++  it("toggles one id and keeps ids it does not own", () => {
++    expect(toggleHiddenMetric(["other"], "ttft", false)).toEqual(["other", "ttft"]);
++    expect(toggleHiddenMetric(["other", "ttft"], "ttft", true)).toEqual(["other"]);
++    expect(toggleHiddenMetric(["ttft"], "ttft", false)).toEqual(["ttft"]);
++  });
++
++  it("inline picks skip unavailable rows unless asked", () => {
++    const rows = metrics({ turn: turn({ performance: perf({ firstTokenMs: 10 }) }) });
++    expect(pickInlineMetrics(rows, ["ttft", "ttfa"]).map((row) => row.id)).toEqual(["ttft"]);
++    expect(
++      pickInlineMetrics(rows, ["ttft", "ttfa"], { includeUnavailable: true }).map((row) => row.id),
++    ).toEqual(["ttft", "ttfa"]);
++  });
++});
++
++describe("composer footer priority", () => {
++  it("orders each composer summary by drop priority and lists only real metrics", () => {
++    for (const ids of Object.values(COMPOSER_INLINE_PRIORITY)) {
++      expect(new Set(ids).size).toBe(ids.length);
++      for (const id of ids) expect(TURN_PERFORMANCE_METRIC_IDS).toContain(id);
++    }
++    // Rate and latency stay longest; peak and TTFA are dropped first on a narrow window.
++    expect(COMPOSER_INLINE_PRIORITY.previous.slice(0, 2)).toEqual(["avgTps", "ttft"]);
++    expect(COMPOSER_INLINE_PRIORITY.previous.slice(-2)).toEqual(["peakTps", "ttfa"]);
++    expect(COMPOSER_INLINE_PRIORITY.current[0]).toBe("turnTime");
++  });
++
++  it("drops reply metrics in the composer's order, with tool time before TTFA", () => {
++    const reply: ReadonlyArray<TurnPerformanceMetricId> = COMPOSER_INLINE_PRIORITY.reply;
++    const previous: ReadonlyArray<TurnPerformanceMetricId> = COMPOSER_INLINE_PRIORITY.previous;
++    const shared = reply.filter((id) => previous.includes(id));
++    expect(shared).toEqual(previous.filter((id) => reply.includes(id)));
++    expect(reply.at(-1)).toBe("ttfa");
++    expect(reply.indexOf("toolTime")).toBeGreaterThan(reply.indexOf("outputTokens"));
++    expect(reply).not.toContain("peakTps");
++  });
++
++  it("keeps priority order after hidden and unavailable metrics drop out", () => {
++    const rows = filterVisibleMetrics(
++      metrics({
++        turn: turn({
++          performance: perf({ firstTokenMs: 900, firstAnswerMs: 1_200 }),
++          turnTokenUsage: {
++            usageScope: "main_agent",
++            usageStatus: "complete",
++            inputTokens: 1_000,
++            cachedInputTokens: 900,
++            outputTokens: 400,
++            hasSubagents: false,
++          },
++        }),
++      }),
++      hiddenMetricSet(["ttft"]),
++    );
++    const ids = pickInlineMetrics(rows, COMPOSER_INLINE_PRIORITY.previous).map((row) => row.id);
++    expect(ids).not.toContain("ttft");
++    const order = COMPOSER_INLINE_PRIORITY.previous.filter((id) => ids.includes(id));
++    expect(ids).toEqual(order);
++    expect(ids).toEqual(expect.arrayContaining(["cacheHitRate", "turnTime", "ttfa"]));
++  });
++});
++
++describe("turn selection", () => {
++  it("splits the running turn from the previous completed one", () => {
++    const first = turn({ id: ProviderTurnId.make("t1"), ordinal: 1 });
++    const second = turn({ id: ProviderTurnId.make("t2"), ordinal: 2, status: "interrupted" });
++    const running = turn({
++      id: ProviderTurnId.make("t3"),
++      ordinal: 3,
++      status: "running",
++      completedAt: null,
++    });
++    expect(selectComposerPerformanceTurns([first, second, running])).toEqual({
++      current: running,
++      previous: second,
++    });
++    expect(selectComposerPerformanceTurns([first, second])).toEqual({
++      current: null,
++      previous: second,
++    });
++    expect(selectComposerPerformanceTurns([])).toEqual({ current: null, previous: null });
++  });
++
++  it("resolves the turn's own run selection and provider thread", () => {
++    const own = turn({ runAttemptId: "attempt-1" as never });
++    const source = resolveTurnPerformanceSource(
++      {
++        providerThreads: [
++          {
++            id: ProviderThreadId.make("pthread-1"),
++            driver: "codex",
++            providerInstanceId: "codex-work",
++          } as never,
++        ],
++        attempts: [{ id: "attempt-1", runId: "run-1" } as never],
++        runs: [
++          { id: "run-0", modelSelection: selection("wrong") } as never,
++          {
++            id: "run-1",
++            providerInstanceId: "codex-work",
++            modelSelection: selection("gpt"),
++          } as never,
++        ],
++        nodes: [],
++      },
++      own,
++      (instanceId) => (instanceId === "codex-work" ? "Codex Work" : "?"),
++    );
++    expect(source).toMatchObject({ driver: "codex", providerName: "Codex Work" });
++    expect(source.modelSelection?.model).toBe("gpt");
++  });
++});
++
++describe("compact detail grid", () => {
++  it("gives every metric a short, unique label next to its full one", () => {
++    const abbreviations = TURN_PERFORMANCE_METRIC_IDS.map((id) =>
++      decodeMsg(TURN_PERFORMANCE_METRIC_LABELS[id].abbr),
++    );
++    for (const abbr of abbreviations) {
++      expect(abbr.length).toBeGreaterThan(0);
++      expect(abbr.length).toBeLessThanOrEqual(6);
++    }
++    expect(new Set(abbreviations).size).toBe(abbreviations.length);
++    expect(abbreviations).toEqual(expect.arrayContaining(["TTFT", "TTFA", "Rsn", "Hit%"]));
++  });
++
++  it("places every metric exactly once: header, a group, or the context line", () => {
++    const placed = [
++      ...TURN_PERFORMANCE_LAYOUT.header,
++      ...TURN_PERFORMANCE_LAYOUT.groups.flatMap((group) => group.metrics),
++      TURN_PERFORMANCE_LAYOUT.context,
++    ];
++    expect(placed.toSorted()).toEqual([...TURN_PERFORMANCE_METRIC_IDS].toSorted());
++  });
++
++  it.each([
++    [0, "0"],
++    [950, "950"],
++    [1_765, "1.8k"],
++    [9_960, "10k"],
++    [11_080, "11k"],
++    [331_604, "332k"],
++    [999_600, "1m"],
++    [1_000_000, "1m"],
++    [2_400_000, "2.4m"],
++    [12_600_000, "13m"],
++  ])("counts %d as %s", (value, text) => {
++    expect(formatCompactCount(value)).toBe(text);
++  });
++
++  it("shortens context to percent and both counts", () => {
++    expect(formatCompactContext(331_604, 1_000_000)).toBe("33% · 332k/1m");
++    expect(formatCompactContext(331_604, null)).toBe("332k");
++  });
++
++  it("shortens cell values and keeps the estimate and unavailable marks", () => {
++    const rows = metrics({
++      turn: turn({
++        performance: perf({ firstTokenMs: 4_100, firstAnswerMs: 820 }),
++        turnTokenUsage: {
++          usageScope: "main_agent",
++          usageStatus: "complete",
++          inputTokens: 331_604,
++          cachedInputTokens: 300_000,
++          outputTokens: 11_080,
++          hasSubagents: false,
++        },
++      }),
++    });
++    expect(compactMetricText(byId(rows, "ttft"))).toBe("4.1s");
++    expect(compactMetricText(byId(rows, "ttfa"))).toBe("820ms");
++    expect(compactMetricText(byId(rows, "inputTokens"))).toBe("332k");
++    expect(compactMetricText(byId(rows, "outputTokens"))).toBe("11k");
++    expect(compactMetricText(byId(rows, "reasoningTokens"))).toBe("—");
++    const estimate = { ...byId(rows, "outputTokens"), precision: "estimated" as const };
++    expect(compactMetricText(estimate)).toBe("≈11k");
++    const rate = { ...byId(rows, "outputTokens"), id: "avgTps" as const, value: 108.4 };
++    expect(compactMetricText(rate)).toBe("108");
++    expect(compactMetricText({ ...rate, value: 9.46 })).toBe("9.5");
++  });
++});
+diff --git a/apps/web/src/components/chat/TurnPerformance.logic.ts b/apps/web/src/components/chat/TurnPerformance.logic.ts
+new file mode 100644
+index 0000000000..7afe2629a6
+--- /dev/null
++++ b/apps/web/src/components/chat/TurnPerformance.logic.ts
+@@ -0,0 +1,863 @@
++import type {
++  ModelSelection,
++  OrchestrationV2ProviderTurn,
++  OrchestrationV2ThreadProjection,
++  OrchestrationV2TurnPerformance,
++  ProviderTurnId,
++} from "@t3tools/contracts";
++import { formatDuration } from "@t3tools/shared/orchestrationTiming";
++import * as DateTime from "effect/DateTime";
++
++import {
++  deriveResponseRate,
++  deriveTurnCachePercentage,
++  deriveTurnElapsedMs,
++  formatCachePercentage,
++} from "./ComposerStats.logic";
++
++/** Average tokens/s needs at least this much streaming; shorter replies arrive in network bursts. */
++export const MIN_EXACT_GENERATION_MS = 1000;
++
++/**
++ * Stats for nerds turn metrics. Ids are persisted in `statsForNerdsHiddenMetrics`, so they never
++ * change meaning. Definitions: docs/performance-metrics.md in t3code-customize.
++ */
++export const TURN_PERFORMANCE_METRIC_IDS = [
++  "ttft",
++  "ttfa",
++  "liveTps",
++  "avgTps",
++  "peakTps",
++  "inputTokens",
++  "outputTokens",
++  "reasoningTokens",
++  "cachedTokens",
++  "cacheHitRate",
++  "context",
++  "toolTime",
++  "turnTime",
++  "provider",
++  "model",
++  "reasoningEffort",
++  "speedMode",
++] as const;
++export type TurnPerformanceMetricId = (typeof TURN_PERFORMANCE_METRIC_IDS)[number];
++
++export type MetricPrecision = "exact" | "estimated" | "unavailable";
++
++export interface TurnPerformanceMetric {
++  readonly id: TurnPerformanceMetricId;
++  readonly precision: MetricPrecision;
++  readonly value: number | string | null;
++  /** Formatted value with unit, without the precision marker. Empty when unavailable. */
++  readonly text: string;
++  /** What the UI prints: plain, `≈`-prefixed, or `—`. */
++  readonly display: string;
++  /** Tooltip: how the value was measured, or why it is unavailable. */
++  readonly reason: string;
++  /** Measured from incomplete data (interrupt, missed events, open tool calls). */
++  readonly partial: boolean;
++  /** A different measurement shown under its own label (legacy response throughput). */
++  readonly variant?: "legacyResponseRate";
++}
++
++export const ESTIMATE_PREFIX = "≈";
++export const UNAVAILABLE_TEXT = "—";
++
++/** Everything the rows are derived from, scoped to one provider turn of one thread. */
++export interface TurnPerformanceSource {
++  readonly turn: OrchestrationV2ProviderTurn;
++  /** The provider thread's driver kind (claudeAgent, codex, …). */
++  readonly driver: string | undefined;
++  /** Display name used in "unavailable" tooltips. */
++  readonly providerName: string;
++  /** The provider instance's accent color, for its icon. */
++  readonly accentColor?: string | undefined;
++  /** What the run requested; null when unknown. */
++  readonly modelSelection: ModelSelection | null;
++}
++
++export interface TurnPerformanceInput extends TurnPerformanceSource {
++  /** Context occupancy to show for this turn; null when not reported. */
++  readonly context: {
++    readonly usedTokens: number;
++    readonly maxTokens?: number | null | undefined;
++  } | null;
++  /** Client-side live rate from {@link createLiveRateSampler}; only used while the turn runs. */
++  readonly liveTokensPerSecond: number | null;
++  readonly nowMs: number;
++}
++
++export function isTurnRunning(turn: Pick<OrchestrationV2ProviderTurn, "status">): boolean {
++  return turn.status === "running" || turn.status === "pending";
++}
++
++export function isTurnSettled(turn: Pick<OrchestrationV2ProviderTurn, "status">): boolean {
++  return !isTurnRunning(turn);
++}
++
++function finite(value: number | undefined | null): value is number {
++  return typeof value === "number" && Number.isFinite(value);
++}
++
++export function formatMs(ms: number): string {
++  if (ms < 1_000) return `${Math.max(0, Math.round(ms))} ms`;
++  if (ms < 60_000) return `${(Math.round(ms / 100) / 10).toFixed(1)} s`;
++  return formatDuration(ms);
++}
++
++export function formatTokensPerSecond(rate: number): string {
++  const digits = rate < 10 ? 1 : 0;
++  return `${rate.toLocaleString("en-US", { maximumFractionDigits: digits, minimumFractionDigits: digits })} tok/s`;
++}
++
++export function formatTokenCount(value: number): string {
++  return value.toLocaleString("en-US");
++}
++
++function displayOf(precision: MetricPrecision, text: string): string {
++  return precision === "unavailable"
++    ? UNAVAILABLE_TEXT
++    : precision === "estimated"
++      ? `${ESTIMATE_PREFIX}${text}`
++      : text;
++}
++
++function metric(
++  id: TurnPerformanceMetricId,
++  precision: MetricPrecision,
++  value: number | string | null,
++  text: string,
++  reason: string,
++  partial = false,
++  variant?: TurnPerformanceMetric["variant"],
++): TurnPerformanceMetric {
++  return {
++    id,
++    precision,
++    value: precision === "unavailable" ? null : value,
++    text: precision === "unavailable" ? "" : text,
++    display: displayOf(precision, text),
++    reason,
++    partial,
++    ...(variant === undefined ? {} : { variant }),
++  };
++}
++
++function unavailable(id: TurnPerformanceMetricId, reason: string): TurnPerformanceMetric {
++  return metric(id, "unavailable", null, "", reason);
++}
++
++function noStreamTiming(providerName: string): string {
++  return `${providerName} does not expose stream timing for this turn.`;
++}
++
++const FIRST_TOKEN_KIND_LABEL: Record<
++  NonNullable<OrchestrationV2TurnPerformance["firstTokenKind"]>,
++  string
++> = {
++  reasoning: "reasoning",
++  text: "answer",
++  tool_input: "tool arguments",
++};
++
++const GENERATION_BASIS_REASON: Record<
++  NonNullable<OrchestrationV2TurnPerformance["generationTokens"]>["basis"],
++  string
++> = {
++  provider_exact: "provider-counted output tokens for exactly these generation windows",
++  provider_total: "the provider's exact turn output total spread over the measured windows",
++  estimated: "streamed characters ÷ 4 (from characters)",
++};
++
++function partialNote(performance: OrchestrationV2TurnPerformance): string {
++  return performance.partial ? " Partial: some events were missed or cut short." : "";
++}
++
++function deriveTtft(
++  performance: OrchestrationV2TurnPerformance | undefined,
++  running: boolean,
++  providerName: string,
++): TurnPerformanceMetric {
++  if (performance === undefined) return unavailable("ttft", noStreamTiming(providerName));
++  if (!finite(performance.firstTokenMs)) {
++    return unavailable(
++      "ttft",
++      running
++        ? "Waiting for the first generated token."
++        : `${providerName} streamed no generated token on this turn.`,
++    );
++  }
++  const kind = performance.firstTokenKind
++    ? ` First token: ${FIRST_TOKEN_KIND_LABEL[performance.firstTokenKind]}.`
++    : "";
++  return metric(
++    "ttft",
++    "exact",
++    performance.firstTokenMs,
++    formatMs(performance.firstTokenMs),
++    `Request sent to the first generated token, timed on the T3 server.${kind}${partialNote(performance)}`,
++    performance.partial,
++  );
++}
++
++function deriveTtfa(
++  performance: OrchestrationV2TurnPerformance | undefined,
++  running: boolean,
++  providerName: string,
++): TurnPerformanceMetric {
++  if (performance === undefined) return unavailable("ttfa", noStreamTiming(providerName));
++  if (!finite(performance.firstAnswerMs)) {
++    return unavailable(
++      "ttfa",
++      running ? "Waiting for the first answer text." : "This turn produced no answer text.",
++    );
++  }
++  return metric(
++    "ttfa",
++    "exact",
++    performance.firstAnswerMs,
++    formatMs(performance.firstAnswerMs),
++    `Request sent to the first visible answer text; reasoning does not count.${partialNote(performance)}`,
++    performance.partial,
++  );
++}
++
++/**
++ * Average generation speed: generation tokens over the sum of active generation windows.
++ * Turn duration is never a denominator.
++ */
++export function deriveAverageTps(
++  turn: OrchestrationV2ProviderTurn,
++  providerName: string,
++): TurnPerformanceMetric {
++  const performance = turn.performance;
++  const tokens = performance?.generationTokens;
++  const generationMs = performance?.generationMs;
++  if (
++    performance !== undefined &&
++    tokens !== undefined &&
++    finite(generationMs) &&
++    generationMs > 0 &&
++    Number.isSafeInteger(tokens.value) &&
++    tokens.value >= 0
++  ) {
++    const rate = tokens.value / (generationMs / 1000);
++    const windows =
++      performance.generationWindows === undefined
++        ? ""
++        : ` across ${performance.generationWindows} window${performance.generationWindows === 1 ? "" : "s"}`;
++    // Under a second of streaming, network delivery bursts, not the model, set the measured time.
++    if (generationMs < MIN_EXACT_GENERATION_MS) {
++      return unavailable(
++        "avgTps",
++        `Only ${formatMs(generationMs)} of streaming: too short to time. Output arrives in network bursts, so a rate here would read far too high.`,
++      );
++    }
++    return metric(
++      "avgTps",
++      tokens.basis === "provider_exact" ? "exact" : "estimated",
++      rate,
++      formatTokensPerSecond(rate),
++      `${formatTokenCount(tokens.value)} tokens over ${formatMs(generationMs)} of active generation${windows}: ${GENERATION_BASIS_REASON[tokens.basis]}. Tools, approvals and time before the first token are excluded.${partialNote(performance)}`,
++      performance.partial,
++    );
++  }
++  if (performance === undefined) {
++    const legacy = deriveResponseRate(turn);
++    if (legacy !== null) {
++      const estimated = turn.responseThroughput?.basis === "codex_active_windows_estimate";
++      return metric(
++        "avgTps",
++        estimated ? "estimated" : "exact",
++        legacy,
++        formatTokensPerSecond(legacy),
++        estimated
++          ? "Response rate (older measurement): Codex-reported turn output tokens divided by estimated response-active time."
++          : "Response rate (older measurement): Claude-reported output tokens divided by observed response start-to-stop time, including network and server-side waits.",
++        turn.responseThroughput?.partial ?? false,
++        "legacyResponseRate",
++      );
++    }
++    return unavailable("avgTps", noStreamTiming(providerName));
++  }
++  return unavailable(
++    "avgTps",
++    isTurnRunning(turn)
++      ? "Available once a generation window closes."
++      : "No generation window with a token count was measured on this turn.",
++  );
++}
++
++function derivePeakTps(
++  performance: OrchestrationV2TurnPerformance | undefined,
++  providerName: string,
++): TurnPerformanceMetric {
++  if (performance === undefined) return unavailable("peakTps", noStreamTiming(providerName));
++  const peak = performance.peakTokensPerSecond;
++  if (peak === undefined || !finite(peak.value)) {
++    return unavailable(
++      "peakTps",
++      "Needs at least 2 s of continuous generation; shorter bursts never produce a peak.",
++    );
++  }
++  return metric(
++    "peakTps",
++    "estimated",
++    peak.value,
++    formatTokensPerSecond(peak.value),
++    `Highest rate over any ${peak.windowMs} ms sliding window (${peak.basis === "calibrated_estimate" ? "calibrated to the exact output count" : "from streamed characters"}).${partialNote(performance)}`,
++    performance.partial,
++  );
++}
++
++function deriveLiveTps(
++  running: boolean,
++  rate: number | null,
++  providerName: string,
++): TurnPerformanceMetric | null {
++  if (!running) return null;
++  if (rate === null || !finite(rate)) {
++    return unavailable(
++      "liveTps",
++      `Measuring: needs streamed answer or reasoning text from ${providerName}.`,
++    );
++  }
++  return metric(
++    "liveTps",
++    "estimated",
++    rate,
++    formatTokensPerSecond(rate),
++    "Rate over the last 2 seconds from streamed answer and reasoning characters (≈ 4 characters per token).",
++  );
++}
++
++function deriveTokenMetrics(
++  turn: OrchestrationV2ProviderTurn,
++  driver: string | undefined,
++  providerName: string,
++): ReadonlyArray<TurnPerformanceMetric> {
++  const usage = turn.turnTokenUsage;
++  const available = usage !== undefined && usage.usageStatus !== "unavailable" ? usage : undefined;
++  const partial = available?.usageStatus === "partial";
++  const reportNote = partial ? " Partial report: covers only what the provider reported." : "";
++  const notReported = (what: string) =>
++    isTurnRunning(turn) && usage === undefined
++      ? `${providerName} reports ${what} when the turn ends.`
++      : `${providerName} did not report ${what} for this turn.`;
++  const count = (
++    id: TurnPerformanceMetricId,
++    value: number | undefined,
++    what: string,
++    reason: string,
++  ) =>
++    finite(value)
++      ? metric(id, "exact", value, formatTokenCount(value), `${reason}${reportNote}`, partial)
++      : unavailable(id, notReported(what));
++
++  const reasoning =
++    driver === "claudeAgent" && !finite(available?.reasoningTokens)
++      ? unavailable(
++          "reasoningTokens",
++          `${providerName} folds reasoning into output tokens and does not report it separately.`,
++        )
++      : count(
++          "reasoningTokens",
++          available?.reasoningTokens,
++          "reasoning tokens",
++          "Provider-reported reasoning tokens for the main agent (part of output).",
++        );
++
++  const cachePercentage = deriveTurnCachePercentage(available);
++  const cacheHitRate =
++    cachePercentage === null || available === undefined
++      ? unavailable(
++          "cacheHitRate",
++          available?.inputTokens === 0
++            ? "No input tokens on this turn."
++            : notReported("cached input tokens"),
++        )
++      : metric(
++          "cacheHitRate",
++          "exact",
++          cachePercentage,
++          formatCachePercentage(cachePercentage),
++          `Cached input ÷ total input: ${formatTokenCount(available.cachedInputTokens ?? 0)} of ${formatTokenCount(available.inputTokens ?? 0)} tokens. Input already includes cache reads and writes.${reportNote}`,
++          partial,
++        );
++
++  return [
++    count(
++      "inputTokens",
++      available?.inputTokens,
++      "input tokens",
++      `Provider-reported main-agent input, including cache reads${finite(available?.cacheCreationTokens) ? ` and ${formatTokenCount(available.cacheCreationTokens)} cache-write tokens` : " and writes"}.`,
++    ),
++    count(
++      "outputTokens",
++      available?.outputTokens,
++      "output tokens",
++      "Provider-reported main-agent output, including reasoning and tool arguments.",
++    ),
++    reasoning,
++    count(
++      "cachedTokens",
++      available?.cachedInputTokens,
++      "cached input tokens",
++      "Provider-reported input served from the prompt cache.",
++    ),
++    cacheHitRate,
++  ];
++}
++
++function deriveContext(
++  context: TurnPerformanceInput["context"],
++  providerName: string,
++): TurnPerformanceMetric {
++  if (context === null || !finite(context.usedTokens)) {
++    return unavailable("context", `${providerName} has not reported context occupancy.`);
++  }
++  const max = finite(context.maxTokens) && context.maxTokens > 0 ? context.maxTokens : null;
++  const percent = max === null ? null : (context.usedTokens / max) * 100;
++  const text =
++    max === null
++      ? `${formatTokenCount(context.usedTokens)} tokens`
++      : `${Math.round(percent ?? 0)}% (${formatTokenCount(context.usedTokens)} / ${formatTokenCount(max)})`;
++  return metric(
++    "context",
++    "exact",
++    percent ?? context.usedTokens,
++    text,
++    max === null
++      ? "Provider-reported context usage; the window size was not reported."
++      : "Provider-reported context usage and window size.",
++  );
++}
++
++function deriveToolTime(
++  performance: OrchestrationV2TurnPerformance | undefined,
++  providerName: string,
++): TurnPerformanceMetric {
++  if (performance === undefined) return unavailable("toolTime", noStreamTiming(providerName));
++  const tools = performance.tools;
++  if (tools.count === 0) {
++    return metric("toolTime", "exact", 0, "0 s", "No tool calls on this turn.");
++  }
++  const open = tools.open > 0 ? ` ${tools.open} still open when measured (partial).` : "";
++  return metric(
++    "toolTime",
++    "exact",
++    tools.wallMs,
++    formatMs(tools.wallMs),
++    `Wall-clock time waiting on ${tools.count} tool call${tools.count === 1 ? "" : "s"}; overlapping calls are merged. Longest call: ${formatMs(tools.longestMs)}.${open}`,
++    tools.open > 0,
++  );
++}
++
++function deriveTurnTime(turn: OrchestrationV2ProviderTurn, nowMs: number): TurnPerformanceMetric {
++  const performance = turn.performance;
++  const running = isTurnRunning(turn);
++  if (!running && performance !== undefined && finite(performance.turnMs)) {
++    return metric(
++      "turnTime",
++      "exact",
++      performance.turnMs,
++      formatMs(performance.turnMs),
++      `Request sent to the turn's end, including tools and waits.${partialNote(performance)}`,
++      performance.partial,
++    );
++  }
++  if (running && performance !== undefined) {
++    const sentMs = DateTime.toEpochMillis(performance.requestSentAt);
++    if (Number.isFinite(sentMs) && nowMs >= sentMs) {
++      return metric(
++        "turnTime",
++        "exact",
++        nowMs - sentMs,
++        formatMs(nowMs - sentMs),
++        "Elapsed since the request was sent; the turn is still running.",
++      );
++    }
++  }
++  const elapsed = deriveTurnElapsedMs(
++    { ...turn, status: running ? "running" : turn.status },
++    nowMs,
++  );
++  if (elapsed === null) {
++    return unavailable(
++      "turnTime",
++      running ? "The turn has not started yet." : "The turn's start or end time is missing.",
++    );
++  }
++  return metric(
++    "turnTime",
++    "exact",
++    elapsed,
++    formatMs(elapsed),
++    running
++      ? "Elapsed since the turn started; the turn is still running."
++      : "Turn start to end as recorded by T3, including tools and waits.",
++  );
++}
++
++const EFFORT_OPTION_IDS = ["effort", "reasoningEffort", "thinking", "variant"] as const;
++
++function optionValue(selection: ModelSelection | null, id: string): string | boolean | undefined {
++  return selection?.options?.find((option) => option.id === id)?.value;
++}
++
++export function deriveReasoningEffort(selection: ModelSelection | null): string | null {
++  for (const id of EFFORT_OPTION_IDS) {
++    const value = optionValue(selection, id);
++    if (typeof value === "string" && value.trim() !== "") return value;
++  }
++  return null;
++}
++
++/** Claude fast mode, or Codex service tier (`priority` = fast). */
++export function deriveSpeedMode(
++  selection: ModelSelection | null,
++  driver: string | undefined,
++): string | null {
++  const fastMode = optionValue(selection, "fastMode");
++  if (fastMode === true) return "Fast";
++  if (fastMode === false) return "Standard";
++  const tier = optionValue(selection, "serviceTier");
++  if (typeof tier === "string" && tier.trim() !== "") {
++    if (tier === "priority" || tier === "fast") return "Fast";
++    if (tier === "default" || tier === "standard" || tier === "auto") return "Standard";
++    return tier.charAt(0).toUpperCase() + tier.slice(1);
++  }
++  // Both default to standard speed when nothing is selected.
++  return driver === "claudeAgent" || driver === "codex" ? "Standard" : null;
++}
++
++function deriveSelectionMetrics(
++  source: TurnPerformanceSource,
++): ReadonlyArray<TurnPerformanceMetric> {
++  const { turn, modelSelection, providerName, driver } = source;
++  const requested = modelSelection?.model ?? null;
++  const reported = turn.model ?? null;
++  const model =
++    requested === null && reported === null
++      ? unavailable("model", `${providerName} did not report a model for this turn.`)
++      : requested !== null && reported !== null && requested !== reported
++        ? metric(
++            "model",
++            "exact",
++            reported,
++            `${requested} → ${reported}`,
++            `Requested ${requested}; ${providerName} reported running ${reported}.`,
++          )
++        : metric(
++            "model",
++            "exact",
++            (reported ?? requested)!,
++            (reported ?? requested)!,
++            reported !== null
++              ? `Model ${providerName} reported running this turn.`
++              : "Model requested for this turn.",
++          );
++  const effort = deriveReasoningEffort(modelSelection);
++  const speed = deriveSpeedMode(modelSelection, driver);
++  return [
++    providerName.trim() === ""
++      ? unavailable("provider", "The provider for this turn is unknown.")
++      : metric("provider", "exact", providerName, providerName, "Provider that ran this turn."),
++    model,
++    effort === null
++      ? unavailable(
++          "reasoningEffort",
++          `No reasoning effort was selected for ${providerName} on this turn.`,
++        )
++      : metric("reasoningEffort", "exact", effort, effort, "Reasoning effort requested."),
++    speed === null
++      ? unavailable("speedMode", `${providerName} has no speed mode setting.`)
++      : metric(
++          "speedMode",
++          "exact",
++          speed,
++          speed,
++          driver === "codex" ? "Codex service tier requested." : "Speed mode requested.",
++        ),
++  ];
++}
++
++/** Every metric for one turn, in catalog order. Live tokens/s is left out once the turn ends. */
++export function deriveTurnPerformanceMetrics(
++  input: TurnPerformanceInput,
++): ReadonlyArray<TurnPerformanceMetric> {
++  const { turn, providerName } = input;
++  const performance = turn.performance;
++  const running = isTurnRunning(turn);
++  const live = deriveLiveTps(running, input.liveTokensPerSecond, providerName);
++  const byId = new Map<TurnPerformanceMetricId, TurnPerformanceMetric>();
++  for (const row of [
++    deriveTtft(performance, running, providerName),
++    deriveTtfa(performance, running, providerName),
++    ...(live === null ? [] : [live]),
++    deriveAverageTps(turn, providerName),
++    derivePeakTps(performance, providerName),
++    ...deriveTokenMetrics(turn, input.driver, providerName),
++    deriveContext(input.context, providerName),
++    deriveToolTime(performance, providerName),
++    deriveTurnTime(turn, input.nowMs),
++    ...deriveSelectionMetrics(input),
++  ]) {
++    byId.set(row.id, row);
++  }
++  return TURN_PERFORMANCE_METRIC_IDS.flatMap((id) => {
++    const row = byId.get(id);
++    return row === undefined ? [] : [row];
++  });
++}
++
++export function hiddenMetricSet(
++  hidden: ReadonlyArray<string> | undefined,
++): ReadonlySet<TurnPerformanceMetricId> {
++  const known = new Set<string>(TURN_PERFORMANCE_METRIC_IDS);
++  return new Set((hidden ?? []).filter((id): id is TurnPerformanceMetricId => known.has(id)));
++}
++
++export function filterVisibleMetrics(
++  rows: ReadonlyArray<TurnPerformanceMetric>,
++  hidden: ReadonlySet<string>,
++): ReadonlyArray<TurnPerformanceMetric> {
++  return rows.filter((row) => !hidden.has(row.id));
++}
++
++/** Picks rows by id in the given order, skipping hidden and (optionally) unavailable ones. */
++/**
++ * Inline metrics of the composer footer, most important first. The footer is one clipped line, so
++ * metrics are dropped from the end when the window narrows: this order is the drop order.
++ */
++export const COMPOSER_INLINE_PRIORITY = {
++  current: ["turnTime", "liveTps", "ttft", "ttfa"],
++  previous: ["avgTps", "ttft", "cacheHitRate", "turnTime", "outputTokens", "peakTps", "ttfa"],
++  // The line beside each reply's actions: the previous turn's order, with tool time for history.
++  reply: ["avgTps", "ttft", "cacheHitRate", "turnTime", "outputTokens", "toolTime", "ttfa"],
++} as const satisfies Record<
++  "current" | "previous" | "reply",
++  ReadonlyArray<TurnPerformanceMetricId>
++>;
++
++/** The detail grid: what reads as a header badge, which cells group together, and context. */
++export const TURN_PERFORMANCE_LAYOUT = {
++  header: ["provider", "model", "reasoningEffort", "speedMode"],
++  groups: [
++    { id: "timing", metrics: ["ttft", "ttfa", "turnTime", "toolTime"] },
++    { id: "speed", metrics: ["liveTps", "avgTps", "peakTps"] },
++    {
++      id: "tokens",
++      metrics: ["inputTokens", "outputTokens", "reasoningTokens", "cachedTokens", "cacheHitRate"],
++    },
++  ],
++  context: "context",
++} as const satisfies {
++  readonly header: ReadonlyArray<TurnPerformanceMetricId>;
++  readonly groups: ReadonlyArray<{
++    readonly id: string;
++    readonly metrics: ReadonlyArray<TurnPerformanceMetricId>;
++  }>;
++  readonly context: TurnPerformanceMetricId;
++};
++
++/** "950", "1.8k", "332k", "1m", "2.4m": a token count that fits a grid cell. */
++export function formatCompactCount(value: number): string {
++  const n = Math.max(0, Math.round(value));
++  const trim = (text: string) => text.replace(/\.0$/, "");
++  if (n < 1_000) return String(n);
++  if (n < 10_000) return `${trim((n / 1_000).toFixed(1))}k`;
++  const thousands = Math.round(n / 1_000);
++  if (thousands < 1_000) return `${thousands}k`;
++  if (n < 10_000_000) return `${trim((n / 1_000_000).toFixed(1))}m`;
++  return `${Math.round(n / 1_000_000)}m`;
++}
++
++/** "33% · 332k/1m", or the used count alone when the window size is unknown. */
++export function formatCompactContext(usedTokens: number, maxTokens: number | null): string {
++  if (maxTokens === null || maxTokens <= 0) return formatCompactCount(usedTokens);
++  const percent = Math.round((usedTokens / maxTokens) * 100);
++  return `${percent}% · ${formatCompactCount(usedTokens)}/${formatCompactCount(maxTokens)}`;
++}
++
++const COMPACT_COUNT_METRICS = new Set<TurnPerformanceMetricId>([
++  "inputTokens",
++  "outputTokens",
++  "reasoningTokens",
++  "cachedTokens",
++]);
++const COMPACT_RATE_METRICS = new Set<TurnPerformanceMetricId>(["liveTps", "avgTps", "peakTps"]);
++
++/** A cell's value: counts and rates shortened, units the label implies dropped, ≈ and — kept. */
++export function compactMetricText(metric: TurnPerformanceMetric): string {
++  if (metric.precision === "unavailable") return UNAVAILABLE_TEXT;
++  const prefix = metric.precision === "estimated" ? ESTIMATE_PREFIX : "";
++  if (typeof metric.value === "number" && COMPACT_COUNT_METRICS.has(metric.id)) {
++    return `${prefix}${formatCompactCount(metric.value)}`;
++  }
++  if (
++    typeof metric.value === "number" &&
++    COMPACT_RATE_METRICS.has(metric.id) &&
++    metric.variant === undefined
++  ) {
++    const digits = metric.value < 10 ? 1 : 0;
++    return `${prefix}${metric.value.toFixed(digits)}`;
++  }
++  // "4.1 s" and "820 ms" read as "4.1s" and "820ms" in a cell.
++  return `${prefix}${metric.text.replace(/ (ms|s)$/, "$1")}`;
++}
++
++export function pickInlineMetrics(
++  rows: ReadonlyArray<TurnPerformanceMetric>,
++  ids: ReadonlyArray<TurnPerformanceMetricId>,
++  options: { readonly includeUnavailable?: boolean } = {},
++): ReadonlyArray<TurnPerformanceMetric> {
++  return ids.flatMap((id) => {
++    const row = rows.find((candidate) => candidate.id === id);
++    return row === undefined || (row.precision === "unavailable" && !options.includeUnavailable)
++      ? []
++      : [row];
++  });
++}
++
++/** Writes one metric's switch into the hidden list, keeping unknown ids other builds may own. */
++export function toggleHiddenMetric(
++  hidden: ReadonlyArray<string>,
++  id: TurnPerformanceMetricId,
++  visible: boolean,
++): ReadonlyArray<string> {
++  const without = hidden.filter((candidate) => candidate !== id);
++  return visible ? without : [...without, id];
++}
++
++type ProjectionForSource = Pick<
++  OrchestrationV2ThreadProjection,
++  "runs" | "attempts" | "nodes" | "providerThreads"
++>;
++
++/** Driver and requested model for a turn, from its own run; never from another thread or turn. */
++export function resolveTurnPerformanceSource(
++  projection: ProjectionForSource,
++  turn: OrchestrationV2ProviderTurn,
++  providerNameOf: (providerInstanceId: string | undefined) => string,
++  accentColorOf: (providerInstanceId: string | undefined) => string | undefined = () => undefined,
++): TurnPerformanceSource {
++  const providerThread = projection.providerThreads.find(
++    (candidate) => candidate.id === turn.providerThreadId,
++  );
++  const attempt =
++    turn.runAttemptId === null
++      ? undefined
++      : projection.attempts.find((candidate) => candidate.id === turn.runAttemptId);
++  const runId = attempt?.runId ?? projection.nodes.find((node) => node.id === turn.nodeId)?.runId;
++  const run =
++    runId === undefined || runId === null
++      ? undefined
++      : projection.runs.find((candidate) => candidate.id === runId);
++  return {
++    turn,
++    driver: providerThread?.driver ?? turn.nativeTurnRef?.driver,
++    providerName: providerNameOf(providerThread?.providerInstanceId ?? run?.providerInstanceId),
++    accentColor: accentColorOf(providerThread?.providerInstanceId ?? run?.providerInstanceId),
++    modelSelection: run?.modelSelection ?? null,
++  };
++}
++
++/** The composer's current (running) turn and the turn that completed before it. */
++export function selectComposerPerformanceTurns(turns: ReadonlyArray<OrchestrationV2ProviderTurn>): {
++  readonly current: OrchestrationV2ProviderTurn | null;
++  readonly previous: OrchestrationV2ProviderTurn | null;
++} {
++  const latest = turns.at(-1) ?? null;
++  const current = latest !== null && isTurnRunning(latest) ? latest : null;
++  const previous =
++    turns.findLast(
++      (turn) => turn.id !== current?.id && isTurnSettled(turn) && turn.startedAt !== null,
++    ) ?? null;
++  return { current, previous };
++}
++
++/** Streamed answer and reasoning characters of one provider turn's main-agent items. */
++export function countTurnStreamedChars(
++  items: ReadonlyArray<
++    | {
++        readonly type: string;
++        readonly providerTurnId: ProviderTurnId | null;
++        readonly text?: unknown;
++      }
++    | { readonly type: string; readonly providerTurnId: ProviderTurnId | null }
++  >,
++  providerTurnId: ProviderTurnId,
++): number {
++  let chars = 0;
++  for (const item of items) {
++    if (
++      item.providerTurnId === providerTurnId &&
++      (item.type === "assistant_message" || item.type === "reasoning") &&
++      "text" in item &&
++      typeof item.text === "string"
++    ) {
++      chars += item.text.length;
++    }
++  }
++  return chars;
++}
++
++export const LIVE_RATE_WINDOW_MS = 2_000;
++export const CHARS_PER_TOKEN = 4;
++/** Below this span a rate would come from a single burst. */
++const MIN_SPAN_MS = 500;
++
++export interface LiveRateSampler {
++  /** Records the turn's total streamed characters at `nowMs` and returns tokens/s over the window. */
++  sample(key: string, chars: number, nowMs: number): number | null;
++  reset(): void;
++}
++
++/** Key a live sample by thread and provider turn, so one turn never feeds another's rate. */
++export function liveRateKey(threadKey: string, providerTurnId: string): string {
++  return `${threadKey}\u0000${providerTurnId}`;
++}
++
++/**
++ * Client-side live tokens/s: growth of streamed answer and reasoning characters over the last
++ * 2 seconds, converted at ≈ 4 characters per token. Always an estimate.
++ */
++export function createLiveRateSampler(windowMs = LIVE_RATE_WINDOW_MS): LiveRateSampler {
++  let currentKey: string | null = null;
++  let samples: Array<{ readonly t: number; readonly chars: number }> = [];
++  return {
++    reset() {
++      currentKey = null;
++      samples = [];
++    },
++    sample(key, chars, nowMs) {
++      const last = samples.at(-1);
++      if (
++        key !== currentKey ||
++        !Number.isFinite(chars) ||
++        (last !== undefined && (chars < last.chars || nowMs < last.t))
++      ) {
++        // A new turn, or text replaced by a shorter version: start over.
++        currentKey = key;
++        samples = [];
++      }
++      samples.push({ t: nowMs, chars });
++      // The newest sample at or before the window start is the baseline: the text held that
++      // length until the next sample arrived.
++      const start = nowMs - windowMs;
++      let baseIndex = 0;
++      for (const [index, sample] of samples.entries()) {
++        if (sample.t <= start) baseIndex = index;
++      }
++      samples = samples.slice(baseIndex);
++      const baseline = samples[0]!;
++      const from = baseline.t < start ? { t: start, chars: baseline.chars } : baseline;
++      const spanMs = nowMs - from.t;
++      if (spanMs < MIN_SPAN_MS) return null;
++      const growth = chars - from.chars;
++      return growth / CHARS_PER_TOKEN / (spanMs / 1000);
++    },
++  };
++}
+diff --git a/apps/web/src/components/chat/TurnPerformance.tsx b/apps/web/src/components/chat/TurnPerformance.tsx
+new file mode 100644
+index 0000000000..126dea3e6b
+--- /dev/null
++++ b/apps/web/src/components/chat/TurnPerformance.tsx
+@@ -0,0 +1,601 @@
++import type { ProviderTurnId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
++import { ProviderDriverKind } from "@t3tools/contracts";
++import { msg, useGT, useMessages } from "gt-react";
++import { createContext, use, useEffect, useRef, useState, type ReactNode } from "react";
++
++import { readThreadStreamedTurnItems } from "../../state/entities";
++import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
++import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
++import { composerFloatingLayerProps } from "./composerEventScope";
++import {
++  LEGACY_RESPONSE_RATE_LABEL,
++  TURN_PERFORMANCE_METRIC_LABELS,
++} from "./TurnPerformance.catalog";
++import {
++  COMPOSER_INLINE_PRIORITY,
++  compactMetricText,
++  countTurnStreamedChars,
++  createLiveRateSampler,
++  deriveTurnPerformanceMetrics,
++  filterVisibleMetrics,
++  formatCompactContext,
++  isTurnRunning,
++  liveRateKey,
++  pickInlineMetrics,
++  TURN_PERFORMANCE_LAYOUT,
++  type TurnPerformanceInput,
++  type TurnPerformanceMetric,
++  type TurnPerformanceMetricId,
++  type TurnPerformanceSource,
++} from "./TurnPerformance.logic";
++
++const LIVE_SAMPLE_MS = 500;
++
++/** Ticks while `active`, so running turns show elapsed time. */
++function useNow(active: boolean, intervalMs: number): number {
++  const [now, setNow] = useState(Date.now);
++  useEffect(() => {
++    if (!active) return;
++    setNow(Date.now());
++    const timer = window.setInterval(() => setNow(Date.now()), intervalMs);
++    return () => window.clearInterval(timer);
++  }, [active, intervalMs]);
++  return now;
++}
++
++/**
++ * Live tokens/s for one running provider turn of one thread. Samples that turn's streamed answer
++ * and reasoning text; a different thread or turn starts a fresh sampler.
++ */
++function useLiveTokensPerSecond(
++  threadRef: ScopedThreadRef | null,
++  providerTurnId: ProviderTurnId | null,
++): number | null {
++  const [rate, setRate] = useState<{ key: string; value: number | null } | null>(null);
++  const samplerRef = useRef(createLiveRateSampler());
++  const environmentId = threadRef?.environmentId ?? null;
++  const threadId = threadRef?.threadId ?? null;
++  const key =
++    environmentId === null || threadId === null || providerTurnId === null
++      ? null
++      : liveRateKey(`${environmentId}\u0000${threadId}`, providerTurnId);
++  // Restarts only when the thread or turn changes, not when the ref object is rebuilt.
++  useEffect(() => {
++    const sampler = samplerRef.current;
++    sampler.reset();
++    if (environmentId === null || threadId === null || providerTurnId === null || key === null)
++      return;
++    const ref: ScopedThreadRef = { environmentId, threadId };
++    const sample = () => {
++      const chars = countTurnStreamedChars(readThreadStreamedTurnItems(ref), providerTurnId);
++      setRate({ key, value: sampler.sample(key, chars, performance.now()) });
++    };
++    sample();
++    const timer = window.setInterval(sample, LIVE_SAMPLE_MS);
++    return () => {
++      window.clearInterval(timer);
++      sampler.reset();
++    };
++  }, [key, environmentId, threadId, providerTurnId]);
++  return rate !== null && rate.key === key ? rate.value : null;
++}
++
++function useMetricLabel() {
++  const m = useMessages();
++  return (metric: TurnPerformanceMetric, form: "label" | "short") =>
++    metric.variant === "legacyResponseRate"
++      ? m(LEGACY_RESPONSE_RATE_LABEL)
++      : m(TURN_PERFORMANCE_METRIC_LABELS[metric.id][form]);
++}
++
++/** Metrics whose short label reads before the value ("TTFT 820 ms"); the rest read after. */
++const LABEL_FIRST = new Set<TurnPerformanceMetricId>(["ttft", "ttfa", "model"]);
++/** Self-describing values that need no label inline. */
++const NO_INLINE_LABEL = new Set<TurnPerformanceMetricId>([
++  "turnTime",
++  "provider",
++  "reasoningEffort",
++  "speedMode",
++]);
++
++function InlineMetric({ metric }: { metric: TurnPerformanceMetric }) {
++  const labelOf = useMetricLabel();
++  const label = NO_INLINE_LABEL.has(metric.id) ? null : labelOf(metric, "short");
++  const value = (
++    <span
++      data-precision={metric.precision}
++      className={metric.precision === "estimated" ? "text-foreground/70" : "text-foreground/80"}
++    >
++      {metric.display}
++    </span>
++  );
++  return (
++    <span className="inline-flex items-baseline gap-1 whitespace-nowrap">
++      {label !== null && LABEL_FIRST.has(metric.id) && (
++        <span className="text-muted-foreground/70">{label}</span>
++      )}
++      {value}
++      {label !== null && !LABEL_FIRST.has(metric.id) && (
++        <span className="text-muted-foreground/70">{label}</span>
++      )}
++    </span>
++  );
++}
++
++/** Each separator travels with its metric, so a metric that wraps out of a clipped line takes it along. */
++function InlineMetrics({ metrics }: { metrics: ReadonlyArray<TurnPerformanceMetric> }) {
++  return metrics.map((metric, index) => (
++    <span key={metric.id} className="inline-flex items-baseline gap-x-1.5 whitespace-nowrap">
++      {index > 0 && (
++        <span aria-hidden="true" className="text-muted-foreground/40">
++          ·
++        </span>
++      )}
++      <InlineMetric metric={metric} />
++    </span>
++  ));
++}
++
++const PRECISION_TEXT = {
++  exact: msg("Exact", { $context: "a measured value, not an estimate" }),
++  estimated: msg("Estimate"),
++  unavailable: msg("Not reported by this provider"),
++} as const;
++
++/** One metric as a short label and a compact value; hover, click, tap or Enter shows the details. */
++function MetricCell({
++  metric,
++  badge = false,
++}: {
++  metric: TurnPerformanceMetric;
++  /** A header badge shows only its value, such as the model. */
++  badge?: boolean;
++}) {
++  const gt = useGT();
++  const m = useMessages();
++  const labelOf = useMetricLabel();
++  const label = labelOf(metric, "label");
++  const abbr =
++    metric.variant === "legacyResponseRate"
++      ? gt("Rate", { $context: "short label of the legacy response rate" })
++      : m(TURN_PERFORMANCE_METRIC_LABELS[metric.id].abbr);
++  const unavailable = metric.precision === "unavailable";
++  return (
++    <Popover>
++      <PopoverTrigger
++        openOnHover
++        delay={300}
++        closeDelay={100}
++        render={
++          <button
++            type="button"
++            data-metric={metric.id}
++            data-precision={metric.precision}
++            aria-label={gt("{label}: {value}", { label, value: metric.display })}
++            className={
++              badge
++                ? "max-w-40 truncate rounded-sm border border-border/70 px-1.5 text-2xs leading-4 text-foreground/80 -outline-offset-2"
++                : `flex min-w-0 items-baseline justify-between gap-1.5 rounded-sm text-left -outline-offset-2 ${unavailable ? "opacity-50" : ""}`
++            }
++          />
++        }
++      >
++        {badge ? (
++          metric.display
++        ) : (
++          <>
++            <span className="shrink-0 text-muted-foreground">{abbr}</span>
++            <span
++              className={`truncate tabular-nums ${metric.precision === "estimated" ? "text-foreground/70" : "text-foreground/85"}`}
++            >
++              {compactMetricText(metric)}
++              {metric.partial && !unavailable ? (
++                <span aria-hidden="true" className="text-muted-foreground">
++                  *
++                </span>
++              ) : null}
++            </span>
++          </>
++        )}
++      </PopoverTrigger>
++      <PopoverPopup {...composerFloatingLayerProps} side="top" className="max-w-72">
++        <div className="flex flex-col gap-0.5 text-xs">
++          <span className="font-medium">{label}</span>
++          {unavailable ? null : <span className="tabular-nums">{metric.display}</span>}
++          <span className="text-muted-foreground">{m(PRECISION_TEXT[metric.precision])}</span>
++          <span className="text-muted-foreground">{metric.reason}</span>
++          {metric.partial && !unavailable ? (
++            <span className="text-muted-foreground">
++              {gt("Partial: measured from incomplete data.")}
++            </span>
++          ) : null}
++        </div>
++      </PopoverPopup>
++    </Popover>
++  );
++}
++
++/**
++ * One turn's metrics, compact: a header of provider, model, effort and speed, grouped cells of
++ * short labels (timing, speed, tokens), and context as one bar.
++ */
++export function TurnPerformanceGrid({
++  source,
++  metrics,
++  live,
++}: {
++  source: TurnPerformanceSource;
++  metrics: ReadonlyArray<TurnPerformanceMetric>;
++  live: boolean;
++}) {
++  const byId = new Map(metrics.map((metric) => [metric.id, metric]));
++  const badges = TURN_PERFORMANCE_LAYOUT.header.flatMap((id) => {
++    const metric = byId.get(id);
++    return metric === undefined || id === "provider" || metric.precision === "unavailable"
++      ? []
++      : [metric];
++  });
++  const context = byId.get(TURN_PERFORMANCE_LAYOUT.context);
++  const usage = contextOf(source);
++  const contextPercent =
++    usage !== null && usage.maxTokens != null && usage.maxTokens > 0
++      ? Math.max(0, Math.min(100, (usage.usedTokens / usage.maxTokens) * 100))
++      : null;
++  return (
++    <div className="flex flex-col gap-2 text-xs">
++      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
++        {live && (
++          <span aria-hidden="true" className="size-1.5 animate-pulse rounded-full bg-success" />
++        )}
++        {byId.has("provider") ? (
++          <span className="inline-flex min-w-0 items-center gap-1 text-muted-foreground">
++            {source.driver !== undefined ? (
++              <ProviderInstanceIcon
++                driverKind={ProviderDriverKind.make(source.driver)}
++                displayName={source.providerName}
++                accentColor={source.accentColor}
++                className="z-auto"
++                iconClassName="size-3.5"
++              />
++            ) : null}
++            <span className="max-w-32 truncate">{source.providerName}</span>
++          </span>
++        ) : null}
++        {badges.map((metric) => (
++          <MetricCell key={metric.id} metric={metric} badge />
++        ))}
++      </div>
++      {TURN_PERFORMANCE_LAYOUT.groups.map((group) => {
++        const cells = group.metrics.flatMap((id) => {
++          const metric = byId.get(id);
++          return metric === undefined ? [] : [metric];
++        });
++        return cells.length === 0 ? null : (
++          <div
++            key={group.id}
++            data-metric-group={group.id}
++            className="grid grid-cols-3 gap-x-3 gap-y-0.5"
++          >
++            {cells.map((metric) => (
++              <MetricCell key={metric.id} metric={metric} />
++            ))}
++          </div>
++        );
++      })}
++      {context !== undefined ? (
++        <div className="flex min-w-0 items-center gap-2">
++          <span className="min-w-0 flex-1">
++            <MetricCell
++              metric={
++                usage === null || context.precision === "unavailable"
++                  ? context
++                  : {
++                      ...context,
++                      text: formatCompactContext(usage.usedTokens, usage.maxTokens ?? null),
++                    }
++              }
++            />
++          </span>
++          {contextPercent !== null ? (
++            <span
++              aria-hidden="true"
++              className="block h-[3px] w-16 shrink-0 overflow-hidden rounded-full bg-foreground/10"
++            >
++              <span
++                className="block h-full bg-muted-foreground/70"
++                style={{ width: `${contextPercent}%` }}
++              />
++            </span>
++          ) : null}
++        </div>
++      ) : null}
++    </div>
++  );
++}
++
++/** A turn's metrics in a popover: its title, then the compact grid. */
++export function TurnPerformanceBreakdown({
++  title,
++  source,
++  metrics,
++  live = false,
++}: {
++  title: string;
++  source: TurnPerformanceSource;
++  metrics: ReadonlyArray<TurnPerformanceMetric>;
++  live?: boolean;
++}) {
++  const gt = useGT();
++  return (
++    <div className="flex flex-col gap-2.5 text-xs">
++      <h3 className="font-medium">{title}</h3>
++      <TurnPerformanceGrid source={source} metrics={metrics} live={live} />
++      <p className="text-2xs text-muted-foreground">
++        {gt(
++          "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured.",
++        )}
++      </p>
++    </div>
++  );
++}
++
++function TurnPerformanceSummary({
++  label,
++  live,
++  metrics,
++  inline,
++  title,
++  source,
++  ariaLabel,
++  className,
++}: {
++  label: ReactNode;
++  live: boolean;
++  metrics: ReadonlyArray<TurnPerformanceMetric>;
++  inline: ReadonlyArray<TurnPerformanceMetric>;
++  title: string;
++  source: TurnPerformanceSource;
++  ariaLabel: string;
++  className?: string;
++}) {
++  return (
++    <Popover>
++      <PopoverTrigger
++        openOnHover
++        delay={150}
++        closeDelay={150}
++        render={
++          // One clipped line: metrics that do not fit wrap out of view, lowest priority first.
++          <button
++            type="button"
++            aria-label={ariaLabel}
++            className={`flex h-4 min-w-0 flex-wrap items-baseline gap-x-1.5 overflow-hidden rounded-sm text-left -outline-offset-2 ${className ?? ""}`}
++          />
++        }
++      >
++        <span className="inline-flex shrink-0 items-center gap-1 text-muted-foreground/70">
++          {live && (
++            <span aria-hidden="true" className="size-1.5 animate-pulse rounded-full bg-success" />
++          )}
++          {label}
++        </span>
++        <InlineMetrics metrics={inline} />
++      </PopoverTrigger>
++      <PopoverPopup {...composerFloatingLayerProps} side="top" align="start" width="md">
++        <TurnPerformanceBreakdown title={title} source={source} metrics={metrics} live={live} />
++      </PopoverPopup>
++    </Popover>
++  );
++}
++
++function contextOf(source: TurnPerformanceSource): TurnPerformanceInput["context"] {
++  const usage = source.turn.tokenUsage;
++  return usage === undefined ? null : { usedTokens: usage.usedTokens, maxTokens: usage.maxTokens };
++}
++
++/** A running turn's metrics, ticking and sampling live tokens/s while it runs. */
++function useTurnMetrics(
++  threadRef: ScopedThreadRef | null,
++  source: TurnPerformanceSource,
++  hidden: ReadonlySet<string>,
++): ReadonlyArray<TurnPerformanceMetric> {
++  const running = isTurnRunning(source.turn);
++  const now = useNow(running, 1000);
++  const liveRate = useLiveTokensPerSecond(running ? threadRef : null, source.turn.id);
++  return filterVisibleMetrics(
++    deriveTurnPerformanceMetrics({
++      ...source,
++      context: contextOf(source),
++      liveTokensPerSecond: running ? liveRate : null,
++      nowMs: now,
++    }),
++    hidden,
++  );
++}
++
++function CurrentTurnSummary({
++  threadRef,
++  source,
++  hidden,
++}: {
++  threadRef: ScopedThreadRef | null;
++  source: TurnPerformanceSource;
++  hidden: ReadonlySet<string>;
++}) {
++  const running = isTurnRunning(source.turn);
++  const metrics = useTurnMetrics(threadRef, source, hidden);
++  const inline = pickInlineMetrics(metrics, COMPOSER_INLINE_PRIORITY.current);
++  return (
++    <TurnPerformanceSummary
++      label="Now"
++      live={running}
++      metrics={metrics}
++      inline={inline}
++      title="Current turn"
++      source={source}
++      ariaLabel="Current turn performance details"
++      className="shrink"
++    />
++  );
++}
++
++function PreviousTurnSummary({
++  source,
++  hidden,
++}: {
++  source: TurnPerformanceSource;
++  hidden: ReadonlySet<string>;
++}) {
++  const metrics = filterVisibleMetrics(
++    deriveTurnPerformanceMetrics({
++      ...source,
++      context: contextOf(source),
++      liveTokensPerSecond: null,
++      nowMs: Date.now(),
++    }),
++    hidden,
++  );
++  const inline = pickInlineMetrics(metrics, COMPOSER_INLINE_PRIORITY.previous);
++  if (inline.length === 0 && metrics.length === 0) return null;
++  return (
++    <TurnPerformanceSummary
++      label="Last"
++      live={false}
++      metrics={metrics}
++      inline={inline}
++      title={`Previous turn · ${source.turn.status}`}
++      source={source}
++      ariaLabel="Previous turn performance details"
++      className="shrink-[8]"
++    />
++  );
++}
++
++/**
++ * The composer footer's turn performance: the running turn (live) and the last completed turn of
++ * this thread, inline so they share one line with the limits and context. The last turn gives up
++ * room first.
++ */
++export function ComposerTurnPerformance({
++  threadRef,
++  current,
++  previous,
++  hiddenMetrics,
++}: {
++  threadRef: ScopedThreadRef | null;
++  current: TurnPerformanceSource | null;
++  previous: TurnPerformanceSource | null;
++  hiddenMetrics: ReadonlySet<string>;
++}) {
++  if (current === null && previous === null) return null;
++  const threadKey = threadRef === null ? "" : `${threadRef.environmentId}:${threadRef.threadId}`;
++  return (
++    <span
++      data-composer-turn-performance="true"
++      aria-label="Turn performance"
++      className="flex min-w-0 flex-1 items-center justify-end gap-x-4"
++    >
++      {current !== null && (
++        <CurrentTurnSummary
++          key={`${threadKey}:${current.turn.id}`}
++          threadRef={threadRef}
++          source={current}
++          hidden={hiddenMetrics}
++        />
++      )}
++      {previous !== null && (
++        <PreviousTurnSummary
++          key={`${threadKey}:${previous.turn.id}`}
++          source={previous}
++          hidden={hiddenMetrics}
++        />
++      )}
++    </span>
++  );
++}
++
++export interface TurnPerformanceTimelineValue {
++  readonly threadId: ThreadId;
++  /** This thread's own provider turns; items from other threads never resolve. */
++  readonly sources: ReadonlyMap<ProviderTurnId, TurnPerformanceSource>;
++  readonly hiddenMetrics: ReadonlySet<string>;
++}
++
++export const TurnPerformanceTimelineCtx = createContext<TurnPerformanceTimelineValue | null>(null);
++
++/** One line under an assistant reply: the provider turn that produced it, kept as history. */
++export function ReplyTurnPerformance({
++  sourceThreadId,
++  providerTurnId,
++}: {
++  sourceThreadId: ThreadId | undefined;
++  providerTurnId: ProviderTurnId | null | undefined;
++}) {
++  const ctx = use(TurnPerformanceTimelineCtx);
++  if (
++    ctx === null ||
++    providerTurnId == null ||
++    sourceThreadId === undefined ||
++    sourceThreadId !== ctx.threadId
++  )
++    return null;
++  const source = ctx.sources.get(providerTurnId);
++  if (source === undefined || isTurnRunning(source.turn)) return null;
++  return <ReplyTurnPerformanceLine source={source} hidden={ctx.hiddenMetrics} />;
++}
++
++function ReplyTurnPerformanceLine({
++  source,
++  hidden,
++}: {
++  source: TurnPerformanceSource;
++  hidden: ReadonlySet<string>;
++}) {
++  const metrics = filterVisibleMetrics(
++    deriveTurnPerformanceMetrics({
++      ...source,
++      context: contextOf(source),
++      liveTokensPerSecond: null,
++      nowMs: Date.now(),
++    }),
++    hidden,
++  );
++  const inline = pickInlineMetrics(metrics, COMPOSER_INLINE_PRIORITY.reply);
++  if (metrics.length === 0) return null;
++  return (
++    // Right of the reply's actions, on their row: one clipped line that drops its lowest-priority
++    // metrics when narrow, so it never wraps or pushes the actions.
++    <span
++      data-reply-turn-performance={source.turn.id}
++      className="flex min-w-0 flex-1 justify-end overflow-hidden text-2xs leading-4 text-muted-foreground tabular-nums"
++    >
++      <Popover>
++        <PopoverTrigger
++          openOnHover
++          delay={150}
++          closeDelay={150}
++          render={
++            <button
++              type="button"
++              aria-label="Turn performance details"
++              className="flex h-4 min-w-0 flex-wrap items-baseline justify-end gap-x-1.5 overflow-hidden rounded-sm text-left -outline-offset-2"
++            />
++          }
++        >
++          {inline.length > 0 ? (
++            <InlineMetrics metrics={inline} />
++          ) : (
++            <span className="text-muted-foreground/70">Stats</span>
++          )}
++        </PopoverTrigger>
++        <PopoverPopup side="top" align="end" width="md">
++          <TurnPerformanceBreakdown
++            title={`Turn ${source.turn.ordinal} · ${source.turn.status}`}
++            source={source}
++            metrics={metrics}
++          />
++        </PopoverPopup>
++      </Popover>
++    </span>
++  );
++}
+diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
+index e0439b0c88..fde3bd07b0 100644
+--- a/apps/web/src/i18n/translations/de.json
++++ b/apps/web/src/i18n/translations/de.json
+@@ -13028,5 +13028,77 @@
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+   "9b2ef56a4b9002a4": "Resolve the pending approval first.",
+   "61177a366aed53ed": "Answer the pending question first.",
+-  "670969dbcf386a31": "Wait for the current turn to finish."
++  "670969dbcf386a31": "Wait for the current turn to finish.",
++  "4eb5742fd9f7ff28": "Time to first token",
++  "67d346a4058bc94d": "TTFT",
++  "e2b04406f8e9f32e": "Request sent to the first generated token, including reasoning.",
++  "2021e0da680e75a0": "Time to first answer",
++  "c10fc956489f24d0": "TTFA",
++  "73fb3b47d60bfe14": "Request sent to the first visible answer text.",
++  "683348f1cba7ff47": "Live tokens/s",
++  "223f0517d9e30928": "live",
++  "bdc5c7bbb3903981": "Estimated rate over the last 2 seconds while a turn runs.",
++  "319b5ae15dfc0e5b": "Average tokens/s",
++  "bc0007d5febbd221": "avg",
++  "75e54ef4866dc08e": "Generation tokens over active generation time, never over turn duration.",
++  "59f63fb58b06c96f": "Peak tokens/s",
++  "7871f32ac370002f": "peak",
++  "990edfa5cdf9c2f1": "Highest estimated rate over a 2 second window.",
++  "17554cfe5cad2ded": "Input tokens",
++  "35811ba4b607b49a": "in",
++  "0529e3ad6097699a": "Provider-reported input, including cache reads and writes.",
++  "8435cf543bf90afc": "Output tokens",
++  "3316c0befbef971a": "out",
++  "60131ef05c99d37a": "Provider-reported output, including reasoning.",
++  "010913f9e53c7d7e": "Reasoning tokens",
++  "6d8f32cf958d3538": "reasoning",
++  "46f0a331858705c6": "Provider-reported reasoning tokens, when reported separately.",
++  "cc1e468fa9859e73": "Cached tokens",
++  "042ed6a377e305d8": "cached in",
++  "75dd33703744d459": "Input served from the prompt cache.",
++  "104090d7e522b822": "Cache hit rate",
++  "530fc0f5c4767072": "cached",
++  "4b6b4c69c7f90cd0": "Cached input divided by total input.",
++  "90d2a920295fd159": "Context usage",
++  "b3707ef8084eb12e": "context",
++  "542d7392e733d2df": "Context occupancy and window size.",
++  "9ff6e3e75435240e": "Tool time",
++  "d84ed842ddb3eb4a": "tools",
++  "c98344bd6fdc6b2b": "Wall-clock time waiting on tools, with overlaps merged.",
++  "867ea5ab6dd29f69": "Turn time",
++  "8a24e203ab5d75e8": "turn",
++  "79c84f1b1b1bf134": "Request sent to the end of the turn.",
++  "9a69141329736ce1": "provider",
++  "7a2edd4724c35a07": "Provider that ran the turn.",
++  "4618b444a76584e3": "model",
++  "482a77038e45414e": "Requested model, and the reported one when it differs.",
++  "6dbe07d35ae6bcdb": "effort",
++  "e0fd5e9064683540": "Reasoning effort requested for the turn.",
++  "b7670f25c58e1951": "Speed mode",
++  "f1a40a6668b555d8": "speed",
++  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
+ }
+diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
+index acf50b7442..5028b1c761 100644
+--- a/apps/web/src/i18n/translations/en.json
++++ b/apps/web/src/i18n/translations/en.json
+@@ -13037,5 +13037,77 @@
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+   "9b2ef56a4b9002a4": "Resolve the pending approval first.",
+   "61177a366aed53ed": "Answer the pending question first.",
+-  "670969dbcf386a31": "Wait for the current turn to finish."
++  "670969dbcf386a31": "Wait for the current turn to finish.",
++  "4eb5742fd9f7ff28": "Time to first token",
++  "67d346a4058bc94d": "TTFT",
++  "e2b04406f8e9f32e": "Request sent to the first generated token, including reasoning.",
++  "2021e0da680e75a0": "Time to first answer",
++  "c10fc956489f24d0": "TTFA",
++  "73fb3b47d60bfe14": "Request sent to the first visible answer text.",
++  "683348f1cba7ff47": "Live tokens/s",
++  "223f0517d9e30928": "live",
++  "bdc5c7bbb3903981": "Estimated rate over the last 2 seconds while a turn runs.",
++  "319b5ae15dfc0e5b": "Average tokens/s",
++  "bc0007d5febbd221": "avg",
++  "75e54ef4866dc08e": "Generation tokens over active generation time, never over turn duration.",
++  "59f63fb58b06c96f": "Peak tokens/s",
++  "7871f32ac370002f": "peak",
++  "990edfa5cdf9c2f1": "Highest estimated rate over a 2 second window.",
++  "17554cfe5cad2ded": "Input tokens",
++  "35811ba4b607b49a": "in",
++  "0529e3ad6097699a": "Provider-reported input, including cache reads and writes.",
++  "8435cf543bf90afc": "Output tokens",
++  "3316c0befbef971a": "out",
++  "60131ef05c99d37a": "Provider-reported output, including reasoning.",
++  "010913f9e53c7d7e": "Reasoning tokens",
++  "6d8f32cf958d3538": "reasoning",
++  "46f0a331858705c6": "Provider-reported reasoning tokens, when reported separately.",
++  "cc1e468fa9859e73": "Cached tokens",
++  "042ed6a377e305d8": "cached in",
++  "75dd33703744d459": "Input served from the prompt cache.",
++  "104090d7e522b822": "Cache hit rate",
++  "530fc0f5c4767072": "cached",
++  "4b6b4c69c7f90cd0": "Cached input divided by total input.",
++  "90d2a920295fd159": "Context usage",
++  "b3707ef8084eb12e": "context",
++  "542d7392e733d2df": "Context occupancy and window size.",
++  "9ff6e3e75435240e": "Tool time",
++  "d84ed842ddb3eb4a": "tools",
++  "c98344bd6fdc6b2b": "Wall-clock time waiting on tools, with overlaps merged.",
++  "867ea5ab6dd29f69": "Turn time",
++  "8a24e203ab5d75e8": "turn",
++  "79c84f1b1b1bf134": "Request sent to the end of the turn.",
++  "9a69141329736ce1": "provider",
++  "7a2edd4724c35a07": "Provider that ran the turn.",
++  "4618b444a76584e3": "model",
++  "482a77038e45414e": "Requested model, and the reported one when it differs.",
++  "6dbe07d35ae6bcdb": "effort",
++  "e0fd5e9064683540": "Reasoning effort requested for the turn.",
++  "b7670f25c58e1951": "Speed mode",
++  "f1a40a6668b555d8": "speed",
++  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
+ }
+diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
+index 66c7c67acf..b4272c2a0e 100644
+--- a/apps/web/src/i18n/translations/es.json
++++ b/apps/web/src/i18n/translations/es.json
+@@ -13023,5 +13023,77 @@
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+   "9b2ef56a4b9002a4": "Resolve the pending approval first.",
+   "61177a366aed53ed": "Answer the pending question first.",
+-  "670969dbcf386a31": "Wait for the current turn to finish."
++  "670969dbcf386a31": "Wait for the current turn to finish.",
++  "4eb5742fd9f7ff28": "Time to first token",
++  "67d346a4058bc94d": "TTFT",
++  "e2b04406f8e9f32e": "Request sent to the first generated token, including reasoning.",
++  "2021e0da680e75a0": "Time to first answer",
++  "c10fc956489f24d0": "TTFA",
++  "73fb3b47d60bfe14": "Request sent to the first visible answer text.",
++  "683348f1cba7ff47": "Live tokens/s",
++  "223f0517d9e30928": "live",
++  "bdc5c7bbb3903981": "Estimated rate over the last 2 seconds while a turn runs.",
++  "319b5ae15dfc0e5b": "Average tokens/s",
++  "bc0007d5febbd221": "avg",
++  "75e54ef4866dc08e": "Generation tokens over active generation time, never over turn duration.",
++  "59f63fb58b06c96f": "Peak tokens/s",
++  "7871f32ac370002f": "peak",
++  "990edfa5cdf9c2f1": "Highest estimated rate over a 2 second window.",
++  "17554cfe5cad2ded": "Input tokens",
++  "35811ba4b607b49a": "in",
++  "0529e3ad6097699a": "Provider-reported input, including cache reads and writes.",
++  "8435cf543bf90afc": "Output tokens",
++  "3316c0befbef971a": "out",
++  "60131ef05c99d37a": "Provider-reported output, including reasoning.",
++  "010913f9e53c7d7e": "Reasoning tokens",
++  "6d8f32cf958d3538": "reasoning",
++  "46f0a331858705c6": "Provider-reported reasoning tokens, when reported separately.",
++  "cc1e468fa9859e73": "Cached tokens",
++  "042ed6a377e305d8": "cached in",
++  "75dd33703744d459": "Input served from the prompt cache.",
++  "104090d7e522b822": "Cache hit rate",
++  "530fc0f5c4767072": "cached",
++  "4b6b4c69c7f90cd0": "Cached input divided by total input.",
++  "90d2a920295fd159": "Context usage",
++  "b3707ef8084eb12e": "context",
++  "542d7392e733d2df": "Context occupancy and window size.",
++  "9ff6e3e75435240e": "Tool time",
++  "d84ed842ddb3eb4a": "tools",
++  "c98344bd6fdc6b2b": "Wall-clock time waiting on tools, with overlaps merged.",
++  "867ea5ab6dd29f69": "Turn time",
++  "8a24e203ab5d75e8": "turn",
++  "79c84f1b1b1bf134": "Request sent to the end of the turn.",
++  "9a69141329736ce1": "provider",
++  "7a2edd4724c35a07": "Provider that ran the turn.",
++  "4618b444a76584e3": "model",
++  "482a77038e45414e": "Requested model, and the reported one when it differs.",
++  "6dbe07d35ae6bcdb": "effort",
++  "e0fd5e9064683540": "Reasoning effort requested for the turn.",
++  "b7670f25c58e1951": "Speed mode",
++  "f1a40a6668b555d8": "speed",
++  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
+ }
+diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
+index 8a7addd84d..c9a55f81a5 100644
+--- a/apps/web/src/i18n/translations/fr.json
++++ b/apps/web/src/i18n/translations/fr.json
+@@ -13028,5 +13028,77 @@
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+   "9b2ef56a4b9002a4": "Resolve the pending approval first.",
+   "61177a366aed53ed": "Answer the pending question first.",
+-  "670969dbcf386a31": "Wait for the current turn to finish."
++  "670969dbcf386a31": "Wait for the current turn to finish.",
++  "4eb5742fd9f7ff28": "Time to first token",
++  "67d346a4058bc94d": "TTFT",
++  "e2b04406f8e9f32e": "Request sent to the first generated token, including reasoning.",
++  "2021e0da680e75a0": "Time to first answer",
++  "c10fc956489f24d0": "TTFA",
++  "73fb3b47d60bfe14": "Request sent to the first visible answer text.",
++  "683348f1cba7ff47": "Live tokens/s",
++  "223f0517d9e30928": "live",
++  "bdc5c7bbb3903981": "Estimated rate over the last 2 seconds while a turn runs.",
++  "319b5ae15dfc0e5b": "Average tokens/s",
++  "bc0007d5febbd221": "avg",
++  "75e54ef4866dc08e": "Generation tokens over active generation time, never over turn duration.",
++  "59f63fb58b06c96f": "Peak tokens/s",
++  "7871f32ac370002f": "peak",
++  "990edfa5cdf9c2f1": "Highest estimated rate over a 2 second window.",
++  "17554cfe5cad2ded": "Input tokens",
++  "35811ba4b607b49a": "in",
++  "0529e3ad6097699a": "Provider-reported input, including cache reads and writes.",
++  "8435cf543bf90afc": "Output tokens",
++  "3316c0befbef971a": "out",
++  "60131ef05c99d37a": "Provider-reported output, including reasoning.",
++  "010913f9e53c7d7e": "Reasoning tokens",
++  "6d8f32cf958d3538": "reasoning",
++  "46f0a331858705c6": "Provider-reported reasoning tokens, when reported separately.",
++  "cc1e468fa9859e73": "Cached tokens",
++  "042ed6a377e305d8": "cached in",
++  "75dd33703744d459": "Input served from the prompt cache.",
++  "104090d7e522b822": "Cache hit rate",
++  "530fc0f5c4767072": "cached",
++  "4b6b4c69c7f90cd0": "Cached input divided by total input.",
++  "90d2a920295fd159": "Context usage",
++  "b3707ef8084eb12e": "context",
++  "542d7392e733d2df": "Context occupancy and window size.",
++  "9ff6e3e75435240e": "Tool time",
++  "d84ed842ddb3eb4a": "tools",
++  "c98344bd6fdc6b2b": "Wall-clock time waiting on tools, with overlaps merged.",
++  "867ea5ab6dd29f69": "Turn time",
++  "8a24e203ab5d75e8": "turn",
++  "79c84f1b1b1bf134": "Request sent to the end of the turn.",
++  "9a69141329736ce1": "provider",
++  "7a2edd4724c35a07": "Provider that ran the turn.",
++  "4618b444a76584e3": "model",
++  "482a77038e45414e": "Requested model, and the reported one when it differs.",
++  "6dbe07d35ae6bcdb": "effort",
++  "e0fd5e9064683540": "Reasoning effort requested for the turn.",
++  "b7670f25c58e1951": "Speed mode",
++  "f1a40a6668b555d8": "speed",
++  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
+ }
+diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
+index 6fa8933f35..f3f55a4e70 100644
+--- a/apps/web/src/i18n/translations/ja.json
++++ b/apps/web/src/i18n/translations/ja.json
+@@ -12964,5 +12964,77 @@
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+   "9b2ef56a4b9002a4": "Resolve the pending approval first.",
+   "61177a366aed53ed": "Answer the pending question first.",
+-  "670969dbcf386a31": "Wait for the current turn to finish."
++  "670969dbcf386a31": "Wait for the current turn to finish.",
++  "4eb5742fd9f7ff28": "Time to first token",
++  "67d346a4058bc94d": "TTFT",
++  "e2b04406f8e9f32e": "Request sent to the first generated token, including reasoning.",
++  "2021e0da680e75a0": "Time to first answer",
++  "c10fc956489f24d0": "TTFA",
++  "73fb3b47d60bfe14": "Request sent to the first visible answer text.",
++  "683348f1cba7ff47": "Live tokens/s",
++  "223f0517d9e30928": "live",
++  "bdc5c7bbb3903981": "Estimated rate over the last 2 seconds while a turn runs.",
++  "319b5ae15dfc0e5b": "Average tokens/s",
++  "bc0007d5febbd221": "avg",
++  "75e54ef4866dc08e": "Generation tokens over active generation time, never over turn duration.",
++  "59f63fb58b06c96f": "Peak tokens/s",
++  "7871f32ac370002f": "peak",
++  "990edfa5cdf9c2f1": "Highest estimated rate over a 2 second window.",
++  "17554cfe5cad2ded": "Input tokens",
++  "35811ba4b607b49a": "in",
++  "0529e3ad6097699a": "Provider-reported input, including cache reads and writes.",
++  "8435cf543bf90afc": "Output tokens",
++  "3316c0befbef971a": "out",
++  "60131ef05c99d37a": "Provider-reported output, including reasoning.",
++  "010913f9e53c7d7e": "Reasoning tokens",
++  "6d8f32cf958d3538": "reasoning",
++  "46f0a331858705c6": "Provider-reported reasoning tokens, when reported separately.",
++  "cc1e468fa9859e73": "Cached tokens",
++  "042ed6a377e305d8": "cached in",
++  "75dd33703744d459": "Input served from the prompt cache.",
++  "104090d7e522b822": "Cache hit rate",
++  "530fc0f5c4767072": "cached",
++  "4b6b4c69c7f90cd0": "Cached input divided by total input.",
++  "90d2a920295fd159": "Context usage",
++  "b3707ef8084eb12e": "context",
++  "542d7392e733d2df": "Context occupancy and window size.",
++  "9ff6e3e75435240e": "Tool time",
++  "d84ed842ddb3eb4a": "tools",
++  "c98344bd6fdc6b2b": "Wall-clock time waiting on tools, with overlaps merged.",
++  "867ea5ab6dd29f69": "Turn time",
++  "8a24e203ab5d75e8": "turn",
++  "79c84f1b1b1bf134": "Request sent to the end of the turn.",
++  "9a69141329736ce1": "provider",
++  "7a2edd4724c35a07": "Provider that ran the turn.",
++  "4618b444a76584e3": "model",
++  "482a77038e45414e": "Requested model, and the reported one when it differs.",
++  "6dbe07d35ae6bcdb": "effort",
++  "e0fd5e9064683540": "Reasoning effort requested for the turn.",
++  "b7670f25c58e1951": "Speed mode",
++  "f1a40a6668b555d8": "speed",
++  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
+ }
+diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
+index 673da47cc4..a04c6275d8 100644
+--- a/apps/web/src/i18n/translations/ko.json
++++ b/apps/web/src/i18n/translations/ko.json
+@@ -12961,5 +12961,77 @@
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+   "9b2ef56a4b9002a4": "Resolve the pending approval first.",
+   "61177a366aed53ed": "Answer the pending question first.",
+-  "670969dbcf386a31": "Wait for the current turn to finish."
++  "670969dbcf386a31": "Wait for the current turn to finish.",
++  "4eb5742fd9f7ff28": "Time to first token",
++  "67d346a4058bc94d": "TTFT",
++  "e2b04406f8e9f32e": "Request sent to the first generated token, including reasoning.",
++  "2021e0da680e75a0": "Time to first answer",
++  "c10fc956489f24d0": "TTFA",
++  "73fb3b47d60bfe14": "Request sent to the first visible answer text.",
++  "683348f1cba7ff47": "Live tokens/s",
++  "223f0517d9e30928": "live",
++  "bdc5c7bbb3903981": "Estimated rate over the last 2 seconds while a turn runs.",
++  "319b5ae15dfc0e5b": "Average tokens/s",
++  "bc0007d5febbd221": "avg",
++  "75e54ef4866dc08e": "Generation tokens over active generation time, never over turn duration.",
++  "59f63fb58b06c96f": "Peak tokens/s",
++  "7871f32ac370002f": "peak",
++  "990edfa5cdf9c2f1": "Highest estimated rate over a 2 second window.",
++  "17554cfe5cad2ded": "Input tokens",
++  "35811ba4b607b49a": "in",
++  "0529e3ad6097699a": "Provider-reported input, including cache reads and writes.",
++  "8435cf543bf90afc": "Output tokens",
++  "3316c0befbef971a": "out",
++  "60131ef05c99d37a": "Provider-reported output, including reasoning.",
++  "010913f9e53c7d7e": "Reasoning tokens",
++  "6d8f32cf958d3538": "reasoning",
++  "46f0a331858705c6": "Provider-reported reasoning tokens, when reported separately.",
++  "cc1e468fa9859e73": "Cached tokens",
++  "042ed6a377e305d8": "cached in",
++  "75dd33703744d459": "Input served from the prompt cache.",
++  "104090d7e522b822": "Cache hit rate",
++  "530fc0f5c4767072": "cached",
++  "4b6b4c69c7f90cd0": "Cached input divided by total input.",
++  "90d2a920295fd159": "Context usage",
++  "b3707ef8084eb12e": "context",
++  "542d7392e733d2df": "Context occupancy and window size.",
++  "9ff6e3e75435240e": "Tool time",
++  "d84ed842ddb3eb4a": "tools",
++  "c98344bd6fdc6b2b": "Wall-clock time waiting on tools, with overlaps merged.",
++  "867ea5ab6dd29f69": "Turn time",
++  "8a24e203ab5d75e8": "turn",
++  "79c84f1b1b1bf134": "Request sent to the end of the turn.",
++  "9a69141329736ce1": "provider",
++  "7a2edd4724c35a07": "Provider that ran the turn.",
++  "4618b444a76584e3": "model",
++  "482a77038e45414e": "Requested model, and the reported one when it differs.",
++  "6dbe07d35ae6bcdb": "effort",
++  "e0fd5e9064683540": "Reasoning effort requested for the turn.",
++  "b7670f25c58e1951": "Speed mode",
++  "f1a40a6668b555d8": "speed",
++  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
+ }
+diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
+index 0baaa5c8c6..2bd54d03ad 100644
+--- a/apps/web/src/i18n/translations/pt-BR.json
++++ b/apps/web/src/i18n/translations/pt-BR.json
+@@ -13028,5 +13028,77 @@
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+   "9b2ef56a4b9002a4": "Resolve the pending approval first.",
+   "61177a366aed53ed": "Answer the pending question first.",
+-  "670969dbcf386a31": "Wait for the current turn to finish."
++  "670969dbcf386a31": "Wait for the current turn to finish.",
++  "4eb5742fd9f7ff28": "Time to first token",
++  "67d346a4058bc94d": "TTFT",
++  "e2b04406f8e9f32e": "Request sent to the first generated token, including reasoning.",
++  "2021e0da680e75a0": "Time to first answer",
++  "c10fc956489f24d0": "TTFA",
++  "73fb3b47d60bfe14": "Request sent to the first visible answer text.",
++  "683348f1cba7ff47": "Live tokens/s",
++  "223f0517d9e30928": "live",
++  "bdc5c7bbb3903981": "Estimated rate over the last 2 seconds while a turn runs.",
++  "319b5ae15dfc0e5b": "Average tokens/s",
++  "bc0007d5febbd221": "avg",
++  "75e54ef4866dc08e": "Generation tokens over active generation time, never over turn duration.",
++  "59f63fb58b06c96f": "Peak tokens/s",
++  "7871f32ac370002f": "peak",
++  "990edfa5cdf9c2f1": "Highest estimated rate over a 2 second window.",
++  "17554cfe5cad2ded": "Input tokens",
++  "35811ba4b607b49a": "in",
++  "0529e3ad6097699a": "Provider-reported input, including cache reads and writes.",
++  "8435cf543bf90afc": "Output tokens",
++  "3316c0befbef971a": "out",
++  "60131ef05c99d37a": "Provider-reported output, including reasoning.",
++  "010913f9e53c7d7e": "Reasoning tokens",
++  "6d8f32cf958d3538": "reasoning",
++  "46f0a331858705c6": "Provider-reported reasoning tokens, when reported separately.",
++  "cc1e468fa9859e73": "Cached tokens",
++  "042ed6a377e305d8": "cached in",
++  "75dd33703744d459": "Input served from the prompt cache.",
++  "104090d7e522b822": "Cache hit rate",
++  "530fc0f5c4767072": "cached",
++  "4b6b4c69c7f90cd0": "Cached input divided by total input.",
++  "90d2a920295fd159": "Context usage",
++  "b3707ef8084eb12e": "context",
++  "542d7392e733d2df": "Context occupancy and window size.",
++  "9ff6e3e75435240e": "Tool time",
++  "d84ed842ddb3eb4a": "tools",
++  "c98344bd6fdc6b2b": "Wall-clock time waiting on tools, with overlaps merged.",
++  "867ea5ab6dd29f69": "Turn time",
++  "8a24e203ab5d75e8": "turn",
++  "79c84f1b1b1bf134": "Request sent to the end of the turn.",
++  "9a69141329736ce1": "provider",
++  "7a2edd4724c35a07": "Provider that ran the turn.",
++  "4618b444a76584e3": "model",
++  "482a77038e45414e": "Requested model, and the reported one when it differs.",
++  "6dbe07d35ae6bcdb": "effort",
++  "e0fd5e9064683540": "Reasoning effort requested for the turn.",
++  "b7670f25c58e1951": "Speed mode",
++  "f1a40a6668b555d8": "speed",
++  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
+ }
+diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
+index 8266f32309..6c00a045cb 100644
+--- a/apps/web/src/i18n/translations/ru.json
++++ b/apps/web/src/i18n/translations/ru.json
+@@ -13027,5 +13027,77 @@
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+   "9b2ef56a4b9002a4": "Resolve the pending approval first.",
+   "61177a366aed53ed": "Answer the pending question first.",
+-  "670969dbcf386a31": "Wait for the current turn to finish."
++  "670969dbcf386a31": "Wait for the current turn to finish.",
++  "4eb5742fd9f7ff28": "Time to first token",
++  "67d346a4058bc94d": "TTFT",
++  "e2b04406f8e9f32e": "Request sent to the first generated token, including reasoning.",
++  "2021e0da680e75a0": "Time to first answer",
++  "c10fc956489f24d0": "TTFA",
++  "73fb3b47d60bfe14": "Request sent to the first visible answer text.",
++  "683348f1cba7ff47": "Live tokens/s",
++  "223f0517d9e30928": "live",
++  "bdc5c7bbb3903981": "Estimated rate over the last 2 seconds while a turn runs.",
++  "319b5ae15dfc0e5b": "Average tokens/s",
++  "bc0007d5febbd221": "avg",
++  "75e54ef4866dc08e": "Generation tokens over active generation time, never over turn duration.",
++  "59f63fb58b06c96f": "Peak tokens/s",
++  "7871f32ac370002f": "peak",
++  "990edfa5cdf9c2f1": "Highest estimated rate over a 2 second window.",
++  "17554cfe5cad2ded": "Input tokens",
++  "35811ba4b607b49a": "in",
++  "0529e3ad6097699a": "Provider-reported input, including cache reads and writes.",
++  "8435cf543bf90afc": "Output tokens",
++  "3316c0befbef971a": "out",
++  "60131ef05c99d37a": "Provider-reported output, including reasoning.",
++  "010913f9e53c7d7e": "Reasoning tokens",
++  "6d8f32cf958d3538": "reasoning",
++  "46f0a331858705c6": "Provider-reported reasoning tokens, when reported separately.",
++  "cc1e468fa9859e73": "Cached tokens",
++  "042ed6a377e305d8": "cached in",
++  "75dd33703744d459": "Input served from the prompt cache.",
++  "104090d7e522b822": "Cache hit rate",
++  "530fc0f5c4767072": "cached",
++  "4b6b4c69c7f90cd0": "Cached input divided by total input.",
++  "90d2a920295fd159": "Context usage",
++  "b3707ef8084eb12e": "context",
++  "542d7392e733d2df": "Context occupancy and window size.",
++  "9ff6e3e75435240e": "Tool time",
++  "d84ed842ddb3eb4a": "tools",
++  "c98344bd6fdc6b2b": "Wall-clock time waiting on tools, with overlaps merged.",
++  "867ea5ab6dd29f69": "Turn time",
++  "8a24e203ab5d75e8": "turn",
++  "79c84f1b1b1bf134": "Request sent to the end of the turn.",
++  "9a69141329736ce1": "provider",
++  "7a2edd4724c35a07": "Provider that ran the turn.",
++  "4618b444a76584e3": "model",
++  "482a77038e45414e": "Requested model, and the reported one when it differs.",
++  "6dbe07d35ae6bcdb": "effort",
++  "e0fd5e9064683540": "Reasoning effort requested for the turn.",
++  "b7670f25c58e1951": "Speed mode",
++  "f1a40a6668b555d8": "speed",
++  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
+ }
+diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
+index fa7bd04a43..cdad67afe4 100644
+--- a/apps/web/src/i18n/translations/sv.json
++++ b/apps/web/src/i18n/translations/sv.json
+@@ -13035,5 +13035,77 @@
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+   "9b2ef56a4b9002a4": "Resolve the pending approval first.",
+   "61177a366aed53ed": "Answer the pending question first.",
+-  "670969dbcf386a31": "Wait for the current turn to finish."
++  "670969dbcf386a31": "Wait for the current turn to finish.",
++  "4eb5742fd9f7ff28": "Time to first token",
++  "67d346a4058bc94d": "TTFT",
++  "e2b04406f8e9f32e": "Request sent to the first generated token, including reasoning.",
++  "2021e0da680e75a0": "Time to first answer",
++  "c10fc956489f24d0": "TTFA",
++  "73fb3b47d60bfe14": "Request sent to the first visible answer text.",
++  "683348f1cba7ff47": "Live tokens/s",
++  "223f0517d9e30928": "live",
++  "bdc5c7bbb3903981": "Estimated rate over the last 2 seconds while a turn runs.",
++  "319b5ae15dfc0e5b": "Average tokens/s",
++  "bc0007d5febbd221": "avg",
++  "75e54ef4866dc08e": "Generation tokens over active generation time, never over turn duration.",
++  "59f63fb58b06c96f": "Peak tokens/s",
++  "7871f32ac370002f": "peak",
++  "990edfa5cdf9c2f1": "Highest estimated rate over a 2 second window.",
++  "17554cfe5cad2ded": "Input tokens",
++  "35811ba4b607b49a": "in",
++  "0529e3ad6097699a": "Provider-reported input, including cache reads and writes.",
++  "8435cf543bf90afc": "Output tokens",
++  "3316c0befbef971a": "out",
++  "60131ef05c99d37a": "Provider-reported output, including reasoning.",
++  "010913f9e53c7d7e": "Reasoning tokens",
++  "6d8f32cf958d3538": "reasoning",
++  "46f0a331858705c6": "Provider-reported reasoning tokens, when reported separately.",
++  "cc1e468fa9859e73": "Cached tokens",
++  "042ed6a377e305d8": "cached in",
++  "75dd33703744d459": "Input served from the prompt cache.",
++  "104090d7e522b822": "Cache hit rate",
++  "530fc0f5c4767072": "cached",
++  "4b6b4c69c7f90cd0": "Cached input divided by total input.",
++  "90d2a920295fd159": "Context usage",
++  "b3707ef8084eb12e": "context",
++  "542d7392e733d2df": "Context occupancy and window size.",
++  "9ff6e3e75435240e": "Tool time",
++  "d84ed842ddb3eb4a": "tools",
++  "c98344bd6fdc6b2b": "Wall-clock time waiting on tools, with overlaps merged.",
++  "867ea5ab6dd29f69": "Turn time",
++  "8a24e203ab5d75e8": "turn",
++  "79c84f1b1b1bf134": "Request sent to the end of the turn.",
++  "9a69141329736ce1": "provider",
++  "7a2edd4724c35a07": "Provider that ran the turn.",
++  "4618b444a76584e3": "model",
++  "482a77038e45414e": "Requested model, and the reported one when it differs.",
++  "6dbe07d35ae6bcdb": "effort",
++  "e0fd5e9064683540": "Reasoning effort requested for the turn.",
++  "b7670f25c58e1951": "Speed mode",
++  "f1a40a6668b555d8": "speed",
++  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
+ }
+diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
+index d95d971d27..855bb77718 100644
+--- a/apps/web/src/i18n/translations/zh.json
++++ b/apps/web/src/i18n/translations/zh.json
+@@ -13042,5 +13042,77 @@
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+   "9b2ef56a4b9002a4": "Resolve the pending approval first.",
+   "61177a366aed53ed": "Answer the pending question first.",
+-  "670969dbcf386a31": "Wait for the current turn to finish."
++  "670969dbcf386a31": "Wait for the current turn to finish.",
++  "4eb5742fd9f7ff28": "Time to first token",
++  "67d346a4058bc94d": "TTFT",
++  "e2b04406f8e9f32e": "Request sent to the first generated token, including reasoning.",
++  "2021e0da680e75a0": "Time to first answer",
++  "c10fc956489f24d0": "TTFA",
++  "73fb3b47d60bfe14": "Request sent to the first visible answer text.",
++  "683348f1cba7ff47": "Live tokens/s",
++  "223f0517d9e30928": "live",
++  "bdc5c7bbb3903981": "Estimated rate over the last 2 seconds while a turn runs.",
++  "319b5ae15dfc0e5b": "Average tokens/s",
++  "bc0007d5febbd221": "avg",
++  "75e54ef4866dc08e": "Generation tokens over active generation time, never over turn duration.",
++  "59f63fb58b06c96f": "Peak tokens/s",
++  "7871f32ac370002f": "peak",
++  "990edfa5cdf9c2f1": "Highest estimated rate over a 2 second window.",
++  "17554cfe5cad2ded": "Input tokens",
++  "35811ba4b607b49a": "in",
++  "0529e3ad6097699a": "Provider-reported input, including cache reads and writes.",
++  "8435cf543bf90afc": "Output tokens",
++  "3316c0befbef971a": "out",
++  "60131ef05c99d37a": "Provider-reported output, including reasoning.",
++  "010913f9e53c7d7e": "Reasoning tokens",
++  "6d8f32cf958d3538": "reasoning",
++  "46f0a331858705c6": "Provider-reported reasoning tokens, when reported separately.",
++  "cc1e468fa9859e73": "Cached tokens",
++  "042ed6a377e305d8": "cached in",
++  "75dd33703744d459": "Input served from the prompt cache.",
++  "104090d7e522b822": "Cache hit rate",
++  "530fc0f5c4767072": "cached",
++  "4b6b4c69c7f90cd0": "Cached input divided by total input.",
++  "90d2a920295fd159": "Context usage",
++  "b3707ef8084eb12e": "context",
++  "542d7392e733d2df": "Context occupancy and window size.",
++  "9ff6e3e75435240e": "Tool time",
++  "d84ed842ddb3eb4a": "tools",
++  "c98344bd6fdc6b2b": "Wall-clock time waiting on tools, with overlaps merged.",
++  "867ea5ab6dd29f69": "Turn time",
++  "8a24e203ab5d75e8": "turn",
++  "79c84f1b1b1bf134": "Request sent to the end of the turn.",
++  "9a69141329736ce1": "provider",
++  "7a2edd4724c35a07": "Provider that ran the turn.",
++  "4618b444a76584e3": "model",
++  "482a77038e45414e": "Requested model, and the reported one when it differs.",
++  "6dbe07d35ae6bcdb": "effort",
++  "e0fd5e9064683540": "Reasoning effort requested for the turn.",
++  "b7670f25c58e1951": "Speed mode",
++  "f1a40a6668b555d8": "speed",
++  "ec0af38cd0f22c53": "Claude fast mode or Codex service tier.",
++  "bcab471e96704da1": "Response rate",
++  "c43339fc1c3faea8": "TTFT",
++  "d8c2dd02e3fc8af7": "TTFA",
++  "42aa3deec092b66e": "Live",
++  "d8b108f75c45b759": "Avg",
++  "b8c106debd17bfb7": "Peak",
++  "a7946ee16fa48ff5": "In",
++  "1793a3d83d9761ea": "Out",
++  "641c816b80ccf045": "Rsn",
++  "54b2b61ecf1225d6": "Cache",
++  "76f9f5ea51335679": "Hit%",
++  "8cee93f07f5f624a": "Ctx",
++  "3d00a3f1aba3a150": "Tools",
++  "bb24061c74409bd0": "Turn",
++  "2dfe300a00a51b78": "Prov",
++  "5894b6cd6e97d432": "Model",
++  "140c1ee26f2c09e2": "Effort",
++  "a9fc1b2fe43a9d2e": "Speed",
++  "d7915816f8493a00": "Exact",
++  "8b54bb430031e34e": "Estimate",
++  "dbab44016b8171e5": "Not reported by this provider",
++  "112e6f4e8b9d3b4d": "Rate",
++  "077433dde44c0bdb": "Partial: measured from incomplete data.",
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
+ }
+diff --git a/apps/web/src/state/entities.ts b/apps/web/src/state/entities.ts
+index 2492943d4b..a263444577 100644
+--- a/apps/web/src/state/entities.ts
++++ b/apps/web/src/state/entities.ts
+@@ -353,6 +353,11 @@ export function readThreadTurnItems(ref: ScopedThreadRef) {
+   );
+ }
+ 
++/** The loaded turn items with their streamed text, read once instead of subscribing. */
++export function readThreadStreamedTurnItems(ref: ScopedThreadRef) {
++  return appAtomRegistry.get(environmentThreadDetails.threadAtom(ref))?.projection.turnItems ?? [];
++}
++
+ export function readThreadShell(ref: ScopedThreadRef): EnvironmentThreadShell | null {
+   return appAtomRegistry.get(environmentThreadShells.threadShellAtom(ref));
+ }

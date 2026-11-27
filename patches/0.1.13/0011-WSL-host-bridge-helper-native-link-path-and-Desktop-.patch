@@ -1,0 +1,2833 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: acqxi <kacqxi@gmail.com>
+Date: Fri, 27 Nov 2026 04:17:40 +0800
+Subject: [PATCH 11/12] WSL host bridge: helper, native link path and Desktop
+ supervisor
+
+WSL agents can hand work that needs Windows to the Windows backend on the
+same computer through native Linked environments. The Desktop starts
+`t3 __host-bridge` in the WSL distro with the WSL backend's own launch, and
+the helper listens on WSL loopback only. Each connection rides the helper's
+stdio to the Desktop, which connects it to its own Windows backend on Windows
+loopback. Frames carry streams, never addresses.
+
+A link made with `sameHostBridge` accepts only this machine's loopback, and
+the pairing code goes only to an address that answers as the expected
+environment ID. The refusal of loopback for a picked machine is unchanged.
+
+The supervisor waits for both backends and backs off exponentially. It
+restarts the helper after WSL restarts and after resume, and pauses when the
+Windows environment ID differs from the one paired.
+
+The app reports why pairing failed, and the Desktop keeps it as the
+bridge's last error, also once the bridge is off.
+---
+ apps/desktop/src/app/DesktopApp.test.ts       |   4 +
+ apps/desktop/src/app/DesktopApp.ts            |   3 +
+ .../src/hostBridge/DesktopHostBridge.test.ts  | 331 ++++++++++++
+ .../src/hostBridge/DesktopHostBridge.ts       | 484 ++++++++++++++++++
+ .../src/hostBridge/hostBridgePlan.test.ts     | 207 ++++++++
+ apps/desktop/src/hostBridge/hostBridgePlan.ts | 157 ++++++
+ apps/desktop/src/ipc/DesktopIpcHandlers.ts    |   3 +
+ apps/desktop/src/ipc/channels.ts              |   2 +
+ apps/desktop/src/ipc/methods/hostBridge.ts    |  25 +
+ apps/desktop/src/main.ts                      |   6 +
+ apps/desktop/src/preload.ts                   |   2 +
+ .../src/settings/DesktopAppSettings.test.ts   |  25 +
+ .../src/settings/DesktopAppSettings.ts        |  52 ++
+ .../desktop/src/updates/updatesTestHarness.ts |   1 +
+ apps/desktop/src/window/DesktopWindow.test.ts |   1 +
+ apps/server/src/bin.ts                        |   4 +
+ .../src/environment/ServerEnvironment.ts      |   1 +
+ .../src/hostBridge/hostBridgeHelper.test.ts   | 162 ++++++
+ .../server/src/hostBridge/hostBridgeHelper.ts | 125 +++++
+ apps/server/src/peer/PeerLinks.test.ts        | 110 ++++
+ apps/server/src/peer/PeerLinks.ts             |  76 ++-
+ packages/contracts/src/environment.ts         |   2 +
+ packages/contracts/src/ipc.ts                 |  59 +++
+ packages/contracts/src/peerLink.ts            |   6 +
+ packages/shared/package.json                  |   4 +
+ packages/shared/src/hostBridgeMux.test.ts     | 214 ++++++++
+ packages/shared/src/hostBridgeMux.ts          | 327 ++++++++++++
+ 27 files changed, 2388 insertions(+), 5 deletions(-)
+ create mode 100644 apps/desktop/src/hostBridge/DesktopHostBridge.test.ts
+ create mode 100644 apps/desktop/src/hostBridge/DesktopHostBridge.ts
+ create mode 100644 apps/desktop/src/hostBridge/hostBridgePlan.test.ts
+ create mode 100644 apps/desktop/src/hostBridge/hostBridgePlan.ts
+ create mode 100644 apps/desktop/src/ipc/methods/hostBridge.ts
+ create mode 100644 apps/server/src/hostBridge/hostBridgeHelper.test.ts
+ create mode 100644 apps/server/src/hostBridge/hostBridgeHelper.ts
+ create mode 100644 packages/shared/src/hostBridgeMux.test.ts
+ create mode 100644 packages/shared/src/hostBridgeMux.ts
+
+diff --git a/apps/desktop/src/app/DesktopApp.test.ts b/apps/desktop/src/app/DesktopApp.test.ts
+index 360ed62ce3..72605169a0 100644
+--- a/apps/desktop/src/app/DesktopApp.test.ts
++++ b/apps/desktop/src/app/DesktopApp.test.ts
+@@ -51,6 +51,7 @@ import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
+ import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
+ import * as DesktopWindow from "../window/DesktopWindow.ts";
+ import * as DesktopWslBackend from "../wsl/DesktopWslBackend.ts";
++import * as DesktopHostBridge from "../hostBridge/DesktopHostBridge.ts";
+ 
+ import * as BrowserImport from "../preview/BrowserImport/BrowserImport.ts";
+ import * as DesktopBackendConfiguration from "../backend/DesktopBackendConfiguration.ts";
+@@ -191,6 +192,9 @@ const runStubbedDesktop = (stub: StubbedDesktop) =>
+         Effect.provideService(DesktopWslBackend.DesktopWslBackend, {
+           reconcile: Effect.void,
+         } as DesktopWslBackend.DesktopWslBackend["Service"]),
++        Effect.provideService(DesktopHostBridge.DesktopHostBridge, {
++          run: Effect.never,
++        } as unknown as DesktopHostBridge.DesktopHostBridge["Service"]),
+         Effect.provideService(DesktopAppActivation.DesktopAppActivation, {
+           start: stub.activationStarted
+             ? Deferred.succeed(stub.activationStarted, undefined)
+diff --git a/apps/desktop/src/app/DesktopApp.ts b/apps/desktop/src/app/DesktopApp.ts
+index e5d95fbaee..d65e0ead88 100644
+--- a/apps/desktop/src/app/DesktopApp.ts
++++ b/apps/desktop/src/app/DesktopApp.ts
+@@ -41,6 +41,7 @@ import * as DesktopRemoteUpdates from "../updates/DesktopRemoteUpdates.ts";
+ import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
+ import * as DesktopSnapShot from "../snapShot/DesktopSnapShot.ts";
+ import * as DesktopWslBackend from "../wsl/DesktopWslBackend.ts";
++import * as DesktopHostBridge from "../hostBridge/DesktopHostBridge.ts";
+ import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
+ import * as HostProcess from "@t3tools/shared/HostProcess";
+ import { msg } from "gt-i18n";
+@@ -357,6 +358,8 @@ const bootstrap = Effect.fn("desktop.bootstrap")(function* (backendStarted: bool
+   }
+   yield* startAppActivation;
+   yield* Effect.forkScoped((yield* DesktopWslBackend.DesktopWslBackend).reconcile);
++  // Waits for both backends by itself and stays idle until the user turns it on.
++  yield* Effect.forkScoped((yield* DesktopHostBridge.DesktopHostBridge).run);
+ });
+ 
+ const startup = Effect.gen(function* () {
+diff --git a/apps/desktop/src/hostBridge/DesktopHostBridge.test.ts b/apps/desktop/src/hostBridge/DesktopHostBridge.test.ts
+new file mode 100644
+index 0000000000..114ac81e09
+--- /dev/null
++++ b/apps/desktop/src/hostBridge/DesktopHostBridge.test.ts
+@@ -0,0 +1,331 @@
++import { assert, describe, it } from "@effect/vitest";
++import { encodeHello } from "@t3tools/shared/hostBridgeMux";
++import * as Deferred from "effect/Deferred";
++import * as Duration from "effect/Duration";
++import * as Effect from "effect/Effect";
++import * as Fiber from "effect/Fiber";
++import * as Layer from "effect/Layer";
++import * as Option from "effect/Option";
++import * as Sink from "effect/Sink";
++import * as Stream from "effect/Stream";
++import * as TestClock from "effect/testing/TestClock";
++import { HttpClient, HttpClientResponse } from "effect/http";
++import { ChildProcessSpawner } from "effect/process";
++
++import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
++import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
++import * as ElectronPowerMonitor from "../electron/ElectronPowerMonitor.ts";
++import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
++import * as DesktopHostBridge from "./DesktopHostBridge.ts";
++
++const wslArgs = [
++  "-d",
++  "TestDistro",
++  "--cd",
++  "~",
++  "--exec",
++  "env",
++  "PATH=/usr/bin",
++  "/home/tester/.t3/wsl-runtime/sha256-abc/t3",
++  "--bootstrap-fd",
++  "0",
++];
++
++interface Fixture {
++  primaryReady: boolean;
++  wslReady: boolean;
++  windowsEnvironmentId: string;
++  /** Each spawn's args, and a way to end that helper with an exit code. */
++  readonly spawns: Array<{
++    readonly args: ReadonlyArray<string>;
++    readonly exit: Deferred.Deferred<number>;
++  }>;
++}
++
++const instance = (
++  id: string,
++  ready: () => boolean,
++  config: Record<string, unknown>,
++): DesktopBackendPool.DesktopBackendInstance =>
++  ({
++    id,
++    currentConfig: Effect.sync(() => Option.some(config)),
++    snapshot: Effect.sync(() => ({
++      desiredRunning: true,
++      ready: ready(),
++      activePid: Option.none(),
++      restartAttempt: 0,
++      restartScheduled: false,
++    })),
++  }) as unknown as DesktopBackendPool.DesktopBackendInstance;
++
++const layerFor = (
++  fixture: Fixture,
++  settings: Partial<DesktopAppSettings.DesktopSettings>,
++  platform: NodeJS.Platform = "win32",
++) =>
++  DesktopHostBridge.layer.pipe(
++    Layer.provide(
++      Layer.mergeAll(
++        DesktopAppSettings.layerTest({
++          ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
++          ...settings,
++        }),
++        Layer.succeed(DesktopBackendPool.DesktopBackendPool, {
++          list: Effect.sync(() => [
++            instance(DesktopBackendPool.PRIMARY_INSTANCE_ID, () => fixture.primaryReady, {
++              httpBaseUrl: new URL("http://127.0.0.1:3773"),
++              args: [],
++              env: {},
++              extendEnv: true,
++              preflightFailure: Option.none(),
++            }),
++            instance("wsl:TestDistro", () => fixture.wslReady, {
++              httpBaseUrl: new URL("http://192.0.2.10:3774"),
++              args: wslArgs,
++              env: {},
++              extendEnv: false,
++              preflightFailure: Option.none(),
++              runningDistro: "TestDistro",
++              wslRuntimeId: "sha256-abc",
++            }),
++          ]),
++        } as unknown as DesktopBackendPool.DesktopBackendPool["Service"]),
++        Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
++          platform,
++        } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]),
++        Layer.succeed(ElectronPowerMonitor.ElectronPowerMonitor, {
++          onSimpleEvent: () => Effect.void,
++        } as unknown as ElectronPowerMonitor.ElectronPowerMonitor["Service"]),
++        Layer.succeed(
++          HttpClient.HttpClient,
++          HttpClient.make((request) =>
++            Effect.sync(() =>
++              HttpClientResponse.fromWeb(
++                request,
++                Response.json({
++                  environmentId: fixture.windowsEnvironmentId,
++                  label: "Same Name",
++                  platform: { os: "windows", arch: "x64" },
++                  serverVersion: "0.0.0-test",
++                  capabilities: { repositoryIdentity: true },
++                }),
++              ),
++            ),
++          ),
++        ),
++        Layer.succeed(
++          ChildProcessSpawner.ChildProcessSpawner,
++          ChildProcessSpawner.make((command) =>
++            Effect.gen(function* () {
++              const exit = yield* Deferred.make<number>();
++              const args =
++                command._tag === "StandardCommand" ? command.args.map((word) => String(word)) : [];
++              fixture.spawns.push({ args, exit });
++              return ChildProcessSpawner.makeHandle({
++                pid: ChildProcessSpawner.ProcessId(77),
++                // Says where it listens, then stays up until its exit is decided.
++                stdout: Stream.concat(
++                  Stream.make(encodeHello({ ok: true, version: 1, port: 13773, pid: 77 })),
++                  Stream.never,
++                ),
++                stderr: Stream.make(new TextEncoder().encode("helper log line\n")),
++                all: Stream.empty,
++                exitCode: Deferred.await(exit).pipe(Effect.map(ChildProcessSpawner.ExitCode)),
++                isRunning: Effect.succeed(true),
++                kill: () => Effect.void,
++                stdin: Sink.drain,
++                getInputFd: () => Sink.drain,
++                getOutputFd: () => Stream.empty,
++                unref: Effect.succeed(Effect.void),
++              });
++            }),
++          ),
++        ),
++      ),
++    ),
++  );
++
++const fixture = (): Fixture => ({
++  primaryReady: true,
++  wslReady: true,
++  windowsEnvironmentId: "env-windows",
++  spawns: [],
++});
++
++/** Lets the supervisor's fibers run, then advances the test clock. */
++const settle = (duration: Duration.Input = Duration.millis(10)) =>
++  Effect.gen(function* () {
++    for (let round = 0; round < 20; round++) yield* Effect.yieldNow;
++    yield* TestClock.adjust(duration);
++    for (let round = 0; round < 20; round++) yield* Effect.yieldNow;
++  });
++
++describe("DesktopHostBridge", () => {
++  it.effect("stays off until the user turns it on", () => {
++    const fx = fixture();
++    return Effect.gen(function* () {
++      const bridge = yield* DesktopHostBridge.DesktopHostBridge;
++      yield* Effect.forkScoped(bridge.run);
++      yield* settle(Duration.seconds(10));
++      assert.strictEqual((yield* bridge.state).phase, "disabled");
++      assert.strictEqual(fx.spawns.length, 0);
++    }).pipe(Effect.scoped, Effect.provide(layerFor(fx, {})));
++  });
++
++  it.effect("starts the helper where the WSL backend runs once both backends are ready", () => {
++    const fx = { ...fixture(), primaryReady: false };
++    return Effect.gen(function* () {
++      const bridge = yield* DesktopHostBridge.DesktopHostBridge;
++      yield* Effect.forkScoped(bridge.run);
++      yield* settle();
++      assert.strictEqual((yield* bridge.state).phase, "waiting-windows");
++      assert.strictEqual(fx.spawns.length, 0);
++
++      fx.primaryReady = true;
++      yield* settle(Duration.seconds(3));
++      yield* settle(Duration.seconds(3));
++      const state = yield* bridge.state;
++      assert.strictEqual(fx.spawns.length, 1);
++      assert.deepStrictEqual(fx.spawns[0]!.args.slice(-3), [
++        "__host-bridge",
++        "--ports",
++        "13773,13774,13775",
++      ]);
++      assert.deepStrictEqual(fx.spawns[0]!.args.slice(0, 2), ["-d", "TestDistro"]);
++      assert.strictEqual(state.phase, "running");
++      assert.strictEqual(state.url, "http://127.0.0.1:13773");
++      assert.strictEqual(state.windowsEnvironmentId, "env-windows");
++      assert.strictEqual(state.windowsPort, 3773);
++      assert.strictEqual(state.wslNetworking, "nat");
++      assert.strictEqual(state.helperPid, 77);
++    }).pipe(Effect.scoped, Effect.provide(layerFor(fx, { hostBridgeEnabled: true })));
++  });
++
++  it.effect("backs off after the helper stops, then starts it again", () => {
++    const fx = fixture();
++    return Effect.gen(function* () {
++      const bridge = yield* DesktopHostBridge.DesktopHostBridge;
++      yield* Effect.forkScoped(bridge.run);
++      yield* settle();
++      assert.strictEqual(fx.spawns.length, 1);
++
++      yield* Deferred.succeed(fx.spawns[0]!.exit, 1);
++      yield* settle();
++      const failed = yield* bridge.state;
++      assert.strictEqual(failed.phase, "recovering");
++      assert.strictEqual(failed.restarts, 1);
++      assert.include(failed.lastError ?? "", "exit 1");
++      assert.include(failed.lastError ?? "", "helper log line");
++      assert.isNotNull(failed.nextRetryAt);
++      assert.strictEqual(fx.spawns.length, 1);
++
++      yield* settle(Duration.seconds(3));
++      assert.strictEqual(fx.spawns.length, 2);
++      // A second failure waits longer than the first.
++      yield* Deferred.succeed(fx.spawns[1]!.exit, 1);
++      yield* settle(Duration.millis(1_500));
++      assert.strictEqual(fx.spawns.length, 2);
++      yield* settle(Duration.seconds(3));
++      assert.strictEqual(fx.spawns.length, 3);
++    }).pipe(Effect.scoped, Effect.provide(layerFor(fx, { hostBridgeEnabled: true })));
++  });
++
++  it.effect("a helper started by turning it on outlives the call that turned it on", () => {
++    const fx = fixture();
++    return Effect.gen(function* () {
++      const bridge = yield* DesktopHostBridge.DesktopHostBridge;
++      yield* Effect.forkScoped(bridge.run);
++      yield* settle();
++      assert.strictEqual(fx.spawns.length, 0);
++      // The IPC handler's own fiber runs this and ends right after.
++      yield* Effect.forkChild(bridge.set({ enabled: true })).pipe(Effect.flatMap(Fiber.join));
++      yield* settle(Duration.seconds(3));
++      yield* settle(Duration.seconds(3));
++      assert.strictEqual(fx.spawns.length, 1);
++      assert.strictEqual((yield* bridge.state).phase, "running");
++    }).pipe(Effect.scoped, Effect.provide(layerFor(fx, {})));
++  });
++
++  it.effect("keeps a pairing failure the app reports as the last error, even once off", () => {
++    const fx = fixture();
++    return Effect.gen(function* () {
++      const bridge = yield* DesktopHostBridge.DesktopHostBridge;
++      yield* Effect.forkScoped(bridge.run);
++      const failed = yield* bridge.set({ enabled: true, failure: "Pairing: refused" });
++      assert.strictEqual(failed.lastError, "Pairing: refused");
++      const off = yield* bridge.set({ enabled: false });
++      assert.strictEqual(off.lastError, "Pairing: refused");
++      const cleared = yield* bridge.set({ enabled: true, failure: null });
++      assert.isNull(cleared.lastError);
++    }).pipe(Effect.scoped, Effect.provide(layerFor(fx, {})));
++  });
++
++  it.effect("turning it off stops the helper and starts nothing more", () => {
++    const fx = fixture();
++    return Effect.gen(function* () {
++      const bridge = yield* DesktopHostBridge.DesktopHostBridge;
++      yield* Effect.forkScoped(bridge.run);
++      yield* settle();
++      assert.strictEqual(fx.spawns.length, 1);
++      const off = yield* bridge.set({ enabled: false });
++      assert.strictEqual(off.phase, "disabled");
++      assert.isNull(off.helperPid);
++      yield* settle(Duration.minutes(5));
++      assert.strictEqual(fx.spawns.length, 1);
++    }).pipe(Effect.scoped, Effect.provide(layerFor(fx, { hostBridgeEnabled: true })));
++  });
++
++  it.effect("pauses when Windows answers as another environment than the one paired", () => {
++    const fx = fixture();
++    return Effect.gen(function* () {
++      const bridge = yield* DesktopHostBridge.DesktopHostBridge;
++      yield* Effect.forkScoped(bridge.run);
++      yield* settle();
++      assert.strictEqual(fx.spawns.length, 1);
++
++      // The Windows backend was reset and came back with a new identity.
++      fx.windowsEnvironmentId = "env-windows-new";
++      yield* settle(Duration.seconds(3));
++      const paused = yield* bridge.state;
++      assert.strictEqual(paused.phase, "identity-mismatch");
++      assert.isNull(paused.helperPid);
++      yield* settle(Duration.minutes(2));
++      assert.strictEqual(fx.spawns.length, 1);
++    }).pipe(
++      Effect.scoped,
++      Effect.provide(
++        layerFor(fx, { hostBridgeEnabled: true, hostBridgeEnvironmentId: "env-windows" }),
++      ),
++    );
++  });
++
++  it.effect("restarts the helper when the WSL backend goes away and comes back", () => {
++    const fx = fixture();
++    return Effect.gen(function* () {
++      const bridge = yield* DesktopHostBridge.DesktopHostBridge;
++      yield* Effect.forkScoped(bridge.run);
++      yield* settle();
++      assert.strictEqual(fx.spawns.length, 1);
++      // `wsl --shutdown`: the WSL backend stops being ready.
++      fx.wslReady = false;
++      yield* settle(Duration.seconds(3));
++      assert.strictEqual((yield* bridge.state).phase, "waiting-wsl");
++      fx.wslReady = true;
++      yield* settle(Duration.seconds(3));
++      assert.strictEqual(fx.spawns.length, 2);
++      assert.strictEqual((yield* bridge.state).phase, "running");
++    }).pipe(Effect.scoped, Effect.provide(layerFor(fx, { hostBridgeEnabled: true })));
++  });
++
++  it.effect("is unsupported off Windows", () => {
++    const fx = fixture();
++    return Effect.gen(function* () {
++      const bridge = yield* DesktopHostBridge.DesktopHostBridge;
++      yield* Effect.forkScoped(bridge.run);
++      yield* settle();
++      assert.strictEqual((yield* bridge.state).phase, "unsupported");
++      assert.strictEqual(fx.spawns.length, 0);
++    }).pipe(Effect.scoped, Effect.provide(layerFor(fx, { hostBridgeEnabled: true }, "linux")));
++  });
++});
+diff --git a/apps/desktop/src/hostBridge/DesktopHostBridge.ts b/apps/desktop/src/hostBridge/DesktopHostBridge.ts
+new file mode 100644
+index 0000000000..76ebb15ffc
+--- /dev/null
++++ b/apps/desktop/src/hostBridge/DesktopHostBridge.ts
+@@ -0,0 +1,484 @@
++// @effect-diagnostics nodeBuiltinImport:off -- Bridged streams connect to the Windows backend over Windows loopback sockets.
++import * as NodeNet from "node:net";
++
++import {
++  ExecutionEnvironmentDescriptor,
++  type DesktopHostBridgeSetInput,
++  type DesktopHostBridgeState,
++} from "@t3tools/contracts";
++import { HostBridgeMux, hostBridgeUrls, type MuxStats } from "@t3tools/shared/hostBridgeMux";
++import * as Cause from "effect/Cause";
++import * as Clock from "effect/Clock";
++import * as Context from "effect/Context";
++import * as DateTime from "effect/DateTime";
++import * as Duration from "effect/Duration";
++import * as Effect from "effect/Effect";
++import * as Fiber from "effect/Fiber";
++import * as Layer from "effect/Layer";
++import * as Option from "effect/Option";
++import * as Queue from "effect/Queue";
++import * as Ref from "effect/Ref";
++import * as Semaphore from "effect/Semaphore";
++import type * as Scope from "effect/Scope";
++import * as Stream from "effect/Stream";
++import { HttpClient, HttpClientResponse } from "effect/http";
++import { ChildProcess, ChildProcessSpawner } from "effect/process";
++
++import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
++import * as DesktopObservability from "../app/DesktopObservability.ts";
++import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
++import * as ElectronPowerMonitor from "../electron/ElectronPowerMonitor.ts";
++import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
++import { WSL_INSTANCE_ID_PREFIX } from "../wsl/DesktopWslBackend.ts";
++import {
++  backoffDelayMs,
++  BACKOFF_STABLE_MS,
++  HELLO_TIMEOUT_MS,
++  helperLaunchFromBackend,
++  HOST_BRIDGE_PORTS,
++  planBridge,
++  wslNetworkingOf,
++  type BridgeObservation,
++  type HelperLaunch,
++} from "./hostBridgePlan.ts";
++
++const TICK = Duration.seconds(3);
++const DESCRIPTOR_TIMEOUT = Duration.seconds(2);
++const STDERR_TAIL_CHARS = 1_000;
++
++const DISABLED_STATE: DesktopHostBridgeState = {
++  enabled: false,
++  phase: "disabled",
++  detail: null,
++  urls: hostBridgeUrls(HOST_BRIDGE_PORTS),
++  url: null,
++  windowsEnvironmentId: null,
++  windowsLabel: null,
++  windowsPort: null,
++  pairedEnvironmentId: null,
++  wslInstanceId: null,
++  wslDistro: null,
++  wslRuntimeId: null,
++  wslNetworking: null,
++  helperPid: null,
++  restarts: 0,
++  nextRetryAt: null,
++  lastError: null,
++  streams: { open: 0, total: 0, refused: 0 },
++  since: "1970-01-01T00:00:00.000Z",
++};
++
++const { logInfo, logWarning } = DesktopObservability.makeComponentLogger("desktop-host-bridge");
++
++export class DesktopHostBridge extends Context.Service<
++  DesktopHostBridge,
++  {
++    readonly state: Effect.Effect<DesktopHostBridgeState>;
++    readonly set: (
++      input: DesktopHostBridgeSetInput,
++    ) => Effect.Effect<DesktopHostBridgeState, DesktopAppSettings.DesktopSettingsWriteError>;
++    /** Supervises the helper until interrupted; the app forks it once. */
++    readonly run: Effect.Effect<never, never, Scope.Scope>;
++  }
++>()("@t3tools/desktop/hostBridge/DesktopHostBridge") {}
++
++/** Everything the supervisor tracks between ticks; read and written only on its fibers and socket callbacks. */
++interface Runtime {
++  windowsPort: number | null;
++  windowsEnvironmentId: string | null;
++  windowsLabel: string | null;
++  windowsDescriptorPort: number | null;
++  helperKey: string | null;
++  helperFiber: Fiber.Fiber<void> | null;
++  helperStartedAt: number | null;
++  helperPid: number | null;
++  listeningUrl: string | null;
++  mux: HostBridgeMux | null;
++  attempt: number;
++  restarts: number;
++  nextRetryAt: number | null;
++  lastError: string | null;
++  resumed: boolean;
++  streams: MuxStats;
++}
++
++const decodeUtf8 = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
++
++const make = Effect.gen(function* () {
++  const pool = yield* DesktopBackendPool.DesktopBackendPool;
++  const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
++  const environment = yield* DesktopEnvironment.DesktopEnvironment;
++  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
++  const httpClient = yield* HttpClient.HttpClient;
++  const powerMonitor = yield* ElectronPowerMonitor.ElectronPowerMonitor;
++  // Helpers live in the service's scope: a tick run for an IPC call must not take its helper along.
++  const helperScope = yield* Effect.scope;
++  const wake = yield* Queue.sliding<void>(1);
++  // The loop and IPC both tick; one at a time, so a helper is never started twice.
++  const tickLock = yield* Semaphore.make(1);
++  const wakeUnsafe = () => {
++    Queue.offerUnsafe(wake, undefined);
++  };
++
++  const runtime: Runtime = {
++    windowsPort: null,
++    windowsEnvironmentId: null,
++    windowsLabel: null,
++    windowsDescriptorPort: null,
++    helperKey: null,
++    helperFiber: null,
++    helperStartedAt: null,
++    helperPid: null,
++    listeningUrl: null,
++    mux: null,
++    attempt: 0,
++    restarts: 0,
++    nextRetryAt: null,
++    lastError: null,
++    resumed: false,
++    streams: { open: 0, total: 0, refused: 0 },
++  };
++
++  const initial: DesktopHostBridgeState = {
++    ...DISABLED_STATE,
++    since: DateTime.formatIso(yield* DateTime.now),
++  };
++  const stateRef = yield* Ref.make(initial);
++
++  /** The Windows backend's own descriptor: the only source of the identity the bridge reaches. */
++  const readWindowsDescriptor = (port: number) =>
++    httpClient
++      .get(`http://127.0.0.1:${port}/.well-known/t3/environment`)
++      .pipe(
++        Effect.flatMap(HttpClientResponse.filterStatusOk),
++        Effect.flatMap(HttpClientResponse.schemaBodyJson(ExecutionEnvironmentDescriptor)),
++        Effect.timeout(DESCRIPTOR_TIMEOUT),
++        Effect.option,
++      );
++
++  const observe = Effect.gen(function* () {
++    const settings = yield* appSettings.get;
++    const instances = yield* pool.list;
++    const primary = instances.find(
++      (instance) => instance.id === DesktopBackendPool.PRIMARY_INSTANCE_ID,
++    );
++    const primaryConfig = primary === undefined ? Option.none() : yield* primary.currentConfig;
++    const primaryReady = primary === undefined ? false : (yield* primary.snapshot).ready;
++    const port = Option.match(primaryConfig, {
++      onNone: () => null,
++      onSome: (config) => Number(config.httpBaseUrl.port) || null,
++    });
++    let windowsError: string | null = null;
++    if (settings.hostBridgeEnabled && primaryReady && port !== null) {
++      const descriptor = yield* readWindowsDescriptor(port);
++      if (Option.isSome(descriptor)) {
++        runtime.windowsEnvironmentId = descriptor.value.environmentId;
++        runtime.windowsLabel = descriptor.value.label;
++        runtime.windowsDescriptorPort = port;
++      } else {
++        // A port that changed is a different backend until it answers.
++        if (runtime.windowsDescriptorPort !== port) runtime.windowsEnvironmentId = null;
++        windowsError = "The Windows backend did not answer on this machine's loopback.";
++      }
++    }
++    runtime.windowsPort = primaryReady ? port : null;
++    const wslInstance = instances.find((instance) =>
++      instance.id.startsWith(WSL_INSTANCE_ID_PREFIX),
++    );
++    const wslConfig = wslInstance === undefined ? Option.none() : yield* wslInstance.currentConfig;
++    const wslReady = wslInstance === undefined ? false : (yield* wslInstance.snapshot).ready;
++    const launch = Option.match(wslConfig, {
++      onNone: () => undefined,
++      onSome: (config) =>
++        Option.isNone(config.preflightFailure) ? helperLaunchFromBackend(config) : undefined,
++    });
++    const observation: BridgeObservation = {
++      enabled: settings.hostBridgeEnabled,
++      platform: environment.platform,
++      wslOnly: settings.wslOnly && settings.wslBackendEnabled,
++      pairedEnvironmentId: settings.hostBridgeEnvironmentId,
++      windows: {
++        ready: primaryReady,
++        port,
++        environmentId: primaryReady ? runtime.windowsEnvironmentId : null,
++        error: windowsError,
++      },
++      wsl: wslInstance === undefined ? null : { ready: wslReady, launch },
++    };
++    return {
++      observation,
++      wsl: {
++        instanceId: wslInstance?.id ?? null,
++        distro: Option.match(wslConfig, {
++          onNone: () => null,
++          onSome: (config) => config.runningDistro ?? null,
++        }),
++        runtimeId: Option.match(wslConfig, {
++          onNone: () => null,
++          onSome: (config) => config.wslRuntimeId ?? null,
++        }),
++        networking: Option.match(wslConfig, {
++          onNone: () => null,
++          onSome: (config) => wslNetworkingOf(config.httpBaseUrl),
++        }),
++      },
++    };
++  });
++
++  /** Connects one stream from WSL to the Windows backend's current port; nowhere else. */
++  const openStream = () => {
++    const port = runtime.windowsPort;
++    if (port === null) return undefined;
++    const socket = NodeNet.connect({ host: "127.0.0.1", port, allowHalfOpen: true });
++    socket.setNoDelay(true);
++    return socket;
++  };
++
++  const runHelper = Effect.fn("desktop.hostBridge.runHelper")(function* (launch: HelperLaunch) {
++    const input = yield* Queue.unbounded<Uint8Array>();
++    const seen = { stderrTail: "", failure: null as string | null, listening: false };
++    const mux = new HostBridgeMux(
++      (bytes) => {
++        Queue.offerUnsafe(input, bytes);
++      },
++      {
++        onOpen: openStream,
++        onHello: (hello) => {
++          if (hello.ok) {
++            seen.listening = true;
++            runtime.listeningUrl = `http://127.0.0.1:${hello.port}`;
++            runtime.helperPid = hello.pid;
++          } else {
++            seen.failure = hello.message;
++          }
++          wakeUnsafe();
++        },
++        onProtocolError: (error) => {
++          seen.failure = `The bridge helper sent something unreadable (${error.message}).`;
++        },
++      },
++    );
++    runtime.mux = mux;
++    const command = ChildProcess.make("wsl.exe", launch.args, {
++      env: launch.env,
++      extendEnv: launch.extendEnv,
++      stdin: Stream.fromQueue(input),
++      stdout: "pipe",
++      stderr: "pipe",
++      killSignal: "SIGTERM",
++      forceKillAfter: Duration.seconds(3),
++    });
++    const exitCode = yield* Effect.scoped(
++      Effect.gen(function* () {
++        const handle = yield* spawner.spawn(command);
++        yield* Stream.runForEach(handle.stderr, (chunk) =>
++          Effect.sync(() => {
++            seen.stderrTail = (seen.stderrTail + decodeUtf8(chunk)).slice(-STDERR_TAIL_CHARS);
++          }),
++        ).pipe(Effect.ignore, Effect.forkChild);
++        yield* Stream.runForEach(handle.stdout, (chunk) =>
++          Effect.sync(() => mux.receive(chunk)),
++        ).pipe(Effect.ignore, Effect.forkChild);
++        const helloTimeout = Effect.sleep(Duration.millis(HELLO_TIMEOUT_MS)).pipe(
++          Effect.andThen(
++            Effect.suspend(() =>
++              seen.listening ? Effect.never : Effect.succeed("no answer" as const),
++            ),
++          ),
++        );
++        return yield* Effect.raceFirst(handle.exitCode.pipe(Effect.map(Number)), helloTimeout);
++      }),
++    ).pipe(
++      Effect.catchCause((cause) =>
++        Effect.succeed(`could not start wsl.exe: ${Cause.pretty(cause).split("\n")[0]}`),
++      ),
++    );
++    mux.stop();
++    runtime.mux = null;
++    const tail = seen.stderrTail.trim().split("\n").at(-1) ?? "";
++    return (
++      seen.failure ??
++      (typeof exitCode === "string"
++        ? exitCode === "no answer"
++          ? "The bridge helper did not start listening in time."
++          : exitCode
++        : `The bridge helper stopped (exit ${exitCode})${tail.length > 0 ? `: ${tail}` : "."}`)
++    );
++  });
++
++  const forgetHelper = () => {
++    runtime.helperKey = null;
++    runtime.helperFiber = null;
++    runtime.helperPid = null;
++    runtime.listeningUrl = null;
++    if (runtime.mux !== null) runtime.streams = runtime.mux.stats;
++  };
++
++  const stopHelper = Effect.gen(function* () {
++    const fiber = runtime.helperFiber;
++    if (fiber === null) return;
++    forgetHelper();
++    yield* Fiber.interrupt(fiber);
++  });
++
++  const startHelper = Effect.fn("desktop.hostBridge.startHelper")(function* (
++    launch: HelperLaunch,
++    key: string,
++  ) {
++    yield* stopHelper;
++    const startedAt = yield* Clock.currentTimeMillis;
++    yield* logInfo("starting WSL host bridge helper", { restarts: runtime.restarts });
++    const supervised = runHelper(launch).pipe(
++      Effect.flatMap((reason) =>
++        Effect.gen(function* () {
++          const now = yield* Clock.currentTimeMillis;
++          // Only the helper this fiber started is forgotten; a newer one may already run.
++          if (runtime.helperKey === key) forgetHelper();
++          runtime.attempt = now - startedAt >= BACKOFF_STABLE_MS ? 0 : runtime.attempt + 1;
++          runtime.restarts += 1;
++          runtime.lastError = reason;
++          runtime.nextRetryAt = now + backoffDelayMs(runtime.attempt - 1);
++          yield* logWarning("WSL host bridge helper stopped", {
++            reason,
++            retryInMs: runtime.nextRetryAt - now,
++          });
++          wakeUnsafe();
++        }),
++      ),
++    );
++    const fiber = yield* Effect.forkIn(supervised, helperScope);
++    runtime.helperKey = key;
++    runtime.helperFiber = fiber;
++    runtime.helperStartedAt = startedAt;
++    runtime.nextRetryAt = null;
++  });
++
++  const tickUnlocked = Effect.gen(function* () {
++    if (runtime.resumed) {
++      // After sleep the helper's pipes and WSL itself may be stale; start over without waiting.
++      runtime.resumed = false;
++      runtime.attempt = 0;
++      runtime.nextRetryAt = null;
++      yield* stopHelper;
++    }
++    const { observation, wsl } = yield* observe;
++    const now = yield* Clock.currentTimeMillis;
++    const plan = planBridge(
++      observation,
++      {
++        runningKey: runtime.helperKey,
++        listening: runtime.listeningUrl !== null,
++        nextRetryAt: runtime.nextRetryAt,
++        lastError: runtime.lastError,
++      },
++      now,
++    );
++    let phase: DesktopHostBridgeState["phase"];
++    let detail: string | null;
++    if (plan.action === "start") {
++      yield* startHelper(plan.launch, plan.key);
++      phase = runtime.restarts > 0 ? "recovering" : "starting";
++      detail = runtime.restarts > 0 ? runtime.lastError : null;
++    } else {
++      if (plan.action === "stop") yield* stopHelper;
++      phase = plan.phase;
++      detail = plan.detail;
++      // A helper that stays up has recovered; its earlier failure is history.
++      if (
++        plan.action === "keep" &&
++        runtime.listeningUrl !== null &&
++        runtime.helperStartedAt !== null &&
++        now - runtime.helperStartedAt >= BACKOFF_STABLE_MS
++      ) {
++        runtime.attempt = 0;
++      }
++    }
++    // Turning it off resets the backoff but keeps the last error for the diagnostics.
++    if (!observation.enabled) {
++      runtime.restarts = 0;
++      runtime.attempt = 0;
++      runtime.nextRetryAt = null;
++    }
++    if (runtime.mux !== null) runtime.streams = runtime.mux.stats;
++    const previous = yield* Ref.get(stateRef);
++    const next: DesktopHostBridgeState = {
++      enabled: observation.enabled,
++      phase,
++      detail,
++      urls: hostBridgeUrls(HOST_BRIDGE_PORTS),
++      url: runtime.listeningUrl,
++      windowsEnvironmentId: observation.windows.environmentId,
++      windowsLabel: observation.windows.environmentId === null ? null : runtime.windowsLabel,
++      windowsPort: observation.windows.ready ? observation.windows.port : null,
++      pairedEnvironmentId: observation.pairedEnvironmentId,
++      wslInstanceId: wsl.instanceId,
++      wslDistro: wsl.distro,
++      wslRuntimeId: wsl.runtimeId,
++      wslNetworking: wsl.networking,
++      helperPid: runtime.helperPid,
++      restarts: runtime.restarts,
++      nextRetryAt:
++        runtime.nextRetryAt === null
++          ? null
++          : DateTime.formatIso(DateTime.makeUnsafe(runtime.nextRetryAt)),
++      lastError: runtime.lastError,
++      streams: runtime.streams,
++      since:
++        previous.phase === phase && previous.enabled === observation.enabled
++          ? previous.since
++          : DateTime.formatIso(yield* DateTime.now),
++    };
++    yield* Ref.set(stateRef, next);
++    return next;
++  });
++  const tick = tickLock.withPermits(1)(tickUnlocked);
++
++  const run: DesktopHostBridge["Service"]["run"] = Effect.gen(function* () {
++    yield* powerMonitor.onSimpleEvent("resume", () => {
++      runtime.resumed = true;
++      wakeUnsafe();
++    });
++    // The helper ends with this scope, and by itself when its stdin closes.
++    yield* Effect.addFinalizer(() => stopHelper);
++    return yield* tick.pipe(
++      Effect.catchCause((cause) =>
++        logWarning("WSL host bridge tick failed", { cause: Cause.pretty(cause) }),
++      ),
++      Effect.andThen(Queue.take(wake).pipe(Effect.timeoutOption(TICK))),
++      Effect.forever,
++    );
++  });
++
++  return DesktopHostBridge.of({
++    state: Ref.get(stateRef),
++    set: Effect.fn("desktop.hostBridge.set")(function* (input) {
++      yield* appSettings.setHostBridge({
++        enabled: input.enabled,
++        ...(input.environmentId === undefined ? {} : { environmentId: input.environmentId }),
++      });
++      // Pairing runs in the app; its failures belong in the same diagnostics as the helper's.
++      if (input.failure !== undefined) runtime.lastError = input.failure;
++      // Answer with the state the change leads to, not the one before it.
++      return yield* tick.pipe(
++        Effect.catchCause(() => Ref.get(stateRef)),
++        Effect.tap(() => Effect.sync(wakeUnsafe)),
++      );
++    }),
++    run,
++  });
++});
++
++export const layer = Layer.effect(DesktopHostBridge, make);
++
++/** A bridge that stays off, for tests of everything around it. */
++export const layerTest = (state: Partial<DesktopHostBridgeState> = {}) =>
++  Layer.succeed(
++    DesktopHostBridge,
++    DesktopHostBridge.of({
++      state: Effect.succeed({ ...DISABLED_STATE, ...state }),
++      set: Effect.fn("DesktopHostBridge.set")(function* () {
++        return yield* Effect.succeed({ ...DISABLED_STATE, ...state });
++      }),
++      run: Effect.never,
++    }),
++  );
+diff --git a/apps/desktop/src/hostBridge/hostBridgePlan.test.ts b/apps/desktop/src/hostBridge/hostBridgePlan.test.ts
+new file mode 100644
+index 0000000000..a6b985cf71
+--- /dev/null
++++ b/apps/desktop/src/hostBridge/hostBridgePlan.test.ts
+@@ -0,0 +1,207 @@
++import { describe, expect, it } from "@effect/vitest";
++
++import {
++  backoffDelayMs,
++  BACKOFF_MAX_MS,
++  helperLaunchFromBackend,
++  launchKey,
++  planBridge,
++  wslNetworkingOf,
++  type BridgeObservation,
++  type HelperStatus,
++} from "./hostBridgePlan.ts";
++
++const backendArgs = [
++  "-d",
++  "TestDistro",
++  "--cd",
++  "~",
++  "--exec",
++  "env",
++  "PATH=/usr/bin:/bin",
++  "T3CODE_HOME=/home/tester/.t3",
++  "/home/tester/.t3/wsl-runtime/sha256-abc/t3",
++  "--bootstrap-fd",
++  "0",
++];
++const launch = helperLaunchFromBackend({
++  args: backendArgs,
++  env: { WSLENV: "T3CODE_DESKTOP_HOST_SCOPE/u" },
++  extendEnv: false,
++})!;
++
++const ready: BridgeObservation = {
++  enabled: true,
++  platform: "win32",
++  wslOnly: false,
++  pairedEnvironmentId: null,
++  windows: { ready: true, port: 3773, environmentId: "env-windows", error: null },
++  wsl: { ready: true, launch },
++};
++const idle: HelperStatus = {
++  runningKey: null,
++  listening: false,
++  nextRetryAt: null,
++  lastError: null,
++};
++
++describe("helperLaunchFromBackend", () => {
++  it("runs the helper exactly where the WSL backend runs, in place of its bootstrap", () => {
++    expect(launch.args).toEqual([
++      "-d",
++      "TestDistro",
++      "--cd",
++      "~",
++      "--exec",
++      "env",
++      "PATH=/usr/bin:/bin",
++      "T3CODE_HOME=/home/tester/.t3",
++      "/home/tester/.t3/wsl-runtime/sha256-abc/t3",
++      "__host-bridge",
++      "--ports",
++      "13773,13774,13775",
++    ]);
++    expect(launch.extendEnv).toBe(false);
++  });
++
++  it("works for a mounted server tree started with node, and the dev URL is dropped", () => {
++    const dev = helperLaunchFromBackend({
++      args: [
++        "--cd",
++        "~",
++        "--exec",
++        "env",
++        "PATH=/x",
++        "/n/node",
++        "/m/bin.mjs",
++        "--bootstrap-fd",
++        "0",
++        "--dev-url",
++        "http://localhost:5173/",
++      ],
++      env: {},
++      extendEnv: false,
++    });
++    expect(dev?.args.slice(-5)).toEqual([
++      "/n/node",
++      "/m/bin.mjs",
++      "__host-bridge",
++      "--ports",
++      "13773,13774,13775",
++    ]);
++  });
++
++  it("has nothing to run for a failed preflight", () => {
++    expect(
++      helperLaunchFromBackend({
++        args: ["-d", "X", "--", "node", "--version"],
++        env: {},
++        extendEnv: false,
++      }),
++    ).toBeUndefined();
++  });
++});
++
++describe("planBridge", () => {
++  it("does nothing until the user turns it on", () => {
++    expect(planBridge({ ...ready, enabled: false }, idle, 0)).toEqual({
++      action: "stop",
++      phase: "disabled",
++      detail: null,
++    });
++  });
++
++  it("is unsupported off Windows and in WSL-only mode", () => {
++    expect(planBridge({ ...ready, platform: "linux" }, idle, 0)).toMatchObject({
++      action: "stop",
++      phase: "unsupported",
++    });
++    expect(planBridge({ ...ready, wslOnly: true }, idle, 0)).toMatchObject({
++      action: "stop",
++      phase: "unsupported",
++    });
++  });
++
++  it("waits for the Windows backend and its identity, then for WSL", () => {
++    expect(
++      planBridge({ ...ready, windows: { ...ready.windows, ready: false } }, idle, 0),
++    ).toMatchObject({ phase: "waiting-windows" });
++    expect(
++      planBridge(
++        { ...ready, windows: { ...ready.windows, environmentId: null, error: "no answer" } },
++        idle,
++        0,
++      ),
++    ).toEqual({ action: "stop", phase: "waiting-windows", detail: "no answer" });
++    expect(planBridge({ ...ready, wsl: null }, idle, 0)).toMatchObject({ phase: "waiting-wsl" });
++    expect(planBridge({ ...ready, wsl: { ready: false, launch } }, idle, 0)).toMatchObject({
++      phase: "waiting-wsl",
++    });
++    expect(
++      planBridge({ ...ready, wsl: { ready: true, launch: undefined } }, idle, 0),
++    ).toMatchObject({ phase: "waiting-wsl" });
++  });
++
++  it("pauses when Windows answers as an environment other than the one paired", () => {
++    expect(planBridge({ ...ready, pairedEnvironmentId: "env-old" }, idle, 0)).toMatchObject({
++      action: "stop",
++      phase: "identity-mismatch",
++    });
++    expect(planBridge({ ...ready, pairedEnvironmentId: "env-windows" }, idle, 0)).toMatchObject({
++      action: "start",
++    });
++  });
++
++  it("starts once, keeps a running helper and restarts it when the WSL runtime changes", () => {
++    const started = planBridge(ready, idle, 0);
++    expect(started).toEqual({ action: "start", launch, key: launchKey(launch) });
++    const running = { ...idle, runningKey: launchKey(launch) };
++    expect(planBridge(ready, running, 0)).toEqual({
++      action: "keep",
++      phase: "starting",
++      detail: null,
++    });
++    expect(planBridge(ready, { ...running, listening: true }, 0)).toMatchObject({
++      action: "keep",
++      phase: "running",
++    });
++    const moved = helperLaunchFromBackend({
++      args: backendArgs.map((arg) => arg.replace("sha256-abc", "sha256-def")),
++      env: {},
++      extendEnv: false,
++    })!;
++    expect(planBridge({ ...ready, wsl: { ready: true, launch: moved } }, running, 0)).toMatchObject(
++      { action: "start", key: launchKey(moved) },
++    );
++  });
++
++  it("backs off after a failure instead of restarting in a loop", () => {
++    const failed = { ...idle, nextRetryAt: 5_000, lastError: "exit 1" };
++    expect(planBridge(ready, failed, 4_999)).toEqual({
++      action: "wait",
++      phase: "recovering",
++      detail: "exit 1",
++    });
++    expect(planBridge(ready, failed, 5_000)).toMatchObject({ action: "start" });
++  });
++});
++
++describe("backoffDelayMs", () => {
++  it("doubles from a second up to a minute", () => {
++    expect([0, 1, 2, 3, 10].map(backoffDelayMs)).toEqual([
++      1_000,
++      2_000,
++      4_000,
++      8_000,
++      BACKOFF_MAX_MS,
++    ]);
++    expect(backoffDelayMs(-1)).toBe(1_000);
++  });
++});
++
++describe("wslNetworkingOf", () => {
++  it("reads mirrored networking from a loopback WSL address", () => {
++    expect(wslNetworkingOf(new URL("http://127.0.0.1:3774"))).toBe("mirrored");
++    expect(wslNetworkingOf(new URL("http://192.0.2.10:3774"))).toBe("nat");
++  });
++});
+diff --git a/apps/desktop/src/hostBridge/hostBridgePlan.ts b/apps/desktop/src/hostBridge/hostBridgePlan.ts
+new file mode 100644
+index 0000000000..94bed81f52
+--- /dev/null
++++ b/apps/desktop/src/hostBridge/hostBridgePlan.ts
+@@ -0,0 +1,157 @@
++import type { DesktopHostBridgePhase } from "@t3tools/contracts";
++import { HOST_BRIDGE_DEFAULT_PORTS } from "@t3tools/shared/hostBridgeMux";
++
++/** The hidden `t3` subcommand that listens in WSL; the server's bin dispatches it. */
++export const HOST_BRIDGE_HELPER_COMMAND = "__host-bridge";
++export const HOST_BRIDGE_PORTS = HOST_BRIDGE_DEFAULT_PORTS;
++
++export const BACKOFF_INITIAL_MS = 1_000;
++export const BACKOFF_MAX_MS = 60_000;
++/** A helper up this long has recovered; its next failure starts the backoff over. */
++export const BACKOFF_STABLE_MS = 120_000;
++/** A helper that has not said where it listens by then is stuck, not slow. */
++export const HELLO_TIMEOUT_MS = 30_000;
++
++export const backoffDelayMs = (attempt: number) =>
++  Math.min(BACKOFF_MAX_MS, BACKOFF_INITIAL_MS * 2 ** Math.max(0, attempt));
++
++export interface HelperLaunch {
++  readonly args: ReadonlyArray<string>;
++  readonly env: Record<string, string | undefined>;
++  readonly extendEnv: boolean;
++}
++
++/**
++ * The helper runs exactly like the WSL backend (same distro, user, PATH,
++ * T3 home and runtime), with the helper subcommand in place of the server's
++ * bootstrap. A launch that is not a runtime start, such as a failed preflight,
++ * has nothing to run.
++ */
++export const helperLaunchFromBackend = (
++  config: {
++    readonly args: ReadonlyArray<string>;
++    readonly env: Record<string, string | undefined>;
++    readonly extendEnv: boolean;
++  },
++  ports: ReadonlyArray<number> = HOST_BRIDGE_PORTS,
++): HelperLaunch | undefined => {
++  const exec = config.args.indexOf("--exec");
++  const bootstrap = config.args.indexOf("--bootstrap-fd");
++  if (exec < 0 || bootstrap <= exec + 1) return undefined;
++  return {
++    args: [
++      ...config.args.slice(0, bootstrap),
++      HOST_BRIDGE_HELPER_COMMAND,
++      "--ports",
++      ports.join(","),
++    ],
++    env: config.env,
++    extendEnv: config.extendEnv,
++  };
++};
++
++/** Mirrored networking shares loopback with Windows; Desktop then reaches WSL at 127.0.0.1. */
++export const wslNetworkingOf = (httpBaseUrl: URL): "nat" | "mirrored" =>
++  httpBaseUrl.hostname === "127.0.0.1" ? "mirrored" : "nat";
++
++export interface BridgeObservation {
++  readonly enabled: boolean;
++  readonly platform: NodeJS.Platform;
++  readonly wslOnly: boolean;
++  readonly pairedEnvironmentId: string | null;
++  readonly windows: {
++    readonly ready: boolean;
++    readonly port: number | null;
++    readonly environmentId: string | null;
++    readonly error: string | null;
++  };
++  readonly wsl: {
++    readonly ready: boolean;
++    readonly launch: HelperLaunch | undefined;
++  } | null;
++}
++
++export interface HelperStatus {
++  /** The launch the running helper was started with, if one runs. */
++  readonly runningKey: string | null;
++  readonly listening: boolean;
++  readonly nextRetryAt: number | null;
++  readonly lastError: string | null;
++}
++
++export type BridgePlan =
++  | {
++      readonly action: "stop";
++      readonly phase: DesktopHostBridgePhase;
++      readonly detail: string | null;
++    }
++  | {
++      readonly action: "keep";
++      readonly phase: DesktopHostBridgePhase;
++      readonly detail: string | null;
++    }
++  | {
++      readonly action: "start";
++      readonly launch: HelperLaunch;
++      readonly key: string;
++    }
++  | {
++      readonly action: "wait";
++      readonly phase: DesktopHostBridgePhase;
++      readonly detail: string | null;
++    };
++
++export const launchKey = (launch: HelperLaunch) => JSON.stringify(launch.args);
++
++/** What the supervisor should do now. Pure, so every branch is tested without processes. */
++export const planBridge = (
++  observation: BridgeObservation,
++  helper: HelperStatus,
++  now: number,
++): BridgePlan => {
++  const stop = (phase: DesktopHostBridgePhase, detail: string | null): BridgePlan => ({
++    action: "stop",
++    phase,
++    detail,
++  });
++  if (!observation.enabled) return stop("disabled", null);
++  if (observation.platform !== "win32") {
++    return stop("unsupported", "The WSL host bridge runs in T3 Code for Windows.");
++  }
++  if (observation.wslOnly) {
++    return stop(
++      "unsupported",
++      "WSL-only mode runs no Windows backend. Turn it off to use the host bridge.",
++    );
++  }
++  const { windows, wsl } = observation;
++  if (!windows.ready || windows.port === null || windows.environmentId === null) {
++    return stop("waiting-windows", windows.error);
++  }
++  if (
++    observation.pairedEnvironmentId !== null &&
++    observation.pairedEnvironmentId !== windows.environmentId
++  ) {
++    return stop(
++      "identity-mismatch",
++      "The Windows backend answers as a different environment than the one paired. The bridge is paused until you confirm.",
++    );
++  }
++  if (wsl === null) return stop("waiting-wsl", "Turn on the WSL backend to use the host bridge.");
++  if (!wsl.ready) return stop("waiting-wsl", null);
++  if (wsl.launch === undefined) {
++    return stop("waiting-wsl", "The WSL backend did not start from a runtime the bridge can use.");
++  }
++  const key = launchKey(wsl.launch);
++  if (helper.runningKey === key) {
++    return {
++      action: "keep",
++      phase: helper.listening ? "running" : "starting",
++      detail: null,
++    };
++  }
++  if (helper.runningKey === null && helper.nextRetryAt !== null && now < helper.nextRetryAt) {
++    return { action: "wait", phase: "recovering", detail: helper.lastError };
++  }
++  return { action: "start", launch: wsl.launch, key };
++};
+diff --git a/apps/desktop/src/ipc/DesktopIpcHandlers.ts b/apps/desktop/src/ipc/DesktopIpcHandlers.ts
+index 74599bd332..2a4a4d3738 100644
+--- a/apps/desktop/src/ipc/DesktopIpcHandlers.ts
++++ b/apps/desktop/src/ipc/DesktopIpcHandlers.ts
+@@ -93,6 +93,7 @@ import {
+   setWslDistro,
+   setWslOnly,
+ } from "./methods/wsl.ts";
++import { getHostBridgeState, setHostBridge } from "./methods/hostBridge.ts";
+ import { restartApp } from "./methods/restart.ts";
+ import {
+   getCliCommandState,
+@@ -164,6 +165,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
+   yield* ipc.handle(setWslBackendEnabled);
+   yield* ipc.handle(setWslDistro);
+   yield* ipc.handle(setWslOnly);
++  yield* ipc.handle(getHostBridgeState);
++  yield* ipc.handle(setHostBridge);
+ 
+   yield* ipc.handle(pickFolder);
+   yield* ipc.handle(toLocalBackendPath);
+diff --git a/apps/desktop/src/ipc/channels.ts b/apps/desktop/src/ipc/channels.ts
+index 04acf049ac..ece8bc3ffa 100644
+--- a/apps/desktop/src/ipc/channels.ts
++++ b/apps/desktop/src/ipc/channels.ts
+@@ -84,6 +84,8 @@ export const GET_WSL_RUNTIME_STATUS_CHANNEL = "desktop:get-wsl-runtime-status";
+ export const SET_WSL_BACKEND_ENABLED_CHANNEL = "desktop:set-wsl-backend-enabled";
+ export const SET_WSL_DISTRO_CHANNEL = "desktop:set-wsl-distro";
+ export const SET_WSL_ONLY_CHANNEL = "desktop:set-wsl-only";
++export const GET_HOST_BRIDGE_STATE_CHANNEL = "desktop:get-host-bridge-state";
++export const SET_HOST_BRIDGE_CHANNEL = "desktop:set-host-bridge";
+ export const SSH_PASSWORD_PROMPT_CANCELLED_RESULT = "ssh-password-prompt-cancelled";
+ export const PREVIEW_SET_FORWARDED_SHORTCUTS_CHANNEL = "desktop:preview-set-forwarded-shortcuts";
+ export const PREVIEW_CREATE_TAB_CHANNEL = "desktop:preview-create-tab";
+diff --git a/apps/desktop/src/ipc/methods/hostBridge.ts b/apps/desktop/src/ipc/methods/hostBridge.ts
+new file mode 100644
+index 0000000000..76a910bcd5
+--- /dev/null
++++ b/apps/desktop/src/ipc/methods/hostBridge.ts
+@@ -0,0 +1,25 @@
++import { DesktopHostBridgeSetInputSchema, DesktopHostBridgeStateSchema } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as Schema from "effect/Schema";
++
++import * as DesktopHostBridge from "../../hostBridge/DesktopHostBridge.ts";
++import * as IpcChannels from "../channels.ts";
++import { makeIpcMethod } from "../DesktopIpc.ts";
++
++export const getHostBridgeState = makeIpcMethod({
++  channel: IpcChannels.GET_HOST_BRIDGE_STATE_CHANNEL,
++  payload: Schema.Void,
++  result: DesktopHostBridgeStateSchema,
++  handler: Effect.fn("desktop.ipc.hostBridge.getState")(function* () {
++    return yield* (yield* DesktopHostBridge.DesktopHostBridge).state;
++  }),
++});
++
++export const setHostBridge = makeIpcMethod({
++  channel: IpcChannels.SET_HOST_BRIDGE_CHANNEL,
++  payload: DesktopHostBridgeSetInputSchema,
++  result: DesktopHostBridgeStateSchema,
++  handler: Effect.fn("desktop.ipc.hostBridge.set")(function* (input) {
++    return yield* (yield* DesktopHostBridge.DesktopHostBridge).set(input);
++  }),
++});
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 8c32805a94..256b187f56 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -79,6 +79,7 @@ import * as PreviewManager from "./preview/Manager.ts";
+ import * as PreviewPasskeys from "./preview/Passkeys.ts";
+ import * as DesktopWindow from "./window/DesktopWindow.ts";
+ import * as DesktopWslBackend from "./wsl/DesktopWslBackend.ts";
++import * as DesktopHostBridge from "./hostBridge/DesktopHostBridge.ts";
+ import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
+ import * as DesktopWslServerTree from "./wsl/DesktopWslServerTree.ts";
+ 
+@@ -206,6 +207,10 @@ const layerDesktopWslBackend = DesktopWslBackend.layer.pipe(
+   Layer.provideMerge(layerDesktopBackend),
+ );
+ 
++const layerDesktopHostBridge = DesktopHostBridge.layer.pipe(
++  Layer.provideMerge(layerDesktopBackend),
++);
++
+ const layerDesktopLocalEnvironmentAuth = DesktopLocalEnvironmentAuth.layer.pipe(
+   Layer.provideMerge(layerDesktopBackend),
+ );
+@@ -229,6 +234,7 @@ const layerDesktopApplication = Layer.mergeAll(
+   // Updates closes the same tunnels the SSH IPC opens before quitAndInstall.
+   Layer.provideMerge(layerDesktopSsh),
+   Layer.provideMerge(layerDesktopWslBackend),
++  Layer.provideMerge(layerDesktopHostBridge),
+   Layer.provideMerge(layerDesktopLocalEnvironmentAuth),
+ );
+ 
+diff --git a/apps/desktop/src/preload.ts b/apps/desktop/src/preload.ts
+index a78332e490..50645ebf64 100644
+--- a/apps/desktop/src/preload.ts
++++ b/apps/desktop/src/preload.ts
+@@ -244,6 +244,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
+     ipcRenderer.invoke(IpcChannels.SET_WSL_BACKEND_ENABLED_CHANNEL, enabled),
+   setWslDistro: (distro) => ipcRenderer.invoke(IpcChannels.SET_WSL_DISTRO_CHANNEL, distro),
+   setWslOnly: (enabled) => ipcRenderer.invoke(IpcChannels.SET_WSL_ONLY_CHANNEL, enabled),
++  getHostBridgeState: () => ipcRenderer.invoke(IpcChannels.GET_HOST_BRIDGE_STATE_CHANNEL),
++  setHostBridge: (input) => ipcRenderer.invoke(IpcChannels.SET_HOST_BRIDGE_CHANNEL, input),
+   pickFolder: (options) => ipcRenderer.invoke(IpcChannels.PICK_FOLDER_CHANNEL, options),
+   toLocalBackendPath: (backendId, path) =>
+     ipcRenderer.invoke(IpcChannels.TO_LOCAL_BACKEND_PATH_CHANNEL, { backendId, path }),
+diff --git a/apps/desktop/src/settings/DesktopAppSettings.test.ts b/apps/desktop/src/settings/DesktopAppSettings.test.ts
+index 04406f63c6..2cf6bdcaf5 100644
+--- a/apps/desktop/src/settings/DesktopAppSettings.test.ts
++++ b/apps/desktop/src/settings/DesktopAppSettings.test.ts
+@@ -235,6 +235,8 @@ describe("DesktopSettings", () => {
+           wslBackendEnabled: false,
+           wslOnly: false,
+           wslDistro: null,
++          hostBridgeEnabled: false,
++          hostBridgeEnvironmentId: null,
+         } satisfies DesktopAppSettings.DesktopSettings);
+       }),
+     ),
+@@ -388,6 +390,8 @@ describe("DesktopSettings", () => {
+           wslBackendEnabled: false,
+           wslOnly: false,
+           wslDistro: null,
++          hostBridgeEnabled: false,
++          hostBridgeEnvironmentId: null,
+         } satisfies DesktopAppSettings.DesktopSettings);
+       }),
+       { appVersion: "0.0.17-nightly.20260415.1" },
+@@ -417,6 +421,8 @@ describe("DesktopSettings", () => {
+           wslBackendEnabled: false,
+           wslOnly: false,
+           wslDistro: null,
++          hostBridgeEnabled: false,
++          hostBridgeEnvironmentId: null,
+         } satisfies DesktopAppSettings.DesktopSettings);
+       }),
+       { appVersion: "0.0.17-nightly.20260415.1" },
+@@ -498,3 +504,22 @@ describe("DesktopSettings", () => {
+     ),
+   );
+ });
++
++describe("setHostBridge", () => {
++  it("keeps the paired Windows environment unless told to change or forget it", () => {
++    const on = DesktopAppSettings.setHostBridge(DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS, {
++      enabled: true,
++      environmentId: " env-windows ",
++    });
++    assert.strictEqual(on.hostBridgeEnabled, true);
++    assert.strictEqual(on.hostBridgeEnvironmentId, "env-windows");
++    const off = DesktopAppSettings.setHostBridge(on, { enabled: false });
++    assert.strictEqual(off.hostBridgeEnvironmentId, "env-windows");
++    assert.strictEqual(DesktopAppSettings.setHostBridge(off, { enabled: false }), off);
++    const forgotten = DesktopAppSettings.setHostBridge(off, {
++      enabled: false,
++      environmentId: null,
++    });
++    assert.strictEqual(forgotten.hostBridgeEnvironmentId, null);
++  });
++});
+diff --git a/apps/desktop/src/settings/DesktopAppSettings.ts b/apps/desktop/src/settings/DesktopAppSettings.ts
+index e81da70660..751eb4f5f9 100644
+--- a/apps/desktop/src/settings/DesktopAppSettings.ts
++++ b/apps/desktop/src/settings/DesktopAppSettings.ts
+@@ -41,6 +41,10 @@ export interface DesktopSettings {
+   readonly wslDistro: string | null;
+   // Requires restart because the pool chooses its primary spec at layer initialization.
+   readonly wslOnly: boolean;
++  /** The WSL host bridge to this machine's Windows backend; off until the user turns it on. */
++  readonly hostBridgeEnabled: boolean;
++  /** The Windows environment the bridge was paired with; a different one pauses it. */
++  readonly hostBridgeEnvironmentId: string | null;
+ }
+ 
+ export interface DesktopSettingsChange {
+@@ -81,6 +85,8 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
+   wslBackendEnabled: false,
+   wslDistro: null,
+   wslOnly: false,
++  hostBridgeEnabled: false,
++  hostBridgeEnvironmentId: null,
+ };
+ 
+ const DesktopWindowBoundsDocument = Schema.Struct({
+@@ -109,6 +115,8 @@ const DesktopSettingsDocument = Schema.Struct({
+   wslMode: optionalReadableKey(Schema.Literals(["local", "wsl"])),
+   wslDistro: optionalReadableKey(Schema.NullOr(Schema.String)),
+   wslOnly: optionalReadableKey(Schema.Boolean),
++  hostBridgeEnabled: optionalReadableKey(Schema.Boolean),
++  hostBridgeEnvironmentId: optionalReadableKey(Schema.NullOr(Schema.String)),
+ });
+ 
+ type DesktopSettingsDocument = typeof DesktopSettingsDocument.Type;
+@@ -179,6 +187,9 @@ export class DesktopAppSettings extends Context.Service<
+     readonly setWslOnly: (
+       enabled: boolean,
+     ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
++    readonly setHostBridge: (
++      input: DesktopHostBridgeSettingsInput,
++    ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
+     readonly applyWslWindowsFallback: Effect.Effect<
+       DesktopSettingsChange,
+       DesktopSettingsWriteError
+@@ -240,6 +251,8 @@ function normalizeDesktopSettingsDocument(
+     wslBackendEnabled,
+     wslDistro: normalizeWslDistro(parsed.wslDistro),
+     wslOnly: parsed.wslOnly === true,
++    hostBridgeEnabled: parsed.hostBridgeEnabled === true,
++    hostBridgeEnvironmentId: normalizeHostBridgeEnvironmentId(parsed.hostBridgeEnvironmentId),
+   };
+ }
+ 
+@@ -286,6 +299,12 @@ function toDesktopSettingsDocument(
+   if (settings.wslOnly !== defaults.wslOnly) {
+     document.wslOnly = settings.wslOnly;
+   }
++  if (settings.hostBridgeEnabled !== defaults.hostBridgeEnabled) {
++    document.hostBridgeEnabled = settings.hostBridgeEnabled;
++  }
++  if (settings.hostBridgeEnvironmentId !== defaults.hostBridgeEnvironmentId) {
++    document.hostBridgeEnvironmentId = settings.hostBridgeEnvironmentId;
++  }
+ 
+   return document;
+ }
+@@ -367,6 +386,31 @@ function setWslDistro(settings: DesktopSettings, distro: string | null): Desktop
+       };
+ }
+ 
++export interface DesktopHostBridgeSettingsInput {
++  readonly enabled: boolean;
++  /** Absent keeps the paired environment; null forgets it. */
++  readonly environmentId?: string | null;
++}
++
++const normalizeHostBridgeEnvironmentId = (value: string | null | undefined): string | null => {
++  const trimmed = value?.trim();
++  return trimmed === undefined || trimmed.length === 0 || trimmed.length > 200 ? null : trimmed;
++};
++
++export function setHostBridge(
++  settings: DesktopSettings,
++  input: DesktopHostBridgeSettingsInput,
++): DesktopSettings {
++  const environmentId =
++    input.environmentId === undefined
++      ? settings.hostBridgeEnvironmentId
++      : normalizeHostBridgeEnvironmentId(input.environmentId);
++  return settings.hostBridgeEnabled === input.enabled &&
++    settings.hostBridgeEnvironmentId === environmentId
++    ? settings
++    : { ...settings, hostBridgeEnabled: input.enabled, hostBridgeEnvironmentId: environmentId };
++}
++
+ function setWslOnly(settings: DesktopSettings, enabled: boolean): DesktopSettings {
+   return settings.wslOnly === enabled
+     ? settings
+@@ -592,6 +636,11 @@ export const make = Effect.gen(function* () {
+ 
+       return yield* persist((settings) => setWslOnly(settings, enabled));
+     }),
++    setHostBridge: Effect.fn("desktop.settings.setHostBridge")(function* (input) {
++      yield* Effect.annotateCurrentSpan({ enabled: input.enabled });
++
++      return yield* persist((settings) => setHostBridge(settings, input));
++    }),
+     setLocalEnvironmentEnabled: Effect.fn("desktop.settings.setLocalEnvironmentEnabled")(
+       function* (enabled) {
+         yield* Effect.annotateCurrentSpan({ enabled });
+@@ -657,6 +706,9 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
+         setWslOnly: Effect.fn("DesktopAppSettings.setWslOnly")(function (enabled) {
+           return update((settings) => setWslOnly(settings, enabled));
+         }),
++        setHostBridge: Effect.fn("DesktopAppSettings.setHostBridge")(function (input) {
++          return update((settings) => setHostBridge(settings, input));
++        }),
+         setLocalEnvironmentEnabled: Effect.fn("DesktopAppSettings.setLocalEnvironmentEnabled")(
+           function (enabled) {
+             return update((settings) => setLocalEnvironmentEnabled(settings, enabled));
+diff --git a/apps/desktop/src/updates/updatesTestHarness.ts b/apps/desktop/src/updates/updatesTestHarness.ts
+index 9b8f78e190..aa9774770e 100644
+--- a/apps/desktop/src/updates/updatesTestHarness.ts
++++ b/apps/desktop/src/updates/updatesTestHarness.ts
+@@ -238,6 +238,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
+           setWslDistro: () => Effect.die("unexpected WSL distro change"),
+           setLocalEnvironmentEnabled: () => Effect.die("unexpected local environment toggle"),
+           setWslOnly: () => Effect.die("unexpected WSL-only toggle"),
++          setHostBridge: () => Effect.die("unexpected host bridge change"),
+           applyWslWindowsFallback: Effect.die("unexpected WSL Windows fallback"),
+           applyWslWindowsFallbackInMemory: Effect.die("unexpected WSL Windows fallback"),
+         } satisfies DesktopAppSettings.DesktopAppSettings["Service"])
+diff --git a/apps/desktop/src/window/DesktopWindow.test.ts b/apps/desktop/src/window/DesktopWindow.test.ts
+index 6da2c7b72d..0a68952188 100644
+--- a/apps/desktop/src/window/DesktopWindow.test.ts
++++ b/apps/desktop/src/window/DesktopWindow.test.ts
+@@ -294,6 +294,7 @@ function layerTest(input: {
+     setWslBackendEnabled: () => Effect.die("unexpected WSL backend toggle"),
+     setWslDistro: () => Effect.die("unexpected WSL distro change"),
+     setWslOnly: () => Effect.die("unexpected WSL-only toggle"),
++    setHostBridge: () => Effect.die("unexpected host bridge change"),
+     setLocalEnvironmentEnabled: () => Effect.die("unexpected local environment toggle"),
+     applyWslWindowsFallback: Effect.die("unexpected WSL Windows fallback"),
+     applyWslWindowsFallbackInMemory: Effect.die("unexpected WSL Windows fallback"),
+diff --git a/apps/server/src/bin.ts b/apps/server/src/bin.ts
+index 4bbc5801d2..64e146cc29 100644
+--- a/apps/server/src/bin.ts
++++ b/apps/server/src/bin.ts
+@@ -53,6 +53,10 @@ if (
+   const launcherOptions = launcher?.parseServiceLauncherArgs(process.argv.slice(3));
+   if (launcher !== undefined && launcherOptions !== undefined) {
+     await launcher.runServiceLauncherCli(launcherOptions);
++  } else if (process.argv[2] === "__host-bridge") {
++    // The Desktop's WSL host bridge: a stdio-only helper, kept out of the CLI runtime.
++    const { runHostBridgeHelper } = await import("./hostBridge/hostBridgeHelper.ts");
++    await runHostBridgeHelper(process.argv.slice(3));
+   } else if (process.argv[2] === "__process-launcher") {
+     // Single executables host the launcher here; other builds start process-launcher.mjs directly.
+     const { runProcessLauncher } = await import("./process/processLauncherWorker.ts");
+diff --git a/apps/server/src/environment/ServerEnvironment.ts b/apps/server/src/environment/ServerEnvironment.ts
+index a340037016..2d20a1fa3c 100644
+--- a/apps/server/src/environment/ServerEnvironment.ts
++++ b/apps/server/src/environment/ServerEnvironment.ts
+@@ -301,6 +301,7 @@ export const make = Effect.gen(function* () {
+       linkThreadStream: true,
+       linkClientPairing: true,
+       linkPairingForLink: true,
++      hostBridgeLinks: true,
+       mcpApprovalCodes: true,
+       peerLinkPairingCodes: true,
+       mcpHostedApproval: true,
+diff --git a/apps/server/src/hostBridge/hostBridgeHelper.test.ts b/apps/server/src/hostBridge/hostBridgeHelper.test.ts
+new file mode 100644
+index 0000000000..c81abcf79a
+--- /dev/null
++++ b/apps/server/src/hostBridge/hostBridgeHelper.test.ts
+@@ -0,0 +1,162 @@
++// @effect-diagnostics nodeBuiltinImport:off -- The helper is plain Node; it is tested over real loopback sockets.
++import * as NodeNet from "node:net";
++import * as NodeStream from "node:stream";
++
++import { afterEach, describe, expect, it } from "vite-plus/test";
++
++import {
++  FrameDecoder,
++  FrameType,
++  decodeHello,
++  encodeFrame,
++  type Frame,
++} from "@t3tools/shared/hostBridgeMux";
++
++import {
++  listenOnFirstFree,
++  parseHostBridgeHelperArgs,
++  runHostBridgeHelper,
++} from "./hostBridgeHelper.ts";
++
++const closers: Array<() => void> = [];
++afterEach(() => {
++  for (const close of closers.splice(0)) close();
++});
++
++const freePort = () =>
++  new Promise<number>((resolve) => {
++    const server = NodeNet.createServer();
++    server.listen(0, "127.0.0.1", () => {
++      const { port } = server.address() as NodeNet.AddressInfo;
++      server.close(() => resolve(port));
++    });
++  });
++
++const occupy = (port: number) =>
++  new Promise<NodeNet.Server>((resolve) => {
++    const server = NodeNet.createServer();
++    server.listen(port, "127.0.0.1", () => resolve(server));
++    closers.push(() => server.close());
++  });
++
++const startHelper = async (argv: ReadonlyArray<string>) => {
++  const input = new NodeStream.PassThrough();
++  const frames: Array<Frame> = [];
++  const decoder = new FrameDecoder();
++  const exits: Array<number> = [];
++  // Woken by each frame and exit, so a test awaits the milestone itself.
++  const waiters: Array<() => void> = [];
++  const notify = () => {
++    for (const waiter of waiters.splice(0)) waiter();
++  };
++  const when = (check: () => boolean) =>
++    new Promise<void>((resolve) => {
++      const attempt = () => (check() ? resolve() : waiters.push(attempt));
++      attempt();
++    });
++  const result = await runHostBridgeHelper(argv, {
++    input,
++    output: {
++      write: (bytes) => {
++        frames.push(...decoder.push(bytes));
++        notify();
++      },
++    },
++    exit: (code) => {
++      exits.push(code);
++      notify();
++    },
++    pid: 4242,
++  });
++  if (result !== undefined) closers.push(result.stop);
++  return { input, frames, exits, result, when };
++};
++
++describe("parseHostBridgeHelperArgs", () => {
++  it("accepts only a port list", () => {
++    expect(parseHostBridgeHelperArgs(["--ports", "13773,13774"])).toEqual({
++      ok: true,
++      ports: [13773, 13774],
++    });
++    expect(parseHostBridgeHelperArgs(["--ports", "80"]).ok).toBe(false);
++    expect(parseHostBridgeHelperArgs(["--ports", "13773", "--to", "192.0.2.1:3773"]).ok).toBe(
++      false,
++    );
++    expect(parseHostBridgeHelperArgs(["--target", "192.0.2.1"]).ok).toBe(false);
++    expect(parseHostBridgeHelperArgs(["--ports", "x"]).ok).toBe(false);
++  });
++});
++
++describe("listenOnFirstFree", () => {
++  it("skips ports something else holds", async () => {
++    const taken = await freePort();
++    await occupy(taken);
++    const next = await freePort();
++    const server = NodeNet.createServer();
++    closers.push(() => server.close());
++    expect(await listenOnFirstFree(server, [taken, next])).toEqual({ port: next });
++    expect((server.address() as NodeNet.AddressInfo).address).toBe("127.0.0.1");
++  });
++
++  it("reports when every port is taken", async () => {
++    const taken = await freePort();
++    await occupy(taken);
++    const server = NodeNet.createServer();
++    expect(await listenOnFirstFree(server, [taken])).toEqual({ error: "ports_in_use" });
++  });
++});
++
++describe("runHostBridgeHelper", () => {
++  it("says hello with its port, frames connections and exits when stdin ends", async () => {
++    const port = await freePort();
++    const helper = await startHelper(["--ports", String(port)]);
++    expect(helper.frames[0]?.type).toBe(FrameType.hello);
++    expect(decodeHello(helper.frames[0]!.payload)).toEqual({
++      ok: true,
++      version: 1,
++      port,
++      pid: 4242,
++    });
++
++    const client = NodeNet.connect({ host: "127.0.0.1", port });
++    closers.push(() => client.destroy());
++    await new Promise((resolve) => client.once("connect", resolve));
++    client.write("GET / HTTP/1.1\r\n\r\n");
++    await helper.when(() => helper.frames.some((frame) => frame.type === FrameType.data));
++    const open = helper.frames.find((frame) => frame.type === FrameType.open)!;
++    const data = helper.frames.find((frame) => frame.type === FrameType.data)!;
++    expect(data.stream).toBe(open.stream);
++    expect(new TextDecoder().decode(data.payload)).toBe("GET / HTTP/1.1\r\n\r\n");
++
++    const received = new Promise<string>((resolve) =>
++      client.once("data", (chunk: Buffer) => resolve(chunk.toString())),
++    );
++    helper.input.write(
++      encodeFrame(FrameType.data, open.stream, new TextEncoder().encode("HTTP/1.1 200 OK\r\n")),
++    );
++    expect(await received).toBe("HTTP/1.1 200 OK\r\n");
++
++    helper.input.end();
++    await helper.when(() => helper.exits.includes(0));
++  });
++
++  it("refuses to start with anything but ports", async () => {
++    const helper = await startHelper(["--ports", "13773", "--to", "192.0.2.1"]);
++    expect(decodeHello(helper.frames[0]!.payload)).toMatchObject({
++      ok: false,
++      code: "bad_arguments",
++    });
++    expect(helper.exits).toEqual([2]);
++  });
++
++  it("reports ports in use instead of listening elsewhere", async () => {
++    const port = await freePort();
++    await occupy(port);
++    const helper = await startHelper(["--ports", String(port)]);
++    expect(decodeHello(helper.frames[0]!.payload)).toMatchObject({
++      ok: false,
++      code: "ports_in_use",
++    });
++    expect(helper.exits).toEqual([4]);
++  });
++});
+diff --git a/apps/server/src/hostBridge/hostBridgeHelper.ts b/apps/server/src/hostBridge/hostBridgeHelper.ts
+new file mode 100644
+index 0000000000..f558abe181
+--- /dev/null
++++ b/apps/server/src/hostBridge/hostBridgeHelper.ts
+@@ -0,0 +1,125 @@
++// @effect-diagnostics nodeBuiltinImport:off -- A tiny stdio helper the Desktop starts in WSL; it runs before any CLI runtime.
++import * as NodeNet from "node:net";
++
++import {
++  encodeHello,
++  HOST_BRIDGE_PROTOCOL_VERSION,
++  HostBridgeMux,
++  type HostBridgeHello,
++} from "@t3tools/shared/hostBridgeMux";
++
++export const HOST_BRIDGE_HELPER_COMMAND = "__host-bridge";
++
++export type HostBridgeHelperArgs =
++  | { readonly ok: true; readonly ports: ReadonlyArray<number> }
++  | { readonly ok: false; readonly message: string };
++
++/** `--ports 13773,13774,13775`: where to listen, first free wins. Nothing else is accepted. */
++export const parseHostBridgeHelperArgs = (argv: ReadonlyArray<string>): HostBridgeHelperArgs => {
++  if (argv.length !== 2 || argv[0] !== "--ports") {
++    return { ok: false, message: "usage: t3 __host-bridge --ports <port>[,<port>…]" };
++  }
++  const ports = argv[1]!.split(",").map((value) => Number(value));
++  if (
++    ports.length === 0 ||
++    ports.length > 8 ||
++    ports.some((port) => !Number.isInteger(port) || port < 1024 || port > 65_535)
++  ) {
++    return { ok: false, message: "ports must be 1–8 integers between 1024 and 65535" };
++  }
++  return { ok: true, ports };
++};
++
++/** Binds the first port that is free on IPv4 loopback; never any other interface. */
++export const listenOnFirstFree = async (
++  server: NodeNet.Server,
++  ports: ReadonlyArray<number>,
++): Promise<{ readonly port: number } | { readonly error: "ports_in_use" | "listen_failed" }> => {
++  for (const port of ports) {
++    const result = await new Promise<"listening" | "in_use" | "failed">((resolve) => {
++      const onError = (error: NodeJS.ErrnoException) => {
++        server.off("listening", onListening);
++        resolve(error.code === "EADDRINUSE" || error.code === "EACCES" ? "in_use" : "failed");
++      };
++      const onListening = () => {
++        server.off("error", onError);
++        resolve("listening");
++      };
++      server.once("error", onError);
++      server.once("listening", onListening);
++      server.listen({ port, host: "127.0.0.1", exclusive: true });
++    });
++    if (result === "listening") return { port };
++    if (result === "failed") return { error: "listen_failed" };
++  }
++  return { error: "ports_in_use" };
++};
++
++interface HelperIo {
++  readonly input: NodeJS.ReadableStream;
++  readonly output: { write(bytes: Uint8Array): unknown };
++  readonly exit: (code: number) => void;
++  readonly pid: number;
++}
++
++/**
++ * Listens on WSL loopback and carries each connection over stdio to the
++ * Desktop, which alone decides where it goes. Ends when stdin ends, so it
++ * never outlives the Desktop that started it.
++ */
++export const runHostBridgeHelper = async (
++  argv: ReadonlyArray<string>,
++  io: HelperIo = {
++    input: process.stdin,
++    output: process.stdout,
++    exit: (code) => process.exit(code),
++    pid: process.pid,
++  },
++) => {
++  const send = (hello: HostBridgeHello) => io.output.write(encodeHello(hello));
++  const args = parseHostBridgeHelperArgs(argv);
++  if (!args.ok) {
++    send({
++      ok: false,
++      version: HOST_BRIDGE_PROTOCOL_VERSION,
++      code: "bad_arguments",
++      message: args.message,
++    });
++    io.exit(2);
++    return;
++  }
++  const mux = new HostBridgeMux((bytes) => io.output.write(bytes), {
++    onProtocolError: () => io.exit(3),
++  });
++  const server = NodeNet.createServer({ allowHalfOpen: true, pauseOnConnect: false }, (socket) => {
++    socket.setNoDelay(true);
++    mux.accept(socket);
++  });
++  const bound = await listenOnFirstFree(server, args.ports);
++  if ("error" in bound) {
++    send({
++      ok: false,
++      version: HOST_BRIDGE_PROTOCOL_VERSION,
++      code: bound.error,
++      message:
++        bound.error === "ports_in_use"
++          ? args.ports.length === 1
++            ? `127.0.0.1:${args.ports[0]} is in use`
++            : `127.0.0.1 ports ${args.ports.join(", ")} are all in use`
++          : "could not listen on 127.0.0.1",
++    });
++    io.exit(4);
++    return;
++  }
++  send({ ok: true, version: HOST_BRIDGE_PROTOCOL_VERSION, port: bound.port, pid: io.pid });
++  const stop = () => {
++    mux.stop();
++    server.close();
++    io.exit(0);
++  };
++  io.input.on("data", (chunk: Uint8Array) => mux.receive(chunk));
++  io.input.on("end", stop);
++  io.input.on("close", stop);
++  io.input.on("error", stop);
++  return { port: bound.port, stop };
++};
+diff --git a/apps/server/src/peer/PeerLinks.test.ts b/apps/server/src/peer/PeerLinks.test.ts
+index 3861fbb97b..16da569c4d 100644
+--- a/apps/server/src/peer/PeerLinks.test.ts
++++ b/apps/server/src/peer/PeerLinks.test.ts
+@@ -817,6 +817,116 @@ it.effect(
+     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+ );
+ 
++it.effect(
++  "the local host bridge links only at this machine's loopback, and only to the environment named",
++  () =>
++    Effect.scoped(
++      Effect.gen(function* () {
++        const impostor = yield* serveApart(descriptorOf("environment-impostor", "Impostor"));
++        const b = yield* serveB(box);
++        const a = yield* makeA(laptop);
++        // In these tests only `localhost` is this machine's loopback.
++        const bridged = (url: string) => url.replace("127.0.0.1", "localhost");
++        const pairing = yield* b.auth.issuePairingCredential();
++
++        // The same loopback addresses without the bridge are still refused for a picked machine.
++        const picked = yield* a.links
++          .link({
++            url: bridged(b.url),
++            pairingCode: pairing.credential,
++            access: "approval-required",
++            expectedEnvironmentId: box.environmentId,
++          })
++          .pipe(Effect.flip);
++        expect(picked.message).toContain("is this machine");
++
++        // The bridge must name what it reaches.
++        const unnamed = yield* a.links
++          .link({
++            url: bridged(b.url),
++            pairingCode: pairing.credential,
++            access: "approval-required",
++            sameHostBridge: true,
++          })
++          .pipe(Effect.flip);
++        expect(unnamed.reason).toBe("pairing_rejected");
++
++        // Anything but loopback is not the bridge.
++        const remote = yield* a.links
++          .link({
++            url: b.url,
++            pairingCode: pairing.credential,
++            access: "approval-required",
++            expectedEnvironmentId: box.environmentId,
++            sameHostBridge: true,
++          })
++          .pipe(Effect.flip);
++        expect(remote.message).toContain("not this machine's loopback");
++        expect(yield* linkedSessions(b)).toEqual([]);
++
++        // Something else answering on a bridge port never sees the code.
++        const linked = yield* a.links.link({
++          url: bridged(impostor.url),
++          alternateUrls: [bridged(b.url)],
++          pairingCode: pairing.credential,
++          access: "approval-required",
++          expectedEnvironmentId: box.environmentId,
++          expectedLabel: "Box",
++          sameHostBridge: true,
++        });
++        expect(linked.environmentId).toBe(box.environmentId);
++        // Every bridge address is kept, the answering one first: the bridge may move between them.
++        expect(linked.urls).toEqual([
++          new URL(bridged(b.url)).origin,
++          new URL(bridged(impostor.url)).origin,
++        ]);
++        expect(yield* linkedSessions(impostor)).toEqual([]);
++        expect(yield* Ref.get(impostor.bearers)).toEqual([]);
++
++        // From here on it is an ordinary link: calls go only where the peer answers as itself.
++        yield* probe(a, { runtimeMode: "approval-required", interactionMode: "default" });
++        expect(yield* Ref.get(impostor.bearers)).toEqual([]);
++        expect((yield* linkedSessions(b)).length).toBe(1);
++
++        // An existing link is left as it is, its code unused.
++        const again = yield* b.auth.issuePairingCredential();
++        const kept = yield* a.links.linkUnlessLinked({
++          url: bridged(b.url),
++          pairingCode: again.credential,
++          access: "approval-required",
++          expectedEnvironmentId: box.environmentId,
++          sameHostBridge: true,
++        });
++        expect(kept.alreadyLinked).toBe(true);
++        expect((yield* linkedSessions(b)).length).toBe(1);
++      }),
++    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
++);
++
++it.effect("the local host bridge refuses when its addresses answer as another environment", () =>
++  Effect.scoped(
++    Effect.gen(function* () {
++      const impostor = yield* serveApart(descriptorOf("environment-impostor", "Impostor"));
++      const a = yield* makeA(laptop);
++      const failed = yield* a.links
++        .link({
++          url: impostor.url.replace("127.0.0.1", "localhost"),
++          pairingCode: "unused",
++          access: "approval-required",
++          expectedEnvironmentId: box.environmentId,
++          expectedLabel: "Box",
++          sameHostBridge: true,
++        })
++        .pipe(Effect.flip);
++      expect(failed.reason).toBe("unreachable");
++      expect(failed.answeredAs).toBe("Impostor");
++      expect(failed.message).toContain("The local host bridge did not answer as Box");
++      expect(yield* linkedSessions(impostor)).toEqual([]);
++      expect(yield* a.links.list).toEqual([]);
++    }),
++  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
++);
++
+ it.effect("linking a picked machine that answers nowhere names it and links nothing", () =>
+   Effect.scoped(
+     Effect.gen(function* () {
+diff --git a/apps/server/src/peer/PeerLinks.ts b/apps/server/src/peer/PeerLinks.ts
+index 859266c469..4faf1d3514 100644
+--- a/apps/server/src/peer/PeerLinks.ts
++++ b/apps/server/src/peer/PeerLinks.ts
+@@ -500,6 +500,60 @@ const make = Effect.gen(function* () {
+     return { primary: first.origin, peer: first.descriptor, origins };
+   });
+ 
++  /**
++   * The Desktop's WSL host bridge: loopback addresses that the Desktop relays
++   * to its own Windows backend. Only loopback is accepted here, and only an
++   * address answering as `environmentId` is kept, so the pairing code never
++   * goes to whatever else might listen on this machine.
++   */
++  const answeringAsThroughBridge = Effect.fn("PeerLinks.answeringAsThroughBridge")(function* (
++    urls: ReadonlyArray<string>,
++    environmentId: EnvironmentId,
++    name: string,
++  ) {
++    const checked = yield* Effect.forEach(
++      urls,
++      (url) =>
++        Effect.gen(function* () {
++          const origin = yield* peerOrigin(url);
++          if (!isOwnLoopback(new URL(origin).hostname)) {
++            return yield* new PeerLinkError({
++              reason: "unreachable",
++              message: `${origin} is not this machine's loopback, so it is not the local host bridge.`,
++            });
++          }
++          const descriptor = yield* probe(origin);
++          if (descriptor.environmentId !== environmentId) {
++            return yield* new PeerLinkError({
++              reason: "unreachable",
++              message: `${origin} answered as another environment, ${descriptor.label}.`,
++              answeredAs: descriptor.label,
++            });
++          }
++          return { origin, descriptor };
++        }).pipe(Effect.result),
++      { concurrency: "unbounded" },
++    );
++    const matching = checked.flatMap((result) =>
++      Result.isSuccess(result) ? [result.success] : [],
++    );
++    const first = matching[0];
++    if (first === undefined) {
++      const failures = checked.flatMap((result) =>
++        Result.isFailure(result) ? [result.failure] : [],
++      );
++      const answeredAs = failures.find((failure) => failure.answeredAs !== undefined)?.answeredAs;
++      return yield* new PeerLinkError({
++        reason: "unreachable",
++        message: `The local host bridge did not answer as ${name}: ${failures.map((failure) => failure.message).join(" ")}`,
++        ...(answeredAs === undefined ? {} : { answeredAs }),
++      });
++    }
++    // Every bridge address stays on the link: the bridge may move between them.
++    const origins = [...new Set([first.origin, ...(yield* Effect.forEach(urls, peerOrigin))])];
++    return { primary: first.origin, peer: first.descriptor, origins };
++  });
++
+   /** The peer at `url`, with every address checked for credentials first. */
+   const answeringAt = Effect.fn("PeerLinks.answeringAt")(function* (urls: ReadonlyArray<string>) {
+     const origins = yield* Effect.forEach(urls, peerOrigin);
+@@ -517,14 +571,26 @@ const make = Effect.gen(function* () {
+     const urls = [input.url, ...(input.alternateUrls ?? [])];
+     // The user picked a machine: link through the addresses that answer as
+     // it, so one that now answers as another never receives the pairing code.
++    if (input.sameHostBridge === true && input.expectedEnvironmentId === undefined) {
++      return yield* new PeerLinkError({
++        reason: "pairing_rejected",
++        message: "A link through the local host bridge must name the environment it reaches.",
++      });
++    }
+     const { primary, peer, origins } =
+       input.expectedEnvironmentId === undefined
+         ? yield* answeringAt(urls)
+-        : yield* answeringAs(
+-            urls,
+-            input.expectedEnvironmentId,
+-            input.expectedLabel ?? input.expectedEnvironmentId,
+-          );
++        : input.sameHostBridge === true
++          ? yield* answeringAsThroughBridge(
++              urls,
++              input.expectedEnvironmentId,
++              input.expectedLabel ?? input.expectedEnvironmentId,
++            )
++          : yield* answeringAs(
++              urls,
++              input.expectedEnvironmentId,
++              input.expectedLabel ?? input.expectedEnvironmentId,
++            );
+     const row = yield* readRow(peer.environmentId);
+     const stored = Option.isSome(row) ? yield* toLink(row.value) : undefined;
+     const current =
+diff --git a/packages/contracts/src/environment.ts b/packages/contracts/src/environment.ts
+index b07eeb04f5..c23105a99d 100644
+--- a/packages/contracts/src/environment.ts
++++ b/packages/contracts/src/environment.ts
+@@ -201,6 +201,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
+   /** Mints pairing codes that approve one agent sign-in at a set level (`AUTO-…`). */
+   mcpApprovalCodes: Schema.optionalKey(Schema.Boolean),
+   peerLinkPairingCodes: Schema.optionalKey(Schema.Boolean),
++  /** Links through the Desktop's WSL host bridge (`sameHostBridge`); absent on stock servers. */
++  hostBridgeLinks: Schema.optionalKey(Schema.Boolean),
+   /** Agent sign-ins on its T3 Connect address are approved on the hosted app, without a code. */
+   mcpHostedApproval: Schema.optionalKey(Schema.Boolean),
+   /** Server answers server.prepareTriage. */
+diff --git a/packages/contracts/src/ipc.ts b/packages/contracts/src/ipc.ts
+index 03a0541d4d..fb31b76815 100644
+--- a/packages/contracts/src/ipc.ts
++++ b/packages/contracts/src/ipc.ts
+@@ -614,6 +614,61 @@ export const DesktopWslRuntimeStatusSchema = Schema.Struct({
+ });
+ export type DesktopWslRuntimeStatus = typeof DesktopWslRuntimeStatusSchema.Type;
+ 
++/**
++ * The Desktop's half of the WSL host bridge: whether its helper carries WSL
++ * loopback to this machine's Windows backend. Whether the native link works
++ * comes from the WSL backend's own link list, not from here.
++ */
++export const DesktopHostBridgePhaseSchema = Schema.Literals([
++  "disabled",
++  "unsupported",
++  "waiting-windows",
++  "waiting-wsl",
++  "starting",
++  "running",
++  "recovering",
++  "identity-mismatch",
++]);
++export type DesktopHostBridgePhase = typeof DesktopHostBridgePhaseSchema.Type;
++
++export const DesktopHostBridgeStateSchema = Schema.Struct({
++  enabled: Schema.Boolean,
++  phase: DesktopHostBridgePhaseSchema,
++  /** Why the bridge is unsupported, recovering or waiting, in words for the user. */
++  detail: Schema.NullOr(Schema.String),
++  /** Link addresses in order; the helper listens on the first free one. */
++  urls: Schema.Array(Schema.String),
++  /** Where the helper listens now. */
++  url: Schema.NullOr(Schema.String),
++  /** The Windows backend the bridge carries to, as its own descriptor names it. */
++  windowsEnvironmentId: Schema.NullOr(Schema.String),
++  windowsLabel: Schema.NullOr(Schema.String),
++  windowsPort: Schema.NullOr(Schema.Number),
++  /** The Windows environment the bridge was paired with. */
++  pairedEnvironmentId: Schema.NullOr(Schema.String),
++  wslInstanceId: Schema.NullOr(Schema.String),
++  wslDistro: Schema.NullOr(Schema.String),
++  wslRuntimeId: Schema.NullOr(Schema.String),
++  /** "nat" when WSL reaches Windows only through a virtual network, "mirrored" when loopback is shared. */
++  wslNetworking: Schema.NullOr(Schema.Literals(["nat", "mirrored"])),
++  helperPid: Schema.NullOr(Schema.Number),
++  restarts: Schema.Number,
++  nextRetryAt: Schema.NullOr(Schema.String),
++  lastError: Schema.NullOr(Schema.String),
++  streams: Schema.Struct({ open: Schema.Number, total: Schema.Number, refused: Schema.Number }),
++  since: Schema.String,
++});
++export type DesktopHostBridgeState = typeof DesktopHostBridgeStateSchema.Type;
++
++export const DesktopHostBridgeSetInputSchema = Schema.Struct({
++  enabled: Schema.Boolean,
++  /** The Windows environment paired; absent keeps it, null forgets it. */
++  environmentId: Schema.optionalKey(Schema.NullOr(Schema.String)),
++  /** Why pairing failed in the app, kept as the bridge's last error; null clears it. */
++  failure: Schema.optionalKey(Schema.NullOr(Schema.String)),
++});
++export type DesktopHostBridgeSetInput = typeof DesktopHostBridgeSetInputSchema.Type;
++
+ export type DesktopPreviewNavStatus =
+   | { kind: "Idle" }
+   | { kind: "Loading"; url: string; title: string }
+@@ -1225,6 +1280,10 @@ export interface DesktopBridge {
+   setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
+   setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
+   getWslRuntimeStatus?: () => Promise<DesktopWslRuntimeStatus>;
++
++  /** Absent on stock builds; present on Windows builds with the WSL host bridge. */
++  getHostBridgeState?: () => Promise<DesktopHostBridgeState>;
++  setHostBridge?: (input: DesktopHostBridgeSetInput) => Promise<DesktopHostBridgeState>;
+   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
+   /** Maps a Windows path to the one a local backend (`primary` or `wsl:…`) sees; null when it cannot. */
+   toLocalBackendPath: (backendId: string, windowsPath: string) => Promise<string | null>;
+diff --git a/packages/contracts/src/peerLink.ts b/packages/contracts/src/peerLink.ts
+index 3ff0fe9322..a664981213 100644
+--- a/packages/contracts/src/peerLink.ts
++++ b/packages/contracts/src/peerLink.ts
+@@ -57,6 +57,12 @@ export const PeerLinkCreateInput = Schema.Struct({
+   expectedEnvironmentId: Schema.optionalKey(EnvironmentId),
+   /** What the user calls that environment, to name it when it cannot be reached. */
+   expectedLabel: Schema.optionalKey(TrimmedNonEmptyString),
++  /**
++   * Every address is this machine's loopback end of the Desktop's WSL host
++   * bridge to `expectedEnvironmentId` on the same computer. Loopback is then
++   * accepted, and only an address answering as that environment gets the code.
++   */
++  sameHostBridge: Schema.optionalKey(Schema.Boolean),
+ });
+ export type PeerLinkCreateInput = typeof PeerLinkCreateInput.Type;
+ 
+diff --git a/packages/shared/package.json b/packages/shared/package.json
+index 123da46863..9b3ca126ad 100644
+--- a/packages/shared/package.json
++++ b/packages/shared/package.json
+@@ -31,6 +31,10 @@
+       "types": "./src/socketFrameParts.ts",
+       "import": "./src/socketFrameParts.ts"
+     },
++    "./hostBridgeMux": {
++      "types": "./src/hostBridgeMux.ts",
++      "import": "./src/hostBridgeMux.ts"
++    },
+     "./composerPullRequestMatches": {
+       "types": "./src/composerPullRequestMatches.ts",
+       "import": "./src/composerPullRequestMatches.ts"
+diff --git a/packages/shared/src/hostBridgeMux.test.ts b/packages/shared/src/hostBridgeMux.test.ts
+new file mode 100644
+index 0000000000..c39d083369
+--- /dev/null
++++ b/packages/shared/src/hostBridgeMux.test.ts
+@@ -0,0 +1,214 @@
++// @effect-diagnostics nodeBuiltinImport:off -- Streams are checked end to end over real loopback sockets.
++import * as NodeCrypto from "node:crypto";
++import * as NodeNet from "node:net";
++
++import { afterEach, describe, expect, it } from "vite-plus/test";
++
++import {
++  encodeFrame,
++  encodeHello,
++  FrameDecoder,
++  FrameType,
++  HostBridgeMux,
++  hostBridgeUrls,
++  isHostBridgeUrl,
++  MAX_DATA_PAYLOAD,
++  MAX_STREAMS,
++  STREAM_WINDOW_BYTES,
++  type HostBridgeHello,
++  type StreamSocket,
++} from "./hostBridgeMux.ts";
++
++describe("FrameDecoder", () => {
++  it("reassembles frames split at any byte", () => {
++    const bytes = new Uint8Array([
++      ...encodeFrame(FrameType.open, 7),
++      ...encodeFrame(FrameType.data, 7, new Uint8Array([1, 2, 3])),
++      ...encodeFrame(FrameType.end, 7),
++    ]);
++    const decoder = new FrameDecoder();
++    const frames = [];
++    for (const byte of bytes) frames.push(...decoder.push(new Uint8Array([byte])));
++    expect(frames.map((frame) => [frame.type, frame.stream, [...frame.payload]])).toEqual([
++      [FrameType.open, 7, []],
++      [FrameType.data, 7, [1, 2, 3]],
++      [FrameType.end, 7, []],
++    ]);
++  });
++
++  it("refuses unknown types and oversized frames", () => {
++    const unknown = encodeFrame(FrameType.data, 1);
++    unknown[0] = 99;
++    expect(() => new FrameDecoder().push(unknown)).toThrow(/unknown frame type/);
++    const huge = encodeFrame(FrameType.data, 1);
++    new DataView(huge.buffer).setUint32(5, 2 * 1024 * 1024);
++    expect(() => new FrameDecoder().push(huge)).toThrow(/too large/);
++  });
++});
++
++describe("host bridge urls", () => {
++  it("only counts the bridge's own loopback ports", () => {
++    expect(hostBridgeUrls([13773, 13774])).toEqual([
++      "http://127.0.0.1:13773",
++      "http://127.0.0.1:13774",
++    ]);
++    expect(isHostBridgeUrl("http://127.0.0.1:13774")).toBe(true);
++    expect(isHostBridgeUrl("http://127.0.0.1:3773")).toBe(false);
++    expect(isHostBridgeUrl("https://127.0.0.1:13773")).toBe(false);
++    expect(isHostBridgeUrl("http://192.0.2.1:13773")).toBe(false);
++    expect(isHostBridgeUrl("http://localhost:13773")).toBe(false);
++    expect(isHostBridgeUrl("not a url")).toBe(false);
++  });
++});
++
++/** A helper mux and a Desktop mux wired back to back, as stdio would carry them. */
++const cleanups: Array<() => void> = [];
++afterEach(() => {
++  for (const cleanup of cleanups.splice(0)) cleanup();
++});
++
++const listen = (server: NodeNet.Server) =>
++  new Promise<number>((resolve) =>
++    server.listen(0, "127.0.0.1", () => resolve((server.address() as NodeNet.AddressInfo).port)),
++  );
++
++const bridge = async (target: NodeNet.Server) => {
++  const targetPort = await listen(target);
++  let helper!: HostBridgeMux;
++  let hello: HostBridgeHello | undefined;
++  // Delivery is asynchronous, like a pipe, so one side never re-enters the other.
++  const desktop = new HostBridgeMux((bytes) => setImmediate(() => helper.receive(bytes)), {
++    onOpen: () => NodeNet.connect({ host: "127.0.0.1", port: targetPort, allowHalfOpen: true }),
++    onHello: (value) => {
++      hello = value;
++    },
++  });
++  helper = new HostBridgeMux((bytes) => setImmediate(() => desktop.receive(bytes)));
++  const front = NodeNet.createServer({ allowHalfOpen: true }, (socket) => helper.accept(socket));
++  const port = await listen(front);
++  cleanups.push(() => {
++    helper.stop();
++    desktop.stop();
++    front.close();
++    target.close();
++  });
++  return { port, helper, desktop, hello: () => hello };
++};
++
++const exchange = (port: number, request: Uint8Array) =>
++  new Promise<Uint8Array>((resolve, reject) => {
++    const socket = NodeNet.connect({ host: "127.0.0.1", port, allowHalfOpen: true });
++    const chunks: Array<Buffer> = [];
++    socket.on("data", (chunk: Buffer) => chunks.push(chunk));
++    socket.on("end", () => {
++      socket.end();
++      resolve(new Uint8Array(Buffer.concat(chunks)));
++    });
++    socket.on("error", reject);
++    socket.end(request);
++  });
++
++const echoServer = () =>
++  NodeNet.createServer({ allowHalfOpen: true }, (socket) => {
++    socket.pipe(socket);
++  });
++
++describe("HostBridgeMux", () => {
++  it("carries bytes both ways, intact, with half-close", async () => {
++    const { port } = await bridge(echoServer());
++    const payload = new Uint8Array(NodeCrypto.randomBytes(3 * STREAM_WINDOW_BYTES + 17));
++    const echoed = await exchange(port, payload);
++    expect(echoed.byteLength).toBe(payload.byteLength);
++    expect(Buffer.compare(Buffer.from(echoed), Buffer.from(payload))).toBe(0);
++  });
++
++  it("keeps concurrent streams apart", async () => {
++    const { port, helper } = await bridge(echoServer());
++    const payloads = Array.from(
++      { length: 12 },
++      (_, index) => new Uint8Array(NodeCrypto.randomBytes(MAX_DATA_PAYLOAD + index * 1000)),
++    );
++    const echoed = await Promise.all(payloads.map((payload) => exchange(port, payload)));
++    echoed.forEach((bytes, index) =>
++      expect(Buffer.compare(Buffer.from(bytes), Buffer.from(payloads[index]!))).toBe(0),
++    );
++    expect(helper.stats.total).toBe(12);
++  });
++
++  it("closes the client when the Desktop cannot reach the target", async () => {
++    const target = NodeNet.createServer();
++    const { port } = await bridge(target);
++    await new Promise((resolve) => target.close(resolve));
++    const result = await new Promise<string>((resolve) => {
++      const socket = NodeNet.connect({ host: "127.0.0.1", port });
++      socket.on("close", () => resolve("closed"));
++      socket.on("error", () => undefined);
++      socket.resume();
++    });
++    expect(result).toBe("closed");
++  });
++
++  it("pauses a sender that outruns its window until credit returns", () => {
++    const written: Array<Uint8Array> = [];
++    const mux = new HostBridgeMux((bytes) => written.push(bytes));
++    const listeners = new Map<string, (value?: unknown) => void>();
++    let paused = 0;
++    let resumed = 0;
++    const socket = {
++      write: () => true,
++      end: () => undefined,
++      destroy: () => undefined,
++      pause: () => {
++        paused += 1;
++      },
++      resume: () => {
++        resumed += 1;
++      },
++      on: (event: string, listener: (value?: unknown) => void) => listeners.set(event, listener),
++    };
++    const stream = mux.accept(socket as unknown as StreamSocket)!;
++    listeners.get("data")!(new Uint8Array(STREAM_WINDOW_BYTES));
++    expect(paused).toBe(1);
++    const credit = new Uint8Array(4);
++    new DataView(credit.buffer).setUint32(0, STREAM_WINDOW_BYTES);
++    mux.receive(encodeFrame(FrameType.credit, stream, credit));
++    expect(resumed).toBe(1);
++  });
++
++  it("refuses streams past the cap and when the Desktop declines", () => {
++    const written: Array<Uint8Array> = [];
++    const desktop = new HostBridgeMux((bytes) => written.push(bytes), {
++      onOpen: () => undefined,
++    });
++    desktop.receive(encodeFrame(FrameType.open, 5));
++    const [close] = new FrameDecoder().push(written[0]!);
++    expect(close).toMatchObject({ type: FrameType.close, stream: 5 });
++    expect(desktop.stats.refused).toBe(1);
++
++    const helper = new HostBridgeMux(() => undefined);
++    const fake = () => ({
++      write: () => true,
++      end: () => undefined,
++      destroy: () => undefined,
++      pause: () => undefined,
++      resume: () => undefined,
++      on: () => undefined,
++    });
++    for (let index = 0; index < MAX_STREAMS; index++) helper.accept(fake());
++    expect(helper.accept(fake())).toBeUndefined();
++    expect(helper.stats).toMatchObject({ open: MAX_STREAMS, refused: 1 });
++  });
++
++  it("reports the helper's hello and stops on garbage", () => {
++    const hellos: Array<HostBridgeHello> = [];
++    const errors: Array<Error> = [];
++    const mux = new HostBridgeMux(() => undefined, {
++      onHello: (hello) => hellos.push(hello),
++      onProtocolError: (error) => errors.push(error),
++    });
++    mux.receive(encodeHello({ ok: true, version: 1, port: 13774, pid: 42 }));
++    expect(hellos).toEqual([{ ok: true, version: 1, port: 13774, pid: 42 }]);
++    mux.receive(new Uint8Array([200, 0, 0, 0, 0, 0, 0, 0, 0]));
++    expect(errors).toHaveLength(1);
++  });
++});
+diff --git a/packages/shared/src/hostBridgeMux.ts b/packages/shared/src/hostBridgeMux.ts
+new file mode 100644
+index 0000000000..91feddf9c5
+--- /dev/null
++++ b/packages/shared/src/hostBridgeMux.ts
+@@ -0,0 +1,327 @@
++/**
++ * WSL host bridge framing: WSL loopback connections ride the helper's stdio to the Desktop.
++ * Frames carry streams, never addresses, so the helper cannot choose where one goes.
++ * Frame: type (u8), stream id (u32), payload length (u32), payload.
++ */
++
++export const HOST_BRIDGE_PROTOCOL_VERSION = 1;
++
++export const FrameType = {
++  /** Helper → Desktop, once: JSON `HostBridgeHello`. */
++  hello: 0,
++  /** Helper → Desktop: a connection was accepted on loopback. */
++  open: 1,
++  data: 2,
++  /** The sender will write no more on this stream (TCP half-close). */
++  end: 3,
++  /** The stream is gone on the sender's side. */
++  close: 4,
++  /** u32: bytes the receiver has written out, which the sender may send again. */
++  credit: 5,
++} as const;
++export type FrameType = (typeof FrameType)[keyof typeof FrameType];
++
++export const FRAME_HEADER_BYTES = 9;
++/** A data frame never exceeds this; larger payloads are split. */
++export const MAX_DATA_PAYLOAD = 64 * 1024;
++/** Anything longer is a protocol error, not a slow stream. */
++export const MAX_FRAME_PAYLOAD = 1024 * 1024;
++/** Bytes in flight per stream and direction before the sender pauses its socket. */
++export const STREAM_WINDOW_BYTES = 256 * 1024;
++/** Caps memory at STREAM_WINDOW_BYTES per stream; more connections are refused. */
++export const MAX_STREAMS = 128;
++
++export type HostBridgeHello =
++  | {
++      readonly ok: true;
++      readonly version: number;
++      readonly port: number;
++      readonly pid: number;
++    }
++  | {
++      readonly ok: false;
++      readonly version: number;
++      readonly code: "ports_in_use" | "bad_arguments" | "listen_failed";
++      readonly message: string;
++    };
++
++export interface Frame {
++  readonly type: FrameType;
++  readonly stream: number;
++  readonly payload: Uint8Array;
++}
++
++const EMPTY = new Uint8Array(0);
++
++export const encodeFrame = (type: FrameType, stream: number, payload: Uint8Array = EMPTY) => {
++  const frame = new Uint8Array(FRAME_HEADER_BYTES + payload.byteLength);
++  const view = new DataView(frame.buffer);
++  view.setUint8(0, type);
++  view.setUint32(1, stream);
++  view.setUint32(5, payload.byteLength);
++  frame.set(payload, FRAME_HEADER_BYTES);
++  return frame;
++};
++
++export const encodeCredit = (stream: number, bytes: number) => {
++  const payload = new Uint8Array(4);
++  new DataView(payload.buffer).setUint32(0, bytes);
++  return encodeFrame(FrameType.credit, stream, payload);
++};
++
++export const encodeHello = (hello: HostBridgeHello) =>
++  encodeFrame(FrameType.hello, 0, new TextEncoder().encode(JSON.stringify(hello)));
++
++export const decodeHello = (payload: Uint8Array): HostBridgeHello | undefined => {
++  try {
++    const value: unknown = JSON.parse(new TextDecoder().decode(payload));
++    if (typeof value !== "object" || value === null || !("ok" in value)) return undefined;
++    return value as HostBridgeHello;
++  } catch {
++    return undefined;
++  }
++};
++
++/** A peer that sends something this protocol cannot read is broken, not slow. */
++const protocolError = (message: string) =>
++  Object.assign(new globalThis.Error(message), { name: "HostBridgeProtocolError" });
++
++/** Splits a byte stream into frames, whatever the chunking. */
++export class FrameDecoder {
++  private buffered: Uint8Array = EMPTY;
++
++  push(chunk: Uint8Array): Array<Frame> {
++    let bytes = this.buffered.byteLength === 0 ? chunk : concat(this.buffered, chunk);
++    const frames: Array<Frame> = [];
++    while (bytes.byteLength >= FRAME_HEADER_BYTES) {
++      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
++      const type = view.getUint8(0);
++      const length = view.getUint32(5);
++      if (type > FrameType.credit) throw protocolError(`unknown frame type ${type}`);
++      if (length > MAX_FRAME_PAYLOAD) throw protocolError("frame too large");
++      if (bytes.byteLength < FRAME_HEADER_BYTES + length) break;
++      frames.push({
++        type: type as FrameType,
++        stream: view.getUint32(1),
++        // Copied: the socket write keeps the buffer after this chunk is reused.
++        payload: bytes.slice(FRAME_HEADER_BYTES, FRAME_HEADER_BYTES + length),
++      });
++      bytes = bytes.subarray(FRAME_HEADER_BYTES + length);
++    }
++    this.buffered = bytes.byteLength === 0 ? EMPTY : bytes.slice();
++    return frames;
++  }
++}
++
++const concat = (left: Uint8Array, right: Uint8Array) => {
++  const joined = new Uint8Array(left.byteLength + right.byteLength);
++  joined.set(left, 0);
++  joined.set(right, left.byteLength);
++  return joined;
++};
++
++/** The part of a Node socket a stream needs; tests pass fakes. */
++export interface StreamSocket {
++  write(data: Uint8Array, callback: (error?: Error | null) => void): unknown;
++  end(): unknown;
++  destroy(): unknown;
++  pause(): unknown;
++  resume(): unknown;
++  on(event: "data", listener: (chunk: Uint8Array) => void): unknown;
++  on(event: "end", listener: () => void): unknown;
++  on(event: "close", listener: () => void): unknown;
++  on(event: "error", listener: (error: Error) => void): unknown;
++}
++
++interface StreamState {
++  readonly socket: StreamSocket;
++  /** Sent and not yet credited by the other side. */
++  inFlight: number;
++  paused: boolean;
++  closed: boolean;
++}
++
++export interface MuxStats {
++  readonly open: number;
++  readonly total: number;
++  readonly refused: number;
++}
++
++export interface HostBridgeMuxHandlers {
++  /** Desktop side: the helper accepted a connection; return its socket, or undefined to refuse. */
++  readonly onOpen?: (stream: number) => StreamSocket | undefined;
++  readonly onHello?: (hello: HostBridgeHello) => void;
++  readonly onProtocolError?: (error: Error) => void;
++}
++
++/**
++ * One end of the bridge. `write` sends bytes to the other end; `receive`
++ * takes the other end's bytes. Each attached socket is one stream.
++ */
++export class HostBridgeMux {
++  private readonly decoder = new FrameDecoder();
++  private readonly streams = new Map<number, StreamState>();
++  private nextStream = 1;
++  private total = 0;
++  private refused = 0;
++  private stopped = false;
++  private readonly write: (bytes: Uint8Array) => void;
++  private readonly handlers: HostBridgeMuxHandlers;
++
++  constructor(write: (bytes: Uint8Array) => void, handlers: HostBridgeMuxHandlers = {}) {
++    this.write = write;
++    this.handlers = handlers;
++  }
++
++  get stats(): MuxStats {
++    return { open: this.streams.size, total: this.total, refused: this.refused };
++  }
++
++  /** Helper side: carry a newly accepted connection to the other end. */
++  accept(socket: StreamSocket): number | undefined {
++    if (this.stopped || this.streams.size >= MAX_STREAMS) {
++      this.refused += 1;
++      socket.destroy();
++      return undefined;
++    }
++    const stream = this.nextStream;
++    this.nextStream = this.nextStream >= 0xffff_ffff ? 1 : this.nextStream + 1;
++    this.write(encodeFrame(FrameType.open, stream));
++    this.attach(stream, socket);
++    return stream;
++  }
++
++  receive(chunk: Uint8Array): void {
++    if (this.stopped) return;
++    let frames: Array<Frame>;
++    try {
++      frames = this.decoder.push(chunk);
++    } catch (error) {
++      this.stop();
++      this.handlers.onProtocolError?.(error as Error);
++      return;
++    }
++    for (const frame of frames) this.handle(frame);
++  }
++
++  /** Ends every stream; later frames are ignored. */
++  stop(): void {
++    this.stopped = true;
++    for (const [stream, state] of this.streams) {
++      state.closed = true;
++      state.socket.destroy();
++      this.streams.delete(stream);
++    }
++  }
++
++  private handle(frame: Frame): void {
++    switch (frame.type) {
++      case FrameType.hello: {
++        const hello = decodeHello(frame.payload);
++        if (hello === undefined) {
++          this.handlers.onProtocolError?.(protocolError("unreadable hello"));
++          return;
++        }
++        this.handlers.onHello?.(hello);
++        return;
++      }
++      case FrameType.open: {
++        if (this.streams.has(frame.stream)) return;
++        const socket =
++          this.streams.size < MAX_STREAMS ? this.handlers.onOpen?.(frame.stream) : undefined;
++        if (socket === undefined) {
++          this.refused += 1;
++          this.write(encodeFrame(FrameType.close, frame.stream));
++          return;
++        }
++        this.attach(frame.stream, socket);
++        return;
++      }
++      case FrameType.data: {
++        const state = this.streams.get(frame.stream);
++        if (state === undefined || state.closed) return;
++        const length = frame.payload.byteLength;
++        state.socket.write(frame.payload, (error) => {
++          if (error === undefined || error === null) {
++            this.write(encodeCredit(frame.stream, length));
++          }
++        });
++        return;
++      }
++      case FrameType.end: {
++        this.streams.get(frame.stream)?.socket.end();
++        return;
++      }
++      case FrameType.close: {
++        const state = this.streams.get(frame.stream);
++        if (state === undefined) return;
++        // The other side is gone: nothing is sent back for this stream.
++        state.closed = true;
++        this.streams.delete(frame.stream);
++        state.socket.destroy();
++        return;
++      }
++      case FrameType.credit: {
++        const state = this.streams.get(frame.stream);
++        if (state === undefined || frame.payload.byteLength !== 4) return;
++        const bytes = new DataView(frame.payload.buffer, frame.payload.byteOffset).getUint32(0);
++        state.inFlight = Math.max(0, state.inFlight - bytes);
++        if (state.paused && state.inFlight < STREAM_WINDOW_BYTES) {
++          state.paused = false;
++          state.socket.resume();
++        }
++        return;
++      }
++    }
++  }
++
++  private attach(stream: number, socket: StreamSocket): void {
++    const state: StreamState = { socket, inFlight: 0, paused: false, closed: false };
++    this.streams.set(stream, state);
++    this.total += 1;
++    socket.on("data", (chunk) => {
++      if (state.closed) return;
++      for (let offset = 0; offset < chunk.byteLength; offset += MAX_DATA_PAYLOAD) {
++        const part = chunk.subarray(offset, offset + MAX_DATA_PAYLOAD);
++        this.write(encodeFrame(FrameType.data, stream, part));
++        state.inFlight += part.byteLength;
++      }
++      if (!state.paused && state.inFlight >= STREAM_WINDOW_BYTES) {
++        state.paused = true;
++        socket.pause();
++      }
++    });
++    socket.on("end", () => {
++      if (!state.closed) this.write(encodeFrame(FrameType.end, stream));
++    });
++    socket.on("error", () => {
++      // "close" follows and reports the stream gone.
++    });
++    socket.on("close", () => {
++      if (state.closed) return;
++      state.closed = true;
++      this.streams.delete(stream);
++      if (!this.stopped) this.write(encodeFrame(FrameType.close, stream));
++    });
++  }
++}
++
++/** The loopback ports a bridge may listen on, in order: a squatted first port moves it, never the link. */
++export const HOST_BRIDGE_DEFAULT_PORTS: ReadonlyArray<number> = [13773, 13774, 13775];
++
++export const hostBridgeUrls = (ports: ReadonlyArray<number> = HOST_BRIDGE_DEFAULT_PORTS) =>
++  ports.map((port) => `http://127.0.0.1:${port}`);
++
++/** Whether a link address is one of this bridge's loopback addresses. */
++export const isHostBridgeUrl = (
++  url: string,
++  ports: ReadonlyArray<number> = HOST_BRIDGE_DEFAULT_PORTS,
++) => {
++  const parsed = URL.parse(url);
++  return (
++    parsed !== null &&
++    parsed.protocol === "http:" &&
++    parsed.hostname === "127.0.0.1" &&
++    ports.includes(Number(parsed.port))
++  );
++};
