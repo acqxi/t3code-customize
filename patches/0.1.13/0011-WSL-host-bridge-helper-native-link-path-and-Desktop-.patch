@@ -2170,10 +2170,10 @@ index b07eeb04f5..c23105a99d 100644
    mcpHostedApproval: Schema.optionalKey(Schema.Boolean),
    /** Server answers server.prepareTriage. */
 diff --git a/packages/contracts/src/ipc.ts b/packages/contracts/src/ipc.ts
-index 03a0541d4d..fb31b76815 100644
+index a0fce5ea26..c575afa13f 100644
 --- a/packages/contracts/src/ipc.ts
 +++ b/packages/contracts/src/ipc.ts
-@@ -614,6 +614,61 @@ export const DesktopWslRuntimeStatusSchema = Schema.Struct({
+@@ -617,6 +617,61 @@ export const DesktopWslRuntimeStatusSchema = Schema.Struct({
  });
  export type DesktopWslRuntimeStatus = typeof DesktopWslRuntimeStatusSchema.Type;
  
@@ -2235,7 +2235,7 @@ index 03a0541d4d..fb31b76815 100644
  export type DesktopPreviewNavStatus =
    | { kind: "Idle" }
    | { kind: "Loading"; url: string; title: string }
-@@ -1225,6 +1280,10 @@ export interface DesktopBridge {
+@@ -1228,6 +1283,10 @@ export interface DesktopBridge {
    setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
    setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
    getWslRuntimeStatus?: () => Promise<DesktopWslRuntimeStatus>;

@@ -41,7 +41,9 @@
     "apps/web/src/components/settings/wslRuntimeStatus.logic.test.ts",
     "apps/server/src/usage/usagePerformance.test.ts",
     "apps/web/src/components/chat/TurnPerformanceScope.logic.test.ts",
-    "apps/web/src/components/usage/usagePerformance.test.ts"
+    "apps/web/src/components/usage/usagePerformance.test.ts",
+    "apps/desktop/src/updates/DesktopUpdates.test.ts",
+    "apps/web/src/components/desktopUpdate.logic.test.ts"
   ],
   "typecheck": [
     "apps/server",

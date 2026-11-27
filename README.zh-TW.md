@@ -91,7 +91,9 @@ macOS 請從 Spotlight、Launchpad 或 `~/Applications` 開啟 **T3 Code (Custom
 t3code-customize
 ```
 
-先更新**官方 App**，再執行工具。它會抓取最新的 patch，針對已安裝的版本重新建置，並告訴你何時重新開啟。在你執行之前，啟動器會改開原版 T3 Code。Windows 客製版已關閉自動更新，請從原本的啟動入口更新原版。
+先更新**官方 App**，再執行工具。它會抓取最新的 patch，針對已安裝的版本重新建置，並告訴你何時重新開啟。在你執行之前，啟動器會改開原版 T3 Code。
+
+Windows 客製版會檢查官方的更新來源，但不會下載或安裝。有新版本時，側欄、**Settings > About** 的版本列與更新按鈕的提示都會告訴你：先關閉客製版，從原本的啟動入口更新原版，再執行工具。用 0.1.12 那組 patch 建置的版本不會檢查。
 
 ## nightly 更新讓 patch 失效時
 

@@ -393,6 +393,7 @@ class OverlayTests(unittest.TestCase):
         args, kwargs = spawn.call_args
         self.assertEqual(args[0], [str(copied.executable), 'argument with spaces'])
         self.assertEqual(kwargs['env']['T3CODE_DISABLE_AUTO_UPDATE'], 'true')
+        self.assertEqual(kwargs['env']['T3CODE_UPDATE_CHECK_ONLY'], 'true')
         self.assertNotIn('ELECTRON_RUN_AS_NODE', kwargs['env'])
         self.assertNotIn('NODE_OPTIONS', kwargs['env'])
 

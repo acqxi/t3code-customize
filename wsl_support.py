@@ -249,6 +249,7 @@ if ($running.Count -gt 0) {
 if ($notice) { Notify $notice }
 if ($target -ne $state.stockExe) {
   $env:T3CODE_DISABLE_AUTO_UPDATE = 'true'
+  $env:T3CODE_UPDATE_CHECK_ONLY = 'true'
   $env:T3CODE_CUSTOMIZE_RELAUNCH = Join-Path $here 'launch.ps1'
 }
 if ($pass.Count -gt 0) { Start-Process -FilePath $target -ArgumentList $pass } else { Start-Process -FilePath $target }

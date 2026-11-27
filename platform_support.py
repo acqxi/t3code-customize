@@ -289,9 +289,6 @@ def windows_integrity(executable, values=None):
 
 
 def finalize_copy(app, run, log):
-    if app.system == 'win32':
-        # Customized copies are rebuilt after the official installation updates.
-        (app.resources / 'app-update.yml').unlink(missing_ok=True)
     hashes = {p.name: asar_header_hash(p) for p in app.resources.glob('*.asar')}
     if app.system == 'win32':
         entries = windows_integrity(app.executable)

@@ -149,6 +149,7 @@ class PowerShellTests(unittest.TestCase):
     def test_launcher_script_falls_back_and_guards_running_instances(self):
         script = wsl.LAUNCH_PS1
         for expected in ("'disabled'", 'T3 Code was updated', 'is already running', 'T3CODE_DISABLE_AUTO_UPDATE',
+                         "$env:T3CODE_UPDATE_CHECK_ONLY = 'true'",
                          'ELECTRON_RUN_AS_NODE', 'LastWriteTimeUtc.Ticks', "-ieq '-WaitPid'",
                          "$env:T3CODE_CUSTOMIZE_RELAUNCH = Join-Path $here 'launch.ps1'"):
             self.assertIn(expected, script)

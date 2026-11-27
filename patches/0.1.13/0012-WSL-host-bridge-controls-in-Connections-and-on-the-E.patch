@@ -2024,10 +2024,10 @@ index 0a7cf8f930..74bbc165ce 100644
      id: "remote-environments",
      title: msg("Environments"),
 diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
-index 4bced723c3..68904fc562 100644
+index dedcdaf2f2..90b69431d8 100644
 --- a/apps/web/src/i18n/translations/de.json
 +++ b/apps/web/src/i18n/translations/de.json
-@@ -13160,6 +13160,87 @@
+@@ -13161,6 +13161,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
    "4a4030032575944d": "Metrics",
@@ -2115,7 +2115,7 @@ index 4bced723c3..68904fc562 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
-@@ -13174,5 +13255,7 @@
+@@ -13175,5 +13256,7 @@
    "5559571021fbc6c7": "tok/s",
    "6bc9093ea4cb76ba": "TTFT",
    "2979e55ecb170657": "TTFA",
@@ -2125,10 +2125,10 @@ index 4bced723c3..68904fc562 100644
 +  "91c719b4b23cb789": "Schalte das Windows-Backend dieses Computers in dieser App ein und warte, bis es verbunden ist. Der Kopplungscode kommt von dort."
  }
 diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
-index 0c5da57dfb..da1c3f1f14 100644
+index 8eecdd7805..9ff5220574 100644
 --- a/apps/web/src/i18n/translations/en.json
 +++ b/apps/web/src/i18n/translations/en.json
-@@ -13169,6 +13169,87 @@
+@@ -13170,6 +13170,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
    "4a4030032575944d": "Metrics",
@@ -2216,7 +2216,7 @@ index 0c5da57dfb..da1c3f1f14 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
-@@ -13183,5 +13264,7 @@
+@@ -13184,5 +13265,7 @@
    "5559571021fbc6c7": "tok/s",
    "6bc9093ea4cb76ba": "TTFT",
    "2979e55ecb170657": "TTFA",
@@ -2226,10 +2226,10 @@ index 0c5da57dfb..da1c3f1f14 100644
 +  "91c719b4b23cb789": "Turn on this computer's Windows backend in this app and wait until it connects. The pairing code comes from it."
  }
 diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
-index a8303d4238..49e5472c88 100644
+index dcd362439f..24347f76a0 100644
 --- a/apps/web/src/i18n/translations/es.json
 +++ b/apps/web/src/i18n/translations/es.json
-@@ -13155,6 +13155,87 @@
+@@ -13156,6 +13156,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
    "4a4030032575944d": "Metrics",
@@ -2317,7 +2317,7 @@ index a8303d4238..49e5472c88 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
-@@ -13169,5 +13250,7 @@
+@@ -13170,5 +13251,7 @@
    "5559571021fbc6c7": "tok/s",
    "6bc9093ea4cb76ba": "TTFT",
    "2979e55ecb170657": "TTFA",
@@ -2327,10 +2327,10 @@ index a8303d4238..49e5472c88 100644
 +  "91c719b4b23cb789": "Activa el backend de Windows de este equipo en esta app y espera a que se conecte. El código de emparejamiento sale de ahí."
  }
 diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
-index 21c230f5f8..94d6c71dc0 100644
+index d3e27c5e8a..7fcae16c61 100644
 --- a/apps/web/src/i18n/translations/fr.json
 +++ b/apps/web/src/i18n/translations/fr.json
-@@ -13160,6 +13160,87 @@
+@@ -13161,6 +13161,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
    "4a4030032575944d": "Metrics",
@@ -2418,7 +2418,7 @@ index 21c230f5f8..94d6c71dc0 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
-@@ -13174,5 +13255,7 @@
+@@ -13175,5 +13256,7 @@
    "5559571021fbc6c7": "tok/s",
    "6bc9093ea4cb76ba": "TTFT",
    "2979e55ecb170657": "TTFA",
@@ -2428,10 +2428,10 @@ index 21c230f5f8..94d6c71dc0 100644
 +  "91c719b4b23cb789": "Activez le backend Windows de cet ordinateur dans cette application et attendez qu’il soit connecté. Le code d’association vient de lui."
  }
 diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
-index 5e43597181..7d72da5bd4 100644
+index 60dee99358..dcd44f83d8 100644
 --- a/apps/web/src/i18n/translations/ja.json
 +++ b/apps/web/src/i18n/translations/ja.json
-@@ -13096,6 +13096,87 @@
+@@ -13097,6 +13097,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
    "4a4030032575944d": "Metrics",
@@ -2519,7 +2519,7 @@ index 5e43597181..7d72da5bd4 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
-@@ -13110,5 +13191,7 @@
+@@ -13111,5 +13192,7 @@
    "5559571021fbc6c7": "tok/s",
    "6bc9093ea4cb76ba": "TTFT",
    "2979e55ecb170657": "TTFA",
@@ -2529,10 +2529,10 @@ index 5e43597181..7d72da5bd4 100644
 +  "91c719b4b23cb789": "このアプリでこのコンピューターの Windows バックエンドをオンにし、接続するまで待ってください。ペアリングコードはそこから取得します。"
  }
 diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
-index 142d881597..073c90bcdb 100644
+index 37d0ff3e0c..e45e4bade6 100644
 --- a/apps/web/src/i18n/translations/ko.json
 +++ b/apps/web/src/i18n/translations/ko.json
-@@ -13093,6 +13093,87 @@
+@@ -13094,6 +13094,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
    "4a4030032575944d": "Metrics",
@@ -2620,7 +2620,7 @@ index 142d881597..073c90bcdb 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
-@@ -13107,5 +13188,7 @@
+@@ -13108,5 +13189,7 @@
    "5559571021fbc6c7": "tok/s",
    "6bc9093ea4cb76ba": "TTFT",
    "2979e55ecb170657": "TTFA",
@@ -2630,10 +2630,10 @@ index 142d881597..073c90bcdb 100644
 +  "91c719b4b23cb789": "이 앱에서 이 컴퓨터의 Windows 백엔드를 켜고 연결될 때까지 기다리세요. 페어링 코드는 거기에서 받습니다."
  }
 diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
-index c81056e338..47dd7de7b3 100644
+index 8524eaedfa..c6394f8ffe 100644
 --- a/apps/web/src/i18n/translations/pt-BR.json
 +++ b/apps/web/src/i18n/translations/pt-BR.json
-@@ -13160,6 +13160,87 @@
+@@ -13161,6 +13161,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
    "4a4030032575944d": "Metrics",
@@ -2721,7 +2721,7 @@ index c81056e338..47dd7de7b3 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
-@@ -13174,5 +13255,7 @@
+@@ -13175,5 +13256,7 @@
    "5559571021fbc6c7": "tok/s",
    "6bc9093ea4cb76ba": "TTFT",
    "2979e55ecb170657": "TTFA",
@@ -2731,10 +2731,10 @@ index c81056e338..47dd7de7b3 100644
 +  "91c719b4b23cb789": "Ligue o backend do Windows deste computador neste app e espere ele conectar. O código de pareamento vem dele."
  }
 diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
-index 45ba3f7ad3..02a59081f5 100644
+index e725e6aabc..1f5d0fcf76 100644
 --- a/apps/web/src/i18n/translations/ru.json
 +++ b/apps/web/src/i18n/translations/ru.json
-@@ -13159,6 +13159,87 @@
+@@ -13160,6 +13160,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
    "4a4030032575944d": "Metrics",
@@ -2822,7 +2822,7 @@ index 45ba3f7ad3..02a59081f5 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
-@@ -13173,5 +13254,7 @@
+@@ -13174,5 +13255,7 @@
    "5559571021fbc6c7": "tok/s",
    "6bc9093ea4cb76ba": "TTFT",
    "2979e55ecb170657": "TTFA",
@@ -2832,10 +2832,10 @@ index 45ba3f7ad3..02a59081f5 100644
 +  "91c719b4b23cb789": "Включите бэкенд Windows этого компьютера в этом приложении и дождитесь подключения. Код сопряжения выдаёт он."
  }
 diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
-index cadfea539c..9b0361d68f 100644
+index 066be24b74..5264e31b18 100644
 --- a/apps/web/src/i18n/translations/sv.json
 +++ b/apps/web/src/i18n/translations/sv.json
-@@ -13167,6 +13167,87 @@
+@@ -13168,6 +13168,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
    "4a4030032575944d": "Metrics",
@@ -2923,7 +2923,7 @@ index cadfea539c..9b0361d68f 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
-@@ -13181,5 +13262,7 @@
+@@ -13182,5 +13263,7 @@
    "5559571021fbc6c7": "tok/s",
    "6bc9093ea4cb76ba": "TTFT",
    "2979e55ecb170657": "TTFA",
@@ -2933,10 +2933,10 @@ index cadfea539c..9b0361d68f 100644
 +  "91c719b4b23cb789": "Slå på datorns Windows-backend i den här appen och vänta tills den är ansluten. Parkopplingskoden kommer därifrån."
  }
 diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
-index 4c52c8a8c3..0fb747618a 100644
+index 244811cd99..6514ba6072 100644
 --- a/apps/web/src/i18n/translations/zh.json
 +++ b/apps/web/src/i18n/translations/zh.json
-@@ -13174,6 +13174,87 @@
+@@ -13175,6 +13175,87 @@
    "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
    "8ea44c7f1633179e": "Show metrics",
    "4a4030032575944d": "Metrics",
@@ -3024,7 +3024,7 @@ index 4c52c8a8c3..0fb747618a 100644
    "190425a90c39d8a4": "{count, plural, one {# turn} other {# turns}}",
    "0fdf303b060c2739": "This thread",
    "6ff57d72f5d4ddc6": "Now",
-@@ -13188,5 +13269,7 @@
+@@ -13189,5 +13270,7 @@
    "5559571021fbc6c7": "tok/s",
    "6bc9093ea4cb76ba": "TTFT",
    "2979e55ecb170657": "TTFA",

@@ -139,8 +139,13 @@ t3code-customize
 
 Update the **official app** first, then run the tool. It pulls the latest patches,
 rebuilds for your installed version and tells you when to reopen. Until you run
-it, the launcher falls back to stock T3 Code. Windows customized copies
-have automatic updates disabled; update stock from its original launcher.
+it, the launcher falls back to stock T3 Code.
+
+Windows customized copies check the official update feed but never download or
+install. When a new release is out, the sidebar, the version row in
+**Settings > About** and the update button's tooltip say so: quit the customized
+app, update stock from its original launcher, then run the tool. Builds from
+the 0.1.12 set do not check.
 
 ## When a nightly breaks the patches
 

@@ -1252,6 +1252,7 @@ def cmd_launch(args):
         env['APPDIR'] = str(target.parent)
     elif target != app.executable:
         env['T3CODE_DISABLE_AUTO_UPDATE'] = 'true'
+        env['T3CODE_UPDATE_CHECK_ONLY'] = 'true'
     if SYSTEM == 'win32':
         # DETACHED_PROCESS only exists on Windows builds of Python.
         subprocess.Popen([str(target), *rest], env=env, creationflags=getattr(subprocess, 'DETACHED_PROCESS', 0x8))
