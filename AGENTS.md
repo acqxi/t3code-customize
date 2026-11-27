@@ -4,8 +4,9 @@ These instructions are for a coding agent. A person can follow them too.
 
 Each supported T3 Code release has its own patch set in `patches/<version>/`: the
 patches, `base.txt` (the upstream commit they were made against) and `checks.json`.
-The tool picks the set made for the installed commit, or the closest older one to port
-from. Upstream moves fast, so a new release often needs a port. Your job is to carry the
+Only the newest set is in the tree; older sets are frozen in tags named
+`patches-<version>`, which the tool reads when an install needs them. It picks the set
+made for the installed commit, or the closest older one to port from. Upstream moves fast, so a new release often needs a port. Your job is to carry the
 patches onto the user's release with every feature still working.
 
 ## Start
@@ -46,7 +47,9 @@ pass (run them from the source checkout with `node_modules/.bin/vp test run <fil
 Otherwise run the same Python entry with `build --resume`. It reruns the checks on the checkout as you
 left it, builds, installs the result and writes the ported commits to a new set,
 `patches/<installed version>/`, keeping the set it came from for older installs. Leave
-the checkout clean with no rebase in progress.
+the checkout clean with no rebase in progress. When the new set is committed, tag the
+last commit that still has the previous set as `patches-<previous version>` and remove
+that folder from the tree, so only the newest set stays.
 
 End with a short report: what changed upstream, what you changed and in which files,
 and whether the final build succeeded. Separate fixture tests, native process

@@ -326,3 +326,30 @@ class PatchSetTests(unittest.TestCase):
         (flat / 'base.txt').write_text(self.commits[1] + '\n')
         with patch.object(customize, 'REPO', self.tmp / 'flat'):
             self.assertEqual(customize.patch_sets(), [flat])
+
+
+class ArchivedPatchSetTests(unittest.TestCase):
+    def test_older_set_is_read_from_its_tag(self):
+        tmp = Path(tempfile.mkdtemp())
+        repo = tmp / 'repo'
+        run = lambda *args: subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.com', *args],
+                                           cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+        for version, base in (('0.1.12', 'a' * 40), ('0.1.13', 'b' * 40)):
+            folder = repo / 'patches' / version
+            folder.mkdir(parents=True)
+            (folder / 'base.txt').write_text(base + '\n')
+            (folder / '0001-x.patch').write_text(version)
+        run('init', '-q')
+        run('add', '-A')
+        run('commit', '-q', '-m', 'both sets')
+        run('tag', 'patches-0.1.12')
+        run('rm', '-rq', 'patches/0.1.12')
+        run('commit', '-q', '-m', 'only the newest set')
+        with patch.object(customize, 'REPO', repo), patch.object(customize, 'CACHE', tmp / 'cache'):
+            sets = customize.patch_sets()
+            self.assertEqual([f.name for f in sets], ['0.1.12', '0.1.13'])
+            self.assertEqual(sets[0], tmp / 'cache/patch-sets/0.1.12')
+            self.assertEqual((sets[0] / '0001-x.patch').read_text(), '0.1.12')
+            self.assertEqual(sets[1], repo / 'patches/0.1.13')
+            # A second call reuses the extracted copy.
+            self.assertEqual(customize.patch_sets()[0], sets[0])

@@ -21,14 +21,16 @@ reused. Windows signature changes and platform restrictions are described below.
 
 ## Supported T3 Code versions
 
-Each supported release has its own patch set in `patches/<version>/`. The tool reads
-your installed T3 Code's upstream commit and picks the matching set, so machines on
-different releases build from the same checkout.
+Each supported release has its own patch set. The newest lives in `patches/<version>/`;
+older ones are frozen in git tags named `patches-<version>`, so the tree holds one copy.
+The tool reads your installed T3 Code's upstream commit and picks the matching set, from
+the tree or from its tag, so machines on different releases build from the same checkout.
+New features go into the newest set only.
 
 | T3 Code | Patch set | Status |
 | --- | --- | --- |
 | 0.1.13 | `patches/0.1.13` | supported |
-| 0.1.12 | `patches/0.1.12` | supported |
+| 0.1.12 | tag `patches-0.1.12` | supported, frozen |
 
 A release without its own set is built from the closest older set. If those patches
 no longer apply, see [When a nightly breaks the patches](#when-a-nightly-breaks-the-patches);

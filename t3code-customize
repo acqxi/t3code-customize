@@ -11,6 +11,7 @@ Your installed app and your T3 data are never modified.
 import argparse
 import copy
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.request
 import zipfile
@@ -194,15 +196,54 @@ def save(path, value):
 
 
 # One patch set per supported T3 Code release: patches/<version>/ holds the
-# patches, base.txt (the upstream commit they apply to) and checks.json.
+# patches, base.txt (the upstream commit they apply to) and checks.json. Only the
+# newest set lives in the tree; older ones stay frozen in tags named
+# patches-<version>, and are read from those tags when an install needs them.
 PATCH_SET = None
+ARCHIVE_TAG = 'patches-'
+
+
+def archived_sets():
+    """Older releases' sets, extracted from their tags into the cache."""
+    listed = subprocess.run(['git', 'tag', '--list', ARCHIVE_TAG + '*'], cwd=REPO,
+                            capture_output=True, text=True)
+    if listed.returncode:
+        return []
+    found = []
+    for tag in listed.stdout.split():
+        version = tag[len(ARCHIVE_TAG):]
+        commit = subprocess.run(['git', 'rev-parse', tag + '^{commit}'], cwd=REPO,
+                                capture_output=True, text=True).stdout.strip()
+        folder = CACHE / 'patch-sets' / version
+        if (folder / '.tag').exists() and (folder / '.tag').read_text().strip() == commit:
+            found.append(folder)
+            continue
+        archive = subprocess.run(['git', 'archive', '--format=tar', commit, f'patches/{version}'], cwd=REPO,
+                                 capture_output=True)
+        if archive.returncode:
+            continue
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=folder.parent) as scratch:
+            with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as bundle:
+                if hasattr(tarfile, 'data_filter'):
+                    bundle.extractall(scratch, filter='data')
+                else:
+                    bundle.extractall(scratch)
+            shutil.move(str(Path(scratch) / 'patches' / version), folder)
+        (folder / '.tag').write_text(commit + '\n')
+        found.append(folder)
+    return [folder for folder in found if (folder / 'base.txt').exists()]
 
 
 def patch_sets():
     root = REPO / 'patches'
     if (root / 'base.txt').exists():
         return [root]
-    return sorted((d for d in root.iterdir() if (d / 'base.txt').exists()), key=version_key)
+    current = [d for d in root.iterdir() if (d / 'base.txt').exists()]
+    names = {d.name for d in current}
+    older = [d for d in archived_sets() if d.name not in names]
+    return sorted(current + older, key=version_key)
 
 
 def patch_dir():
@@ -744,10 +785,10 @@ def pull_latest():
     """Fast-forward this repo to the latest patches, keeping any local port in a backup."""
     if not (REPO / '.git').exists():
         return
-    status = subprocess.run(['git', 'status', '--porcelain', '--', 'patches', 'checks.json'],
+    status = subprocess.run(['git', 'status', '--porcelain', '--', 'patches'],
                             cwd=REPO, capture_output=True, text=True).stdout
     before = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=REPO, capture_output=True, text=True).stdout
-    if subprocess.run(['git', 'fetch', '--quiet'], cwd=REPO, stderr=subprocess.DEVNULL).returncode:
+    if subprocess.run(['git', 'fetch', '--quiet', '--tags'], cwd=REPO, stderr=subprocess.DEVNULL).returncode:
         say('Could not check for newer patches (offline?). Using the ones you have.')
         return
     behind = subprocess.run(['git', 'rev-list', '--count', 'HEAD..@{u}'], cwd=REPO, capture_output=True, text=True).stdout.strip()
@@ -756,7 +797,7 @@ def pull_latest():
     if status.strip():
         backup = DATA / ('patches.bak-' + time.strftime('%Y%m%d-%H%M%S'))
         shutil.copytree(REPO / 'patches', backup)
-        subprocess.run(['git', 'checkout', '--quiet', '--', 'patches', 'checks.json'], cwd=REPO, check=True)
+        subprocess.run(['git', 'checkout', '--quiet', '--', 'patches'], cwd=REPO, check=True)
         say(f'Newer patches are available; your local port was saved to {backup}.')
     if subprocess.run(['git', 'merge', '--ff-only', '--quiet', '@{u}'], cwd=REPO).returncode:
         raise Stop(f'Could not update {REPO} to the latest patches. Run git status there.')
