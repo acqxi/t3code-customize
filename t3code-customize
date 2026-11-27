@@ -75,6 +75,9 @@ def detect_windows_target(config=None):
     from platform_support import app_candidates
     if app_candidates(HOME, 'linux'):
         return False
+    if not wsl.interop_enabled():
+        # Without interop the Windows install cannot even be looked for; say how to fix it.
+        raise Stop(wsl.INTEROP_FIX)
     try:
         local = Path(wsl_windows_folders(config)['LOCALAPPDATA'])
     except wsl.WslError:
@@ -1345,7 +1348,7 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (Stop, PlatformError, OSError) as stop:
+    except (Stop, PlatformError, OSError, wsl.WslError) as stop:
         print(f'\n{stop}', file=sys.stderr)
         sys.exit(3 if isinstance(stop, NeedsFix) else 1)
     except KeyboardInterrupt:
