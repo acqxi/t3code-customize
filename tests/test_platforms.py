@@ -347,6 +347,65 @@ class OverlayTests(unittest.TestCase):
             self.assertEqual(target, bundle)
             self.assertIn('updated', notice)
 
+    def test_macos_route_follows_the_fuses(self):
+        bundle = self.root / 'T3 Code (Beta).app'
+        with patch.object(customize, 'electron_fuses', return_value={'EnableNodeCliInspectArguments': '1'}):
+            self.assertEqual(customize.mac_route(Mock(path=bundle)), 'inspect')
+        with patch.object(customize, 'electron_fuses', return_value={
+                'EnableNodeCliInspectArguments': '0', 'EnableEmbeddedAsarIntegrityValidation': '0'}):
+            self.assertEqual(customize.mac_route(Mock(path=bundle)), 'hook')
+        with patch.object(customize, 'electron_fuses', return_value={
+                'EnableNodeCliInspectArguments': '0', 'EnableEmbeddedAsarIntegrityValidation': '1'}):
+            with self.assertRaises(customize.Stop):
+                customize.mac_route(Mock(path=bundle))
+
+    def test_macos_boot_loader_round_trip(self):
+        bundle = self.root / 'Applications/T3 Code (Beta).app'
+        boot = b'// src/boot.ts\nrequire("./compileCache.cjs");\nrequire("./main.cjs");\n'
+        files = {'package.json': b'{"version":"0.1.13"}', customize.MAC_BOOT: boot,
+                 'apps/server/dist/bin.mjs': b'server' * 1000}
+        archive(bundle / 'Contents/Resources/app.asar', files)
+        (bundle / 'Contents/MacOS').mkdir(parents=True)
+        (bundle / 'Contents/MacOS/T3 Code (Beta)').write_bytes(b'')
+        app = support.InstalledApp.inspect(bundle, 'darwin')
+        asar = app.resources / 'app.asar'
+        data = self.root / 'data'
+        data.mkdir()
+        with patch.object(customize, 'DATA', data), patch.object(customize, 'DISABLED', data / 'disabled'), \
+                patch.object(customize.subprocess, 'run') as first_run:
+            self.assertTrue(customize.set_mac_hook(app, True))
+            self.assertEqual(first_run.call_args.kwargs['env']['ELECTRON_RUN_AS_NODE'], '1')
+            hooked = customize.Archive(asar)
+            try:
+                loaded = hooked.read(customize.MAC_BOOT)
+                self.assertEqual(hooked.read('apps/server/dist/bin.mjs'), files['apps/server/dist/bin.mjs'])
+                self.assertEqual(hooked.read('package.json'), files['package.json'])
+            finally:
+                hooked.close()
+            self.assertTrue(loaded.startswith(b'try { require(' + json.dumps(str(data / 'macos-hook.cjs')).encode()))
+            self.assertEqual(customize.unhooked(loaded), boot)
+            self.assertFalse(customize.set_mac_hook(app, True))
+            self.assertFalse((app.resources / ('app.asar.' + customize.NAME)).exists())
+            customize.write_mac_hook(self.root / 'builds/one/build')
+            hook = (data / 'macos-hook.cjs').read_text()
+            self.assertIn(json.dumps(str(self.root / 'builds/one/build')), hook)
+            self.assertIn(json.dumps(str(data / 'disabled')), hook)
+            self.assertTrue(customize.set_mac_hook(app, False))
+            restored = customize.Archive(asar)
+            try:
+                self.assertEqual(restored.read(customize.MAC_BOOT), boot)
+            finally:
+                restored.close()
+            self.assertFalse(customize.set_mac_hook(app, False))
+
+    def test_macos_finds_beta_and_release_bundles(self):
+        for name in ('T3 Code (Beta).app', 'T3 Code.app'):
+            bundle = self.root / name / 'Applications' / name
+            archive(bundle / 'Contents/Resources/app.asar', {'package.json': b'{}'})
+            (bundle / 'Contents/MacOS').mkdir(parents=True)
+            home = bundle.parent.parent
+            self.assertEqual(support.find_app(home, {}, system='darwin', env={}).path, bundle)
+
     def test_macos_launcher_app(self):
         bundle = self.root / 'T3 Code (Nightly).app'
         archive(bundle / 'Contents/Resources/app.asar', {'package.json': b'{}'})

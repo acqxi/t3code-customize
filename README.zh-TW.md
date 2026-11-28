@@ -83,7 +83,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/acqxi/t3code-customize/m
 
 指令包裝程式在 Linux 位於 `~/.local/bin`，在 Windows 位於 `%LOCALAPPDATA%\t3code-customize\bin`。如果它不在 PATH 中，請把該資料夾加入 PATH，或在儲存庫資料夾中執行 `python t3code-customize <指令>`（Linux 用 `python3`）。
 
-macOS 請從 Spotlight、Launchpad 或 `~/Applications` 開啟 **T3 Code (Customized)**。設定方式、日常使用，以及為什麼是把 patch 載入你的 App 而不是重新建置，請見 [macOS 說明](docs/macos.md)。工具會在 `/Applications` 與 `~/Applications` 尋找 `T3 Code (Nightly).app`；其他位置請用 `--app "/path/to/T3 Code (Nightly).app"` 指定一次。
+macOS 請從 Spotlight、Launchpad 或 `~/Applications` 開啟 **T3 Code (Customized)**。設定方式、日常使用，以及為什麼是把 patch 載入你的 App 而不是重新建置，請見 [macOS 說明](docs/macos.md)。工具會在 `/Applications` 與 `~/Applications` 尋找 `T3 Code (Nightly).app`、`T3 Code (Beta).app` 與 `T3 Code.app`；其他位置請用 `--app "/path/to/T3 Code (Beta).app"` 指定一次。2026 年 11 月 25 日之後的版本擋掉了啟動器的啟動掛鉤，這時工具會改在 App 的 `boot.cjs` 加一行，之後不管從哪裡開啟 T3 Code 都是客製版（[詳細說明](docs/macos.md#releases-with-the-inspect-fuse-off)）。
 
 ## 每次 T3 Code 更新後
 
@@ -118,9 +118,9 @@ T3 Code 是開放原始碼軟體（MIT）。本儲存庫包含十二個 patch �
 
 有獨立 `server.asar` 的 Windows 版，兩個封存檔都會套用 patch。Linux 使用合併的 `app.asar`。原生函式庫與未封裝的檔案都從已安裝的 App 複製，不會重新編譯替代的二進位檔。
 
-macOS 上不會複製也不會重新簽署，所以 App 會保留簽章、鑰匙圈存取權、密碼金鑰與自動更新。啟動器會用啟動掛鉤開啟你自己的 `T3 Code (Nightly).app`，在任何 App 程式碼執行前載入重新建置的套件，再關閉掛鉤。用其他方式開啟 T3 Code 就是原版。
+macOS 上不會複製也不會重新簽署，所以 App 會保留簽章、鑰匙圈存取權、密碼金鑰與自動更新。啟動器會用啟動掛鉤開啟你自己的 T3 Code App，在任何 App 程式碼執行前載入重新建置的套件，再關閉掛鉤。用其他方式開啟 T3 Code 就是原版。關閉了 inspect fuse 的版本，則改在 `app.asar` 內的 `boot.cjs` 加一行來載入同樣的套件；這是對 App 唯一的改動，`uninstall` 會把它移除。
 
-所有作業都在你的電腦上進行。建置不會修改已安裝的 App 或你的 T3 資料。客製版跟原版使用同一份 T3 設定檔，切換前請先結束原版。
+所有作業都在你的電腦上進行。建置不會修改你的 T3 資料，也不會修改已安裝的 App；唯一的例外是上面提到、關閉了 inspect fuse 的 macOS 版本裡 `boot.cjs` 那一行。客製版跟原版使用同一份 T3 設定檔，切換前請先結束原版。
 
 ## 指令
 
@@ -135,7 +135,7 @@ t3code-customize uninstall   移除工具、啟動器、建置結果與快取
 ## 注意事項
 
 - **回報問題**：向 T3 Code 回報任何問題前，請先執行 `t3code-customize off`，重新開啟並確認原版也會發生。客製功能的問題請回報到這裡。
-- **macOS**：從啟動器開啟 T3 Code 時才會套用客製功能。如果 T3 Code 已經在執行，啟動器只會把它帶到前景。這依賴 T3 Code 允許啟動掛鉤（`--inspect-brk`）；如果某個版本關閉了這個功能，建置會停下來並說明原因。
+- **macOS**：從啟動器開啟 T3 Code 時才會套用客製功能。如果 T3 Code 已經在執行，啟動器只會把它帶到前景。關閉了啟動掛鉤（`--inspect-brk`）的版本，只要 asar 完整性檢查也是關的，就會改用 `boot.cjs` 那一行；兩者都擋住的話，建置會停下來並說明原因。
 - **Windows 簽章**：更新內嵌封存檔的雜湊值會改動副本的執行檔，因此它不再有官方的 Authenticode 簽章。這是本機的客製副本，不是有簽章、可散佈的安裝程式。
 - **Windows WSL 環境**：在 WSL 中建置（`--target windows`）時，Windows 原生伺服器與內嵌的 WSL runtime 都會套用 patch。用 Windows 的 Python 建置時，只會修改原生伺服器，WSL runtime 維持原版（Windows 上無法建置 Linux 單一執行檔）。
 - **處理器架構**：私用 Node 下載支援 x64 與 arm64。請在與已安裝 App 相同的架構與平台上建置；唯一的例外是 Windows 桌面版也可以在 WSL 中建置。

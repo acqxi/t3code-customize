@@ -129,7 +129,7 @@ The command wrapper lives in `~/.local/bin` on Linux, or
 directory or use `python t3code-customize <command>` from the checkout
 (`python3` on Linux).
 
-On macOS, open **T3 Code (Customized)** from Spotlight, Launchpad or `~/Applications`. See the [macOS guide](docs/macos.md) for setup, day-to-day use and why it loads the patches into your app instead of rebuilding it. It looks for `T3 Code (Nightly).app` in `/Applications` and `~/Applications`; point it elsewhere once with `--app "/path/to/T3 Code (Nightly).app"`.
+On macOS, open **T3 Code (Customized)** from Spotlight, Launchpad or `~/Applications`. See the [macOS guide](docs/macos.md) for setup, day-to-day use and why it loads the patches into your app instead of rebuilding it. It looks for `T3 Code (Nightly).app`, `T3 Code (Beta).app` and `T3 Code.app` in `/Applications` and `~/Applications`; point it elsewhere once with `--app "/path/to/T3 Code (Beta).app"`. Releases since 25 Nov 2026 block the launcher's startup hook; for those the tool adds one line to the app's `boot.cjs` instead, and T3 Code is customized however you open it ([details](docs/macos.md#releases-with-the-inspect-fuse-off)).
 
 ## After every T3 Code update
 
@@ -172,10 +172,10 @@ Windows builds with a `server.asar` sidecar have both archives patched. Linux us
 `app.asar`. Native libraries and unpacked payloads are copied from the installed app, without
 compiling replacement binaries.
 
-On macOS nothing is copied or re-signed, so your app keeps its signature, keychain access, passkeys and updates. The launcher opens your own `T3 Code (Nightly).app` with a startup hook, loads the rebuilt bundles into it before any app code runs, and closes the hook again. Opening T3 Code any other way gives you stock.
+On macOS nothing is copied or re-signed, so your app keeps its signature, keychain access, passkeys and updates. The launcher opens your own T3 Code app with a startup hook, loads the rebuilt bundles into it before any app code runs, and closes the hook again. Opening T3 Code any other way gives you stock. Releases with the inspect fuse off get one line in `boot.cjs` inside `app.asar` instead, which loads the same bundles; it is the only change to the app and `uninstall` removes it.
 
-Everything runs on your machine. Your installed app and your T3 data are never modified by the
-build. The customized app uses the same T3 profile as stock; quit stock before switching.
+Everything runs on your machine. Your T3 data is never modified by the build, and neither is your
+installed app, except for that one `boot.cjs` line on macOS releases with the inspect fuse off. The customized app uses the same T3 profile as stock; quit stock before switching.
 
 ## Commands
 
@@ -190,7 +190,7 @@ t3code-customize uninstall   remove it, its launcher, builds and caches
 ## Good to know
 
 - **Bugs:** before reporting anything to T3 Code, run `t3code-customize off`, reopen and check it happens on stock too. Report customization problems here.
-- **macOS:** the customization applies when T3 Code starts from the launcher. If T3 Code is already running, the launcher just brings it forward. It relies on T3 Code allowing a startup hook (`--inspect-brk`); if a release turns that off, the build stops and says so.
+- **macOS:** the customization applies when T3 Code starts from the launcher. If T3 Code is already running, the launcher just brings it forward. Releases that turn off the startup hook (`--inspect-brk`) get the `boot.cjs` line instead, as long as their asar integrity check stays off; otherwise the build stops and says so.
 - **Windows signatures:** updating embedded archive hashes changes the copied
   executable, so it no longer has the official Authenticode signature. This is
   a local customized copy, not a signed distributable installer.

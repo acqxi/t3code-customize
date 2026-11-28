@@ -1,12 +1,14 @@
 # T3 Code (Customized) on macOS
 
 The patches and the build are the same as on Linux. Only the last step differs: on macOS
-nothing is copied, repacked or re-signed. A launcher opens your own `T3 Code (Nightly).app`
-and loads the rebuilt bundles into it as it starts.
+nothing is copied or re-signed. The rebuilt bundles are loaded into your own T3 Code app as
+it starts, either by a launcher or, on releases that block the launcher, by one line the
+tool adds to the app (see [Releases with the inspect fuse off](#releases-with-the-inspect-fuse-off)).
 
 ## Install
 
-You need git, Python 3 and T3 Code Nightly in `/Applications` or `~/Applications`.
+You need git, Python 3 and T3 Code (Nightly, Beta or Release) in `/Applications` or
+`~/Applications`.
 
 ```sh
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/acqxi/t3code-customize/main/install.sh)"
@@ -21,7 +23,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/acqxi/t3code-customize/m
 If your app is somewhere else, point to it once:
 
 ```sh
-t3code-customize --app "/path/to/T3 Code (Nightly).app"
+t3code-customize --app "/path/to/T3 Code (Beta).app"
 ```
 
 `t3code-customize` lives in `~/.local/bin`. If that is not on your `PATH`, add it, or run
@@ -86,6 +88,32 @@ This relies on two things T3 Code's macOS builds allow today: the `--inspect-brk
 switch (Electron's `EnableNodeCliInspectArguments` fuse) and an unchanged `boot.cjs`
 entry point. The build checks both and stops with a clear message if a release changes
 them. Your T3 Code is never modified, so it keeps working either way.
+
+## Releases with the inspect fuse off
+
+Since 25 Nov 2026, T3 Code ships with Electron's `EnableNodeCliInspectArguments` fuse off
+([pingdotgg/t3code#43039](https://github.com/pingdotgg/t3code/pull/43039)), so the
+launcher can no longer pause the app at `--inspect-brk`. The build detects this. While
+the app also leaves `EnableEmbeddedAsarIntegrityValidation` off, it changes one file in
+your app instead:
+
+- The first line of `apps/desktop/dist-electron/boot.cjs` inside `Contents/Resources/app.asar`
+  becomes `try { require("…/t3code-customize/macos-hook.cjs"); } catch {}`. Nothing else in
+  the archive changes. Before the change the tool runs the app's binary once as Node,
+  because macOS treats an app changed before its first run as damaged.
+- The hook lives in `~/.local/share/t3code-customize`. It loads the current build with the
+  same `inject.cjs` as the launcher, or does nothing when the customization is off or the
+  build is missing, so T3 Code starts stock.
+- T3 Code is customized however you open it: Dock, Finder, links or the launcher.
+- The app's executable, its signature and its entitlements are not touched. The signature's
+  seal over `app.asar` no longer matches; macOS checks that seal when an app first runs.
+- A T3 Code update replaces `app.asar`, so the line is gone and the app starts stock until
+  you run `t3code-customize` again. `off` keeps the line and loads nothing; `uninstall`
+  removes the line.
+- If macOS says the tool may not change the app, allow Terminal (or the app you ran the
+  tool from) in **System Settings > Privacy & Security > App Management**.
+
+If a release turns the asar integrity fuse on as well, the build stops and says so.
 
 ## Troubleshooting
 

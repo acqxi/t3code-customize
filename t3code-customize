@@ -359,6 +359,32 @@ def read_public_config(archive):
     return {PUBLIC_CONFIG[name]: value for name, value in found.items()}
 
 
+def file_entry(data):
+    block = 4194304
+    return {'size': len(data), 'integrity': {
+        'algorithm': 'SHA256', 'hash': hashlib.sha256(data).hexdigest(), 'blockSize': block,
+        'blocks': [hashlib.sha256(data[i:i + block]).hexdigest() for i in range(0, len(data), block)]}}
+
+
+def write_archive(tree, output, read):
+    """Write an asar with tree's layout; read(key) gives each packed file's bytes."""
+    records, cursor = [], 0
+    for key, entry in Archive.walk(tree):
+        if 'link' in entry or entry.get('unpacked'):
+            continue
+        entry['offset'] = str(cursor)
+        cursor += entry['size']
+        records.append(key)
+    encoded = json.dumps(tree, separators=(',', ':'), ensure_ascii=False).encode()
+    padded = encoded + b'\0' * ((-len(encoded)) % 4)
+    header = struct.pack('<II', 4 + len(padded), len(encoded)) + padded
+    with output.open('wb') as target:
+        target.write(struct.pack('<II', 4, len(header)))
+        target.write(header)
+        for key in records:
+            target.write(read(key))
+
+
 def overlay(stock_path, output, build, config, prefixes=None):
     """Write stock_path with the server and desktop bundles replaced by build's, then verify it."""
     stock = Archive(stock_path)
@@ -387,31 +413,13 @@ def overlay(stock_path, output, build, config, prefixes=None):
                 parts = relative.split('/')
                 for part in parts[:-1]:
                     current = current['files'].setdefault(part, {'files': {}})
-                data = path.read_bytes()
-                block = 4194304
-                current['files'][parts[-1]] = {'size': len(data), 'integrity': {
-                    'algorithm': 'SHA256', 'hash': hashlib.sha256(data).hexdigest(), 'blockSize': block,
-                    'blocks': [hashlib.sha256(data[i:i + block]).hexdigest() for i in range(0, len(data), block)]}}
+                current['files'][parts[-1]] = file_entry(path.read_bytes())
                 overlays[prefix + '/' + relative] = path
         for required in ('apps/server/dist/bin.mjs', 'apps/server/dist/client/index.html',
                          'apps/desktop/dist-electron/main.cjs'):
             if any(required.startswith(prefix + '/') for prefix in prefixes) and required not in overlays:
                 raise Stop('The build did not produce ' + required)
-        records, cursor = [], 0
-        for key, entry in Archive.walk(tree):
-            if 'link' in entry or entry.get('unpacked'):
-                continue
-            entry['offset'] = str(cursor)
-            cursor += entry['size']
-            records.append(key)
-        encoded = json.dumps(tree, separators=(',', ':'), ensure_ascii=False).encode()
-        padded = encoded + b'\0' * ((-len(encoded)) % 4)
-        header = struct.pack('<II', 4 + len(padded), len(encoded)) + padded
-        with output.open('wb') as target:
-            target.write(struct.pack('<II', 4, len(header)))
-            target.write(header)
-            for key in records:
-                target.write(overlays[key].read_bytes() if key in overlays else stock.read(key))
+        write_archive(tree, output, lambda key: overlays[key].read_bytes() if key in overlays else stock.read(key))
         patched = Archive(output)
         try:
             for key, path in overlays.items():
@@ -482,7 +490,7 @@ def assemble_mac(app, output, build, config):
     stock = Archive(app.resources / 'app.asar')
     try:
         # The app loads boot.cjs before the customization exists, so it must stay as shipped.
-        if stock.read('apps/desktop/dist-electron/boot.cjs') != (overlay / 'apps/desktop/dist-electron/boot.cjs').read_bytes():
+        if unhooked(stock.read(MAC_BOOT)) != (overlay / MAC_BOOT).read_bytes():
             raise Stop('The rebuilt boot.cjs differs from your app; the customization cannot load into it.')
         check_bundles(stock, Folder(overlay), config, prefixes)
     finally:
@@ -808,6 +816,107 @@ def pull_latest():
         os.execv(sys.executable, [sys.executable, str(REPO / NAME), *sys.argv[1:], '--no-pull'])
 
 
+# --- macOS with the inspect fuse off ------------------------------------------
+# T3 Code turned Electron's EnableNodeCliInspectArguments fuse off (pingdotgg/t3code#43039), so
+# the launcher can no longer pause the app at --inspect-brk. While the asar integrity fuse stays
+# off too, one line at the top of boot.cjs in app.asar loads a hook outside the app instead. The
+# hook loads the current build, or nothing when the customization is off.
+
+MAC_BOOT = 'apps/desktop/dist-electron/boot.cjs'
+HOOK_TAG = b' // t3code-customize\n'
+APP_MANAGEMENT = ('macOS did not let this process change {app}. Allow it in System Settings > '
+                  'Privacy & Security > App Management (for Terminal or the app you ran this from), '
+                  'then run {name} again. Your T3 Code is unchanged.')
+
+
+def mac_route(app):
+    """'inspect' while the launcher can pause the app, else 'hook' when app.asar may change."""
+    fuses = electron_fuses(app.path)
+    if fuses.get('EnableNodeCliInspectArguments') == '1':
+        return 'inspect'
+    if fuses.get('EnableEmbeddedAsarIntegrityValidation') == '0':
+        return 'hook'
+    raise Stop('This T3 Code allows neither a startup hook nor a changed app.asar, so the customization '
+               'cannot load into it. Your current T3 Code is untouched.')
+
+
+def unhooked(data):
+    first, _, rest = data.partition(b'\n')
+    return rest if (first + b'\n').endswith(HOOK_TAG) else data
+
+
+def hook_file():
+    return DATA / 'macos-hook.cjs'
+
+
+def write_mac_hook(build):
+    hook_file().write_text(
+        "'use strict';\n"
+        '// Required by the line t3code-customize adds to boot.cjs in T3 Code. Switched off or\n'
+        '// without a build it does nothing, and T3 Code starts stock.\n'
+        "const fs = require('node:fs');\n"
+        "const path = require('node:path');\n"
+        f'const build = {json.dumps(str(build))};\n'
+        f'const disabled = {json.dumps(str(DISABLED))};\n'
+        "if (process.type === 'browser' && !fs.existsSync(disabled) && fs.existsSync(path.join(build, 'inject.cjs'))) {\n"
+        '  try {\n'
+        "    require(path.join(build, 'inject.cjs')).install(path.join(build, 'overlay'));\n"
+        '  } catch (error) {\n'
+        "    console.error('t3code-customize:', error);\n"
+        '  }\n'
+        '}\n')
+
+
+def set_mac_hook(app, enabled):
+    """Add or remove the boot.cjs line. Returns whether app.asar changed."""
+    asar = app.resources / 'app.asar'
+    stock = Archive(asar)
+    try:
+        if MAC_BOOT not in stock.entries:
+            return False
+        current = stock.read(MAC_BOOT)
+        wanted = unhooked(current)
+        if enabled:
+            wanted = f'try {{ require({json.dumps(str(hook_file()))}); }} catch {{}}'.encode() + HOOK_TAG + wanted
+        if current == wanted:
+            return False
+        tree = copy.deepcopy(stock.tree)
+        node = tree
+        for part in MAC_BOOT.split('/'):
+            node = node['files'][part]
+        node.clear()
+        node.update(file_entry(wanted))
+        if enabled:
+            # macOS treats an app changed before it ever ran as damaged; running it once as Node avoids that.
+            subprocess.run([str(app.executable), '-e', ''], env={**os.environ, 'ELECTRON_RUN_AS_NODE': '1'},
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120, check=False)
+        staged = asar.with_name('app.asar.' + NAME)
+        try:
+            write_archive(tree, staged, lambda key: wanted if key == MAC_BOOT else stock.read(key))
+        except PermissionError:
+            staged.unlink(missing_ok=True)
+            raise Stop(APP_MANAGEMENT.format(app=app.path, name=NAME))
+        check = Archive(staged)
+        try:
+            intact = set(check.entries) == set(stock.entries) and all(
+                check.entries[key] == entry if entry.get('unpacked') or 'link' in entry
+                else check.read(key) == (wanted if key == MAC_BOOT else stock.read(key))
+                for key, entry in stock.entries.items())
+        finally:
+            check.close()
+    finally:
+        stock.close()
+    if not intact:
+        staged.unlink(missing_ok=True)
+        raise Stop('The changed app.asar did not verify. Your T3 Code is unchanged.')
+    try:
+        os.replace(staged, asar)
+    except PermissionError:
+        staged.unlink(missing_ok=True)
+        raise Stop(APP_MANAGEMENT.format(app=app.path, name=NAME))
+    return True
+
+
 def install_launcher(app):
     write_cli(BIN, REPO, sys.executable)
     if SYSTEM == 'win32':
@@ -993,9 +1102,7 @@ def build(args):
     if args.app:
         save(CONFIG / 'config.json', {**load(CONFIG / 'config.json', {}), 'app': str(app.path)})
     say('T3 Code: ' + str(app.path))
-    if MAC and electron_fuses(app.path).get('EnableNodeCliInspectArguments') != '1':
-        raise Stop('This T3 Code no longer lets a launcher hook into its startup, so the customization cannot load\n'
-                   'into the signed app. Your current T3 Code is untouched.')
+    route = mac_route(app) if MAC else None
     stock_fingerprint = fingerprint(app)
     state = load(STATE, {})
     recipe = recipe_hash()
@@ -1095,9 +1202,15 @@ def build(args):
         build_dir.mkdir(parents=True)
         destination = build_dir / assembled.name
         shutil.move(str(assembled), destination)
+        if route == 'hook':
+            write_mac_hook(destination)
+            if set_mac_hook(app, True):
+                say(f'    Added the loader line to {app.resources / "app.asar"}.')
+            stock_fingerprint = fingerprint(app)
         save(STATE, {'stock': stock_fingerprint, 'version': version, 'commit': target, 'recipe': recipe_hash(),
                      'build': str(destination), 'connect': len(config) == len(PUBLIC_CONFIG),
                      **({'wslRuntime': 'sha256-' + runtime_digest} if not MAC and runtime_digest else {}),
+                     **({'macRoute': route} if route else {}),
                      'builtAt': time.strftime('%Y-%m-%dT%H:%M:%S')})
         icon = destination / 't3code.png'
         if icon.exists():
@@ -1113,6 +1226,10 @@ def build(args):
         say(f'The ported patches were saved to {REPO / "patches" / version}.')
     if DISABLED.exists():
         say(f'Customization is switched off. Run {NAME} on to use it.')
+    elif route == 'hook':
+        say('Quit T3 Code fully (Cmd+Q), then open it as usual: from the Dock, Finder or '
+            f'"{LAUNCHER_NAME}". Run {NAME} again after every T3 Code update.')
+        say('First time? Turn on Settings > Appearance > Stats for nerds.')
     else:
         say(f'Quit T3 Code fully, then open "{LAUNCHER_NAME}" from your app launcher.')
         say('First time? Turn on Settings > Appearance > Stats for nerds.')
@@ -1211,7 +1328,8 @@ def launch_mac(app, target, rest):
         # A running T3 Code keeps what it started with; this only brings it forward.
         subprocess.run(['open', str(app.path)], check=False)
         return
-    if target == app.path:
+    if target == app.path or load(STATE, {}).get('macRoute') == 'hook':
+        # With the boot.cjs loader, the app picks the build or stock by itself.
         os.execvp('open', ['open', str(app.path), *(['--args', *rest] if rest else [])])
     # T3 Code waits at its first line until connect.mjs has loaded the build into it.
     port = free_port()
@@ -1387,6 +1505,13 @@ def cmd_uninstall(args):
         if running:
             raise Stop('The customized T3 Code is running. Quit it fully, then uninstall again.')
         remove_customized_runtime(load(STATE, {}))
+    if MAC:
+        try:
+            app = installed_app()
+        except (Stop, PlatformError):
+            app = None
+        if app and set_mac_hook(app, False):
+            say(f'Removed the loader line from {app.resources / "app.asar"}.')
     BIN.unlink(missing_ok=True)
     DESKTOP.unlink(missing_ok=True)
     if MAC:

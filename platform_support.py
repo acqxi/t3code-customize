@@ -123,7 +123,8 @@ def app_candidates(home, system=None, env=None):
         return [base / folder for base in roots
                 for folder in ('t3code', 't3code-nightly', 'T3 Code (Nightly)', 'T3 Code')]
     if system == 'darwin':
-        return [folder / 'T3 Code (Nightly).app' for folder in (Path('/Applications'), home / 'Applications')]
+        return [folder / name for folder in (Path('/Applications'), home / 'Applications')
+                for name in ('T3 Code (Nightly).app', 'T3 Code (Beta).app', 'T3 Code.app')]
     folders = ['Applications', 'Downloads', 'AppImages', 'Apps', '.local/bin', 'bin', 'opt']
     found = [p for folder in folders for p in (home / folder).glob('T3-Code*.AppImage') if p.is_file()]
     def version_key(path):
@@ -152,8 +153,8 @@ def find_app(home, config, explicit=None, system=None, env=None):
                 return InstalledApp.inspect(path, system)
             except PlatformError:
                 continue
-    raise PlatformError('Could not find installed T3 Code Nightly. Pass --app with the AppImage, '
-                        'the macOS T3 Code (Nightly).app or the installed Windows executable (not the installer).')
+    raise PlatformError('Could not find an installed T3 Code. Pass --app with the AppImage, '
+                        'the macOS T3 Code app or the installed Windows executable (not the installer).')
 
 
 def node_target(system=None, arch=None):
