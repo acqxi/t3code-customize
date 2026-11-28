@@ -398,6 +398,16 @@ class OverlayTests(unittest.TestCase):
                 restored.close()
             self.assertFalse(customize.set_mac_hook(app, False))
 
+    def test_macos_hook_route_drops_the_launcher(self):
+        launcher = self.root / 'Applications/T3 Code (Customized).app'
+        (launcher / 'Contents').mkdir(parents=True)
+        with patch.object(customize, 'MAC', True), patch.object(customize, 'SYSTEM', 'darwin'), \
+                patch.object(customize, 'WINDOWS_FROM_WSL', False), patch.object(customize, 'MAC_LAUNCHER', launcher), \
+                patch.object(customize, 'load', return_value={'macRoute': 'hook'}), \
+                patch.object(customize, 'write_cli'), patch.object(customize, 'say'):
+            customize.install_launcher(Mock())
+        self.assertFalse(launcher.exists())
+
     def test_macos_finds_beta_and_release_bundles(self):
         for name in ('T3 Code (Beta).app', 'T3 Code.app'):
             bundle = self.root / name / 'Applications' / name

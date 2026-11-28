@@ -104,7 +104,8 @@ your app instead:
 - The hook lives in `~/.local/share/t3code-customize`. It loads the current build with the
   same `inject.cjs` as the launcher, or does nothing when the customization is off or the
   build is missing, so T3 Code starts stock.
-- T3 Code is customized however you open it: Dock, Finder, links or the launcher.
+- T3 Code is customized however you open it: Dock, Launchpad, Finder or links. The separate
+  **T3 Code (Customized)** launcher is not needed, so the tool removes it.
 - The app's executable, its signature and its entitlements are not touched. The signature's
   seal over `app.asar` no longer matches; macOS checks that seal when an app first runs.
 - A T3 Code update replaces `app.asar`, so the line is gone and the app starts stock until

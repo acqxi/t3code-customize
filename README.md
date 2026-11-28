@@ -129,7 +129,7 @@ The command wrapper lives in `~/.local/bin` on Linux, or
 directory or use `python t3code-customize <command>` from the checkout
 (`python3` on Linux).
 
-On macOS, open **T3 Code (Customized)** from Spotlight, Launchpad or `~/Applications`. See the [macOS guide](docs/macos.md) for setup, day-to-day use and why it loads the patches into your app instead of rebuilding it. It looks for `T3 Code (Nightly).app`, `T3 Code (Beta).app` and `T3 Code.app` in `/Applications` and `~/Applications`; point it elsewhere once with `--app "/path/to/T3 Code (Beta).app"`. Releases since 25 Nov 2026 block the launcher's startup hook; for those the tool adds one line to the app's `boot.cjs` instead, and T3 Code is customized however you open it ([details](docs/macos.md#releases-with-the-inspect-fuse-off)).
+On macOS, open **T3 Code (Customized)** from Spotlight, Launchpad or `~/Applications`. See the [macOS guide](docs/macos.md) for setup, day-to-day use and why it loads the patches into your app instead of rebuilding it. It looks for `T3 Code (Nightly).app`, `T3 Code (Beta).app` and `T3 Code.app` in `/Applications` and `~/Applications`; point it elsewhere once with `--app "/path/to/T3 Code (Beta).app"`. Releases since 25 Nov 2026 block the launcher's startup hook; for those the tool adds one line to the app's `boot.cjs` instead, and T3 Code is customized however you open it, without the separate launcher ([details](docs/macos.md#releases-with-the-inspect-fuse-off)).
 
 ## After every T3 Code update
 

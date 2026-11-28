@@ -923,6 +923,9 @@ def install_launcher(app):
         write_windows_shortcut(DESKTOP, REPO, sys.executable, run)
     elif WINDOWS_FROM_WSL:
         install_windows_launcher(load(STATE, {}))
+    elif MAC and load(STATE, {}).get('macRoute') == 'hook':
+        # The app loads the build however it is opened, so a second icon would only confuse.
+        shutil.rmtree(MAC_LAUNCHER, ignore_errors=True)
     elif MAC:
         install_mac_launcher(app)
     else:
@@ -1109,7 +1112,8 @@ def build(args):
     if (not args.force and not args.resume and state.get('stock') == stock_fingerprint
             and state.get('recipe') == recipe and current_executable(state).exists()):
         install_launcher(app)
-        say(f'\nAlready up to date. Open "{LAUNCHER_NAME}" from your app launcher.')
+        say('\nAlready up to date. ' + ('Open T3 Code as usual.' if state.get('macRoute') == 'hook'
+                                          else f'Open "{LAUNCHER_NAME}" from your app launcher.'))
         return
     DATA.mkdir(parents=True, exist_ok=True)
     logs = CACHE / 'logs'
@@ -1140,7 +1144,8 @@ def build(args):
         version, commit = metadata['version'], metadata.get('t3codeCommitHash', '')
         if not re.fullmatch(r'[0-9a-f]{7,40}', commit):
             raise Stop('This application does not record its source commit, so it cannot be rebuilt exactly.')
-        channel = 'Nightly' if 'nightly' in version else 'Release'
+        channel = ('Nightly' if 'nightly' in version else
+                   'Beta' if '(Beta)' in stock_root.executable.name else 'Release')
         say(f'    {channel} {version}, upstream commit {commit[:12]}')
         runtime = (stock_root.resources / wsl.WSL_RUNTIME_ARCHIVE).is_file() and app.system == 'win32'
         if runtime and (SYSTEM != 'linux' or host_arch() != 'x64'):
@@ -1227,8 +1232,8 @@ def build(args):
     if DISABLED.exists():
         say(f'Customization is switched off. Run {NAME} on to use it.')
     elif route == 'hook':
-        say('Quit T3 Code fully (Cmd+Q), then open it as usual: from the Dock, Finder or '
-            f'"{LAUNCHER_NAME}". Run {NAME} again after every T3 Code update.')
+        say('Quit T3 Code fully (Cmd+Q), then open it as usual, from the Dock, Launchpad or Finder. '
+            f'Run {NAME} again after every T3 Code update.')
         say('First time? Turn on Settings > Appearance > Stats for nerds.')
     else:
         say(f'Quit T3 Code fully, then open "{LAUNCHER_NAME}" from your app launcher.')

@@ -83,7 +83,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/acqxi/t3code-customize/m
 
 指令包裝程式在 Linux 位於 `~/.local/bin`，在 Windows 位於 `%LOCALAPPDATA%\t3code-customize\bin`。如果它不在 PATH 中，請把該資料夾加入 PATH，或在儲存庫資料夾中執行 `python t3code-customize <指令>`（Linux 用 `python3`）。
 
-macOS 請從 Spotlight、Launchpad 或 `~/Applications` 開啟 **T3 Code (Customized)**。設定方式、日常使用，以及為什麼是把 patch 載入你的 App 而不是重新建置，請見 [macOS 說明](docs/macos.md)。工具會在 `/Applications` 與 `~/Applications` 尋找 `T3 Code (Nightly).app`、`T3 Code (Beta).app` 與 `T3 Code.app`；其他位置請用 `--app "/path/to/T3 Code (Beta).app"` 指定一次。2026 年 11 月 25 日之後的版本擋掉了啟動器的啟動掛鉤，這時工具會改在 App 的 `boot.cjs` 加一行，之後不管從哪裡開啟 T3 Code 都是客製版（[詳細說明](docs/macos.md#releases-with-the-inspect-fuse-off)）。
+macOS 請從 Spotlight、Launchpad 或 `~/Applications` 開啟 **T3 Code (Customized)**。設定方式、日常使用，以及為什麼是把 patch 載入你的 App 而不是重新建置，請見 [macOS 說明](docs/macos.md)。工具會在 `/Applications` 與 `~/Applications` 尋找 `T3 Code (Nightly).app`、`T3 Code (Beta).app` 與 `T3 Code.app`；其他位置請用 `--app "/path/to/T3 Code (Beta).app"` 指定一次。2026 年 11 月 25 日之後的版本擋掉了啟動器的啟動掛鉤，這時工具會改在 App 的 `boot.cjs` 加一行，之後不管從哪裡開啟 T3 Code 都是客製版，也就不需要另外的啟動器（[詳細說明](docs/macos.md#releases-with-the-inspect-fuse-off)）。
 
 ## 每次 T3 Code 更新後
 
