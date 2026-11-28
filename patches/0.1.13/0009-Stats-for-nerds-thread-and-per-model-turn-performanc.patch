@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: acqxi <kacqxi@gmail.com>
 Date: Fri, 27 Nov 2026 07:46:01 +0800
-Subject: [PATCH 08/12] Stats for nerds: thread and per-model turn performance
+Subject: [PATCH 09/15] Stats for nerds: thread and per-model turn performance
 
 - The turn performance grid (the composer's last-turn popover and Thread
   details) gets a compact scope switch beside its title: Last turn, This

@@ -1,0 +1,1174 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: acqxi <kacqxi@gmail.com>
+Date: Fri, 27 Nov 2026 01:27:43 +0800
+Subject: [PATCH 13/15] WSL runtime status in Connections and on the
+ Environments map
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The WSL backend reports how its runtime is coming up: the preflight
+records probing, installing and starting, and a read-only
+desktop:get-wsl-runtime-status joins that with the backend instance
+(waiting for readiness, ready, failed). Settings shows it under the WSL
+backend row ("Installing runtime · 1m 12s" with an activity bar, then
+"Running · runtime sha256-a95e31… · v0.1.12"), and the environments map
+shows it on the WSL card and in its detail panel. The page polls every
+second while the runtime comes up and every 10 s otherwise. A failed
+start offers Retry, which re-runs the existing WSL reconcile, or points
+to Restart in wsl-only mode.
+---
+ .../backend/DesktopBackendConfiguration.ts    |  10 ++
+ apps/desktop/src/ipc/DesktopIpcHandlers.ts    |   9 +-
+ apps/desktop/src/ipc/channels.ts              |   1 +
+ apps/desktop/src/ipc/methods/wsl.ts           |  58 ++++++-
+ apps/desktop/src/preload.ts                   |   1 +
+ .../src/wsl/DesktopWslRuntimeStatus.test.ts   |  73 +++++++++
+ .../src/wsl/DesktopWslRuntimeStatus.ts        |  94 +++++++++++
+ .../settings/ConnectionsSettings.tsx          |  11 +-
+ .../components/settings/EnvironmentsMap.tsx   |  28 +++-
+ .../settings/EnvironmentsMapDetails.tsx       |  16 ++
+ .../components/settings/WslRuntimeStatus.tsx  | 147 ++++++++++++++++++
+ .../settings/wslRuntimeStatus.logic.test.ts   |  92 +++++++++++
+ .../settings/wslRuntimeStatus.logic.ts        |  56 +++++++
+ apps/web/src/i18n/translations/de.json        |   9 ++
+ apps/web/src/i18n/translations/en.json        |   9 ++
+ apps/web/src/i18n/translations/es.json        |   9 ++
+ apps/web/src/i18n/translations/fr.json        |   9 ++
+ apps/web/src/i18n/translations/ja.json        |   9 ++
+ apps/web/src/i18n/translations/ko.json        |   9 ++
+ apps/web/src/i18n/translations/pt-BR.json     |   9 ++
+ apps/web/src/i18n/translations/ru.json        |   9 ++
+ apps/web/src/i18n/translations/sv.json        |   9 ++
+ apps/web/src/i18n/translations/zh.json        |   9 ++
+ apps/web/src/state/desktopWslRuntimeStatus.ts |  67 ++++++++
+ packages/contracts/src/ipc.ts                 |  30 ++++
+ 25 files changed, 767 insertions(+), 16 deletions(-)
+ create mode 100644 apps/desktop/src/wsl/DesktopWslRuntimeStatus.test.ts
+ create mode 100644 apps/desktop/src/wsl/DesktopWslRuntimeStatus.ts
+ create mode 100644 apps/web/src/components/settings/WslRuntimeStatus.tsx
+ create mode 100644 apps/web/src/components/settings/wslRuntimeStatus.logic.test.ts
+ create mode 100644 apps/web/src/components/settings/wslRuntimeStatus.logic.ts
+ create mode 100644 apps/web/src/state/desktopWslRuntimeStatus.ts
+
+diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+index 941b9fd60f..ae3971f3fb 100644
+--- a/apps/desktop/src/backend/DesktopBackendConfiguration.ts
++++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+@@ -32,6 +32,7 @@ import * as DesktopServerExposure from "./DesktopServerExposure.ts";
+ import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
+ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
+ import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
++import { recordWslRuntimePhase } from "../wsl/DesktopWslRuntimeStatus.ts";
+ import * as DesktopWslServerTree from "../wsl/DesktopWslServerTree.ts";
+ 
+ export class DesktopBackendObservabilitySettingsReadError extends Schema.TaggedError<DesktopBackendObservabilitySettingsReadError>()(
+@@ -433,6 +434,7 @@ const runWslPreflight = Effect.fn("desktop.backendConfiguration.wslPreflight")(f
+     // Probe first: the runtime cache lives under the login shell's T3CODE_HOME.
+     const stagedProbe = yield* wslEnv.probeRuntime(runningDistro);
+     if (stagedProbe.ok) {
++      yield* recordWslRuntimePhase("installing", { runtimeId: input.runtimeArchive.runtimeId });
+       const runtime = yield* wslEnv.prepareRuntime(
+         runningDistro,
+         input.runtimeArchive,
+@@ -472,6 +474,7 @@ const runWslPreflight = Effect.fn("desktop.backendConfiguration.wslPreflight")(f
+       : ({ _tag: "Failed", reason: mounted.reason, fatal: mounted.fatal } as const);
+   }
+ 
++  yield* recordWslRuntimePhase("installing");
+   const nodePtyResult = yield* wslEnv.ensureNodePty(
+     runningDistro,
+     mounted.linuxAppRoot,
+@@ -658,6 +661,7 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
+     );
+   }
+ 
++  yield* recordWslRuntimePhase("probing");
+   const preflight = yield* runWslPreflight({
+     distro: input.distro,
+     runtimeArchive:
+@@ -670,6 +674,12 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
+           },
+     allowBuild: !environment.isPackaged,
+   });
++  yield* preflight._tag === "Ready"
++    ? recordWslRuntimePhase("starting", {
++        ...(preflight.runtimeDir === undefined ? {} : { runtimeDir: preflight.runtimeDir }),
++        ...(preflight.runtimeId === undefined ? {} : { runtimeId: preflight.runtimeId }),
++      })
++    : recordWslRuntimePhase("failed", { lastError: preflight.reason });
+ 
+   // Pin the preflight distro so a default change cannot race backend startup.
+   const runningDistro = preflight._tag === "Ready" ? preflight.runningDistro : null;
+diff --git a/apps/desktop/src/ipc/DesktopIpcHandlers.ts b/apps/desktop/src/ipc/DesktopIpcHandlers.ts
+index f524a906ff..74599bd332 100644
+--- a/apps/desktop/src/ipc/DesktopIpcHandlers.ts
++++ b/apps/desktop/src/ipc/DesktopIpcHandlers.ts
+@@ -86,7 +86,13 @@ import {
+   completeLegacyLocalStorage,
+   takeLegacyLocalStorage,
+ } from "./methods/legacyLocalStorage.ts";
+-import { getWslState, setWslBackendEnabled, setWslDistro, setWslOnly } from "./methods/wsl.ts";
++import {
++  getWslRuntimeStatus,
++  getWslState,
++  setWslBackendEnabled,
++  setWslDistro,
++  setWslOnly,
++} from "./methods/wsl.ts";
+ import { restartApp } from "./methods/restart.ts";
+ import {
+   getCliCommandState,
+@@ -154,6 +160,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
+   yield* ipc.handle(getAdvertisedEndpoints);
+ 
+   yield* ipc.handle(getWslState);
++  yield* ipc.handle(getWslRuntimeStatus);
+   yield* ipc.handle(setWslBackendEnabled);
+   yield* ipc.handle(setWslDistro);
+   yield* ipc.handle(setWslOnly);
+diff --git a/apps/desktop/src/ipc/channels.ts b/apps/desktop/src/ipc/channels.ts
+index 85c2f3e111..04acf049ac 100644
+--- a/apps/desktop/src/ipc/channels.ts
++++ b/apps/desktop/src/ipc/channels.ts
+@@ -80,6 +80,7 @@ export const SET_SERVER_EXPOSURE_MODE_CHANNEL = "desktop:set-server-exposure-mod
+ export const SET_TAILSCALE_SERVE_ENABLED_CHANNEL = "desktop:set-tailscale-serve-enabled";
+ export const GET_ADVERTISED_ENDPOINTS_CHANNEL = "desktop:get-advertised-endpoints";
+ export const GET_WSL_STATE_CHANNEL = "desktop:get-wsl-state";
++export const GET_WSL_RUNTIME_STATUS_CHANNEL = "desktop:get-wsl-runtime-status";
+ export const SET_WSL_BACKEND_ENABLED_CHANNEL = "desktop:set-wsl-backend-enabled";
+ export const SET_WSL_DISTRO_CHANNEL = "desktop:set-wsl-distro";
+ export const SET_WSL_ONLY_CHANNEL = "desktop:set-wsl-only";
+diff --git a/apps/desktop/src/ipc/methods/wsl.ts b/apps/desktop/src/ipc/methods/wsl.ts
+index dac7550871..8e2ca6d88d 100644
+--- a/apps/desktop/src/ipc/methods/wsl.ts
++++ b/apps/desktop/src/ipc/methods/wsl.ts
+@@ -1,12 +1,22 @@
+-import { DesktopWslStateSchema, type DesktopWslState } from "@t3tools/contracts";
++import {
++  DesktopWslRuntimeStatusSchema,
++  DesktopWslStateSchema,
++  type DesktopWslState,
++} from "@t3tools/contracts";
+ import * as Effect from "effect/Effect";
+ import * as Option from "effect/Option";
+ import * as Schema from "effect/Schema";
+ 
++import * as DesktopEnvironment from "../../app/DesktopEnvironment.ts";
+ import * as DesktopLifecycle from "../../app/DesktopLifecycle.ts";
++import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
+ import * as DesktopAppSettings from "../../settings/DesktopAppSettings.ts";
+ import * as DesktopWslBackend from "../../wsl/DesktopWslBackend.ts";
+ import * as DesktopWslEnvironment from "../../wsl/DesktopWslEnvironment.ts";
++import {
++  readWslRuntimeStartStatus,
++  resolveWslRuntimeStatus,
++} from "../../wsl/DesktopWslRuntimeStatus.ts";
+ import * as IpcChannels from "../channels.ts";
+ import { makeIpcMethod } from "../DesktopIpc.ts";
+ 
+@@ -109,3 +119,49 @@ export const setWslOnly = makeIpcMethod({
+     return state;
+   }),
+ });
++
++/** Read-only: how the WSL backend's runtime is coming up, polled by the settings status lines. */
++export const getWslRuntimeStatus = makeIpcMethod({
++  channel: IpcChannels.GET_WSL_RUNTIME_STATUS_CHANNEL,
++  payload: Schema.Void,
++  result: DesktopWslRuntimeStatusSchema,
++  handler: Effect.fn("desktop.ipc.wsl.getRuntimeStatus")(function* () {
++    const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
++    const pool = yield* DesktopBackendPool.DesktopBackendPool;
++    const wslBackend = yield* DesktopWslBackend.DesktopWslBackend;
++    const environment = yield* DesktopEnvironment.DesktopEnvironment;
++    const settings = yield* appSettings.get;
++    const instances = yield* pool.list;
++    // The WSL backend is the instance launched into a distro: wsl:<distro>, or the primary in wsl-only mode.
++    const described = yield* Effect.forEach(instances, (instance) =>
++      Effect.all([instance.currentConfig, instance.snapshot]).pipe(
++        Effect.map(([config, snapshot]) => ({ instance, config, snapshot })),
++      ),
++    );
++    const wsl = described.find(
++      ({ instance, config }) =>
++        instance.id.startsWith("wsl:") ||
++        (Option.isSome(config) && config.value.runningDistro !== undefined),
++    );
++    const config = wsl === undefined ? Option.none() : wsl.config;
++    return resolveWslRuntimeStatus({
++      enabled: settings.localEnvironmentEnabled && settings.wslBackendEnabled,
++      start: yield* readWslRuntimeStartStatus,
++      instance:
++        wsl === undefined
++          ? null
++          : {
++              id: wsl.instance.id,
++              ready: wsl.snapshot.ready,
++              running: Option.isSome(wsl.snapshot.activePid) || wsl.snapshot.restartScheduled,
++              distro: Option.getOrUndefined(config)?.runningDistro ?? settings.wslDistro,
++              runtimeDir: Option.getOrUndefined(config)?.wslRuntimeDir ?? null,
++              runtimeId: Option.getOrUndefined(config)?.wslRuntimeId ?? null,
++            },
++      version: environment.appVersion,
++      // Reconcile retries an idle WSL backend; a wsl-only primary needs a restart instead.
++      retryable: !settings.wslOnly,
++      lastPreflightError: Option.getOrNull(yield* wslBackend.lastPreflightError),
++    });
++  }),
++});
+diff --git a/apps/desktop/src/preload.ts b/apps/desktop/src/preload.ts
+index bdce6c2080..a78332e490 100644
+--- a/apps/desktop/src/preload.ts
++++ b/apps/desktop/src/preload.ts
+@@ -239,6 +239,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
+     ipcRenderer.invoke(IpcChannels.SET_TAILSCALE_SERVE_ENABLED_CHANNEL, input),
+   getAdvertisedEndpoints: () => ipcRenderer.invoke(IpcChannels.GET_ADVERTISED_ENDPOINTS_CHANNEL),
+   getWslState: () => ipcRenderer.invoke(IpcChannels.GET_WSL_STATE_CHANNEL),
++  getWslRuntimeStatus: () => ipcRenderer.invoke(IpcChannels.GET_WSL_RUNTIME_STATUS_CHANNEL),
+   setWslBackendEnabled: (enabled) =>
+     ipcRenderer.invoke(IpcChannels.SET_WSL_BACKEND_ENABLED_CHANNEL, enabled),
+   setWslDistro: (distro) => ipcRenderer.invoke(IpcChannels.SET_WSL_DISTRO_CHANNEL, distro),
+diff --git a/apps/desktop/src/wsl/DesktopWslRuntimeStatus.test.ts b/apps/desktop/src/wsl/DesktopWslRuntimeStatus.test.ts
+new file mode 100644
+index 0000000000..7976998bd6
+--- /dev/null
++++ b/apps/desktop/src/wsl/DesktopWslRuntimeStatus.test.ts
+@@ -0,0 +1,73 @@
++import { assert, describe, it } from "@effect/vitest";
++
++import { resolveWslRuntimeStatus, type WslRuntimeStartStatus } from "./DesktopWslRuntimeStatus.ts";
++
++const start = (overrides: Partial<WslRuntimeStartStatus> = {}): WslRuntimeStartStatus => ({
++  phase: "idle",
++  phaseStartedAt: null,
++  runtimeDir: null,
++  runtimeId: null,
++  lastError: null,
++  ...overrides,
++});
++const instance = (overrides: { ready?: boolean; running?: boolean } = {}) => ({
++  id: "wsl:Ubuntu",
++  ready: false,
++  running: false,
++  distro: "Ubuntu",
++  runtimeDir: "/home/me/.t3/wsl-runtime/sha256-a95e31",
++  runtimeId: "sha256-a95e31",
++  ...overrides,
++});
++const resolve = (input: Partial<Parameters<typeof resolveWslRuntimeStatus>[0]>) =>
++  resolveWslRuntimeStatus({
++    enabled: true,
++    start: start(),
++    instance: null,
++    version: "0.1.12",
++    retryable: true,
++    lastPreflightError: null,
++    ...input,
++  });
++
++describe("resolveWslRuntimeStatus", () => {
++  it("is disabled when the WSL backend is off", () => {
++    assert.strictEqual(resolve({ enabled: false, instance: instance() }).phase, "disabled");
++  });
++
++  it("follows the recorded phases while the runtime is probed and installed", () => {
++    assert.strictEqual(resolve({ start: start({ phase: "probing" }) }).phase, "probing");
++    const installing = resolve({
++      start: start({ phase: "installing", phaseStartedAt: 1_000, runtimeId: "sha256-a95e31" }),
++    });
++    assert.strictEqual(installing.phase, "installing");
++    assert.strictEqual(installing.phaseStartedAt, 1_000);
++    assert.strictEqual(installing.runtimeId, "sha256-a95e31");
++  });
++
++  it("waits for readiness once the server process runs, then reports ready with the version", () => {
++    const starting = start({ phase: "starting", phaseStartedAt: 5 });
++    assert.strictEqual(resolve({ start: starting, instance: instance() }).phase, "starting");
++    assert.strictEqual(
++      resolve({ start: starting, instance: instance({ running: true }) }).phase,
++      "waiting_ready",
++    );
++    const ready = resolve({ start: starting, instance: instance({ ready: true, running: true }) });
++    assert.strictEqual(ready.phase, "ready");
++    assert.strictEqual(ready.version, "0.1.12");
++    assert.strictEqual(ready.runtimeDir, "/home/me/.t3/wsl-runtime/sha256-a95e31");
++  });
++
++  it("reports a failure and offers retry only for a stopped, retryable backend", () => {
++    const failed = start({ phase: "failed", lastError: "WSL runtime installation timed out." });
++    const stopped = resolve({ start: failed, instance: instance() });
++    assert.strictEqual(stopped.phase, "failed");
++    assert.strictEqual(stopped.lastError, "WSL runtime installation timed out.");
++    assert.isTrue(stopped.canRetry);
++    assert.isFalse(resolve({ start: failed, instance: instance(), retryable: false }).canRetry);
++    assert.isFalse(resolve({ start: failed, instance: null }).canRetry);
++    const preflight = resolve({ instance: instance(), lastPreflightError: "distro is busy" });
++    assert.strictEqual(preflight.phase, "failed");
++    assert.strictEqual(preflight.lastError, "distro is busy");
++  });
++});
+diff --git a/apps/desktop/src/wsl/DesktopWslRuntimeStatus.ts b/apps/desktop/src/wsl/DesktopWslRuntimeStatus.ts
+new file mode 100644
+index 0000000000..92aa9ca8e2
+--- /dev/null
++++ b/apps/desktop/src/wsl/DesktopWslRuntimeStatus.ts
+@@ -0,0 +1,94 @@
++import * as Clock from "effect/Clock";
++import type { DesktopWslRuntimeStatus } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++
++/** What the WSL backend's start is doing; readiness is read live from its backend instance. */
++export type WslRuntimeStartPhase = "idle" | "probing" | "installing" | "starting" | "failed";
++
++export interface WslRuntimeStartStatus {
++  readonly phase: WslRuntimeStartPhase;
++  readonly phaseStartedAt: number | null;
++  readonly runtimeDir: string | null;
++  readonly runtimeId: string | null;
++  readonly lastError: string | null;
++}
++
++const IDLE: WslRuntimeStartStatus = {
++  phase: "idle",
++  phaseStartedAt: null,
++  runtimeDir: null,
++  runtimeId: null,
++  lastError: null,
++};
++
++// One WSL backend starts at a time; this records its progress for the read-only status IPC.
++let current: WslRuntimeStartStatus = IDLE;
++
++export const readWslRuntimeStartStatus = Effect.sync(() => current);
++
++export const recordWslRuntimePhase = (
++  phase: WslRuntimeStartPhase,
++  details: Partial<Pick<WslRuntimeStartStatus, "runtimeDir" | "runtimeId" | "lastError">> = {},
++) =>
++  Effect.flatMap(Clock.currentTimeMillis, (now) =>
++    Effect.sync(() => {
++      current = {
++        phase,
++        phaseStartedAt: phase === "idle" ? null : now,
++        runtimeDir: details.runtimeDir ?? (phase === "probing" ? null : current.runtimeDir),
++        runtimeId: details.runtimeId ?? (phase === "probing" ? null : current.runtimeId),
++        lastError: phase === "failed" ? (details.lastError ?? null) : null,
++      };
++    }),
++  );
++
++/** Joins the recorded start phase with the live backend instance and settings. */
++export function resolveWslRuntimeStatus(input: {
++  readonly enabled: boolean;
++  readonly start: WslRuntimeStartStatus;
++  readonly instance: {
++    readonly id: string;
++    readonly ready: boolean;
++    readonly running: boolean;
++    readonly distro: string | null;
++    readonly runtimeDir: string | null;
++    readonly runtimeId: string | null;
++  } | null;
++  readonly version: string;
++  readonly retryable: boolean;
++  readonly lastPreflightError: string | null;
++}): DesktopWslRuntimeStatus {
++  const { start, instance } = input;
++  const base = {
++    instanceId: instance?.id ?? null,
++    distro: instance?.distro ?? null,
++    runtimeDir: instance?.runtimeDir ?? start.runtimeDir,
++    runtimeId: instance?.runtimeId ?? start.runtimeId,
++    version: null,
++    lastError: null,
++    canRetry: false,
++  };
++  if (!input.enabled) return { ...base, phase: "disabled", phaseStartedAt: null };
++  if (instance?.ready) {
++    return {
++      ...base,
++      phase: "ready",
++      phaseStartedAt: start.phaseStartedAt,
++      version: input.version,
++    };
++  }
++  const lastError = start.lastError ?? input.lastPreflightError;
++  if (start.phase === "failed" || (lastError !== null && !instance?.running)) {
++    return {
++      ...base,
++      phase: "failed",
++      phaseStartedAt: start.phaseStartedAt,
++      lastError: lastError ?? null,
++      canRetry: input.retryable && instance !== null && !instance.running,
++    };
++  }
++  if (start.phase === "starting" && instance?.running) {
++    return { ...base, phase: "waiting_ready", phaseStartedAt: start.phaseStartedAt };
++  }
++  return { ...base, phase: start.phase, phaseStartedAt: start.phaseStartedAt };
++}
+diff --git a/apps/web/src/components/settings/ConnectionsSettings.tsx b/apps/web/src/components/settings/ConnectionsSettings.tsx
+index b17928b28b..ef9ceeedf9 100644
+--- a/apps/web/src/components/settings/ConnectionsSettings.tsx
++++ b/apps/web/src/components/settings/ConnectionsSettings.tsx
+@@ -6,7 +6,7 @@ import { useSearch } from "@tanstack/react-router";
+ import { ChevronRightIcon, EllipsisIcon } from "lucide-react";
+ import { useAtom, useAtomValue } from "@effect/atom-react";
+ import { type ReactNode, useState } from "react";
+-import { T, useGT, useMessages, Var } from "gt-react";
++import { T, useGT, useMessages } from "gt-react";
+ import {
+   AuthAccessReadScope,
+   AuthAccessWriteScope,
+@@ -110,6 +110,7 @@ import {
+   refreshDesktopNetworkAccessState,
+ } from "~/state/desktopNetworkAccess";
+ import { desktopWslAccessStateAtom, refreshDesktopWslState } from "~/state/desktopWslState";
++import { WslRuntimeStatusLine } from "./WslRuntimeStatus";
+ import { useDesktopUpdateState } from "~/state/desktopUpdate";
+ import {
+   type EnvironmentPresentation,
+@@ -1079,12 +1080,8 @@ function ConnectionsSettingsContent({
+           status={
+             desktopWslError ? (
+               <span className="block text-destructive">{desktopWslError}</span>
+-            ) : desktopWslState.preflightError ? (
+-              <span className="block text-destructive">
+-                <T>
+-                  WSL backend couldn't start: <Var>{desktopWslState.preflightError}</Var>
+-                </T>
+-              </span>
++            ) : desktopWslState.enabled ? (
++              <WslRuntimeStatusLine legacyError={desktopWslState.preflightError} />
+             ) : null
+           }
+           control={
+diff --git a/apps/web/src/components/settings/EnvironmentsMap.tsx b/apps/web/src/components/settings/EnvironmentsMap.tsx
+index ee914d6b09..a4a662253c 100644
+--- a/apps/web/src/components/settings/EnvironmentsMap.tsx
++++ b/apps/web/src/components/settings/EnvironmentsMap.tsx
+@@ -134,6 +134,9 @@ import {
+ import { LinkEnvironmentDialog, type LinkEnvironmentPrefill } from "./LinkedEnvironmentsSettings";
+ import { LinkSeveralEnvironmentsDialog } from "./LinkSeveralEnvironments";
+ import { savedBackendStatus } from "./SavedEnvironmentRows";
++import { useWslRuntimeCardStatus } from "./WslRuntimeStatus";
++import { isWslRuntimeBackend } from "./wslRuntimeStatus.logic";
++import { desktopLocalBackendId } from "../../connection/desktopLocal";
+ import { SettingsSearchTarget } from "./settingsLayout";
+ import { SharedTooltipTrigger } from "../ui/shared-tooltip";
+ 
+@@ -1376,6 +1379,7 @@ const FleetScene = memo(function FleetScene({
+   const gt = useGT();
+   const m = useMessages();
+   const [hover, setHover] = useState<FleetFocus | null>(null);
++  const wslRuntime = useWslRuntimeCardStatus();
+   const [roving, setRoving] = useState(FLEET_CLIENT_NODE_ID);
+   const [linkDrag, setLinkDrag] = useState<LinkDrag | null>(null);
+   const handleDrag = useRef<{
+@@ -2153,13 +2157,23 @@ const FleetScene = memo(function FleetScene({
+         }
+         const environment = environmentById.get(node.id);
+         const routes = routeEdges.filter((edge) => edge.to === node.id);
+-        const status = environmentStatusText(
+-          node,
+-          environment,
+-          routes.length > 0 && routes.every((edge) => edge.state === "refused"),
+-          links.filter((edge) => edge.from === node.id).length,
+-          gt,
+-        );
++        // While the desktop's WSL backend installs or starts, its card says so instead.
++        const wslStatus =
++          environment !== undefined &&
++          isWslRuntimeBackend(desktopLocalBackendId(environment.entry.target), {
++            instanceId: wslRuntime.instanceId,
++          })
++            ? wslRuntime.text
++            : null;
++        const status =
++          wslStatus ??
++          environmentStatusText(
++            node,
++            environment,
++            routes.length > 0 && routes.every((edge) => edge.state === "refused"),
++            links.filter((edge) => edge.from === node.id).length,
++            gt,
++          );
+         // The card's state is short; the name carries the reason and what it leaves unknown.
+         const spoken =
+           node.phase === "connected"
+diff --git a/apps/web/src/components/settings/EnvironmentsMapDetails.tsx b/apps/web/src/components/settings/EnvironmentsMapDetails.tsx
+index e01a10ca71..801775bc50 100644
+--- a/apps/web/src/components/settings/EnvironmentsMapDetails.tsx
++++ b/apps/web/src/components/settings/EnvironmentsMapDetails.tsx
+@@ -38,6 +38,9 @@ import {
+ } from "./environmentsMap.logic";
+ import { peerLinkStatusText, useForgetPeerLink } from "./LinkedEnvironmentsSettings";
+ import { savedBackendStatus } from "./SavedEnvironmentRows";
++import { useWslRuntimeCardStatus, WslRuntimeStatusLine } from "./WslRuntimeStatus";
++import { isWslRuntimeBackend } from "./wslRuntimeStatus.logic";
++import { desktopLocalBackendId } from "../../connection/desktopLocal";
+ 
+ type GT = ReturnType<typeof useGT>;
+ 
+@@ -135,6 +138,18 @@ export interface FleetDetailsProps {
+ const SECTION = "px-3 py-3 sm:px-4";
+ 
+ /** What is selected on the map, with the controls the list keeps on each row. */
++/** The WSL backend's runtime status while it installs, starts, or after it failed to. */
++function WslRuntimeDetail({ environment }: { readonly environment: EnvironmentPresentation }) {
++  const wslRuntime = useWslRuntimeCardStatus();
++  if (
++    wslRuntime.text === null ||
++    !isWslRuntimeBackend(desktopLocalBackendId(environment.entry.target), wslRuntime)
++  ) {
++    return null;
++  }
++  return <WslRuntimeStatusLine className="text-xs" />;
++}
++
+ export function FleetDetails(props: FleetDetailsProps) {
+   const { graph, stacks, selection, onSelect, connectProblem } = props;
+   const gt = useGT();
+@@ -752,6 +767,7 @@ function NodeDetails({
+           />
+         ) : null)}
+       <div className={cn(SECTION, "space-y-3 border-t border-border/60")}>
++        {environment ? <WslRuntimeDetail environment={environment} /> : null}
+         {environment && saved !== null ? <Reconnect environment={environment} /> : null}
+         {note ? <p className="max-w-2xl text-muted-foreground">{note}</p> : null}
+         <LinkList
+diff --git a/apps/web/src/components/settings/WslRuntimeStatus.tsx b/apps/web/src/components/settings/WslRuntimeStatus.tsx
+new file mode 100644
+index 0000000000..0c62471597
+--- /dev/null
++++ b/apps/web/src/components/settings/WslRuntimeStatus.tsx
+@@ -0,0 +1,147 @@
++import { T, useGT, Var } from "gt-react";
++import { useState } from "react";
++
++import {
++  refreshDesktopWslRuntimeStatus,
++  useDesktopWslRuntimeStatus,
++} from "../../state/desktopWslRuntimeStatus";
++import { refreshDesktopWslState } from "../../state/desktopWslState";
++import { cn } from "../../lib/utils";
++import { Button } from "../ui/button";
++import { describeWslRuntimeStatus, type WslRuntimeStatusDisplay } from "./wslRuntimeStatus.logic";
++
++function useWslRuntimeDisplay(): WslRuntimeStatusDisplay {
++  const reading = useDesktopWslRuntimeStatus();
++  return describeWslRuntimeStatus(reading?.status ?? null, reading?.readAt ?? 0);
++}
++
++/** "Installing runtime · 1m 12s", "Running · runtime sha256-a95e31… · v0.1.12", or the failure. */
++function useWslRuntimeText() {
++  const gt = useGT();
++  return (display: WslRuntimeStatusDisplay): string | null => {
++    switch (display.kind) {
++      case "hidden":
++        return null;
++      case "ready":
++        return [
++          gt("Running", { $context: "WSL backend status" }),
++          ...(display.runtime ? [gt("runtime {runtime}", { runtime: display.runtime })] : []),
++          ...(display.version ? [`v${display.version}`] : []),
++        ].join(" · ");
++      case "failed":
++        return gt("WSL backend couldn't start");
++      case "progress": {
++        const phase = {
++          probing: gt("Checking the WSL runtime"),
++          installing: gt("Installing runtime"),
++          starting: gt("Starting server"),
++          waiting_ready: gt("Waiting for server to be ready"),
++        }[display.phase];
++        return `${phase} · ${display.elapsed}`;
++      }
++    }
++  };
++}
++
++function ProgressBar() {
++  // The install reports no byte counts, so the bar shows activity rather than a fraction.
++  return (
++    <span
++      aria-hidden
++      className="mt-1 block h-[3px] w-full max-w-64 overflow-hidden rounded-full bg-foreground/10"
++    >
++      <span className="block h-full w-1/3 animate-pulse rounded-full bg-primary/70" />
++    </span>
++  );
++}
++
++/** The WSL backend's runtime status under its Settings row and in the map's detail panel. */
++export function WslRuntimeStatusLine({
++  legacyError = null,
++  className,
++}: {
++  /** Shown as before when the desktop cannot report runtime status. */
++  legacyError?: string | null;
++  className?: string;
++}) {
++  const gt = useGT();
++  const display = useWslRuntimeDisplay();
++  const text = useWslRuntimeText()(display);
++  const [retrying, setRetrying] = useState(false);
++  if (display.kind === "hidden") {
++    return legacyError ? (
++      <span className={cn("block text-destructive", className)}>
++        <T>
++          WSL backend couldn't start: <Var>{legacyError}</Var>
++        </T>
++      </span>
++    ) : null;
++  }
++  if (display.kind === "failed") {
++    const setEnabled = window.desktopBridge?.setWslBackendEnabled;
++    return (
++      <span role="status" className={cn("block space-y-1", className)}>
++        <span className="block text-destructive">
++          {display.error ? `${text}: ${display.error}` : text}
++        </span>
++        {display.canRetry && setEnabled ? (
++          <Button
++            size="xs"
++            variant="outline"
++            disabled={retrying}
++            onClick={() => {
++              setRetrying(true);
++              // Already on: this only re-runs the reconcile, which retries a stopped WSL backend.
++              void setEnabled(true)
++                .catch(() => {})
++                .finally(() => {
++                  setRetrying(false);
++                  refreshDesktopWslState();
++                  refreshDesktopWslRuntimeStatus();
++                });
++            }}
++          >
++            {gt("Retry", { $context: "retry starting the WSL backend" })}
++          </Button>
++        ) : (
++          <span className="block text-muted-foreground">
++            {gt("Fix the cause, then use Restart in Settings > About to try again.")}
++          </span>
++        )}
++      </span>
++    );
++  }
++  return (
++    <span
++      role="status"
++      className={cn(
++        "block tabular-nums",
++        display.kind === "ready" ? "text-muted-foreground" : "text-foreground/80",
++        className,
++      )}
++    >
++      {text}
++      {display.kind === "progress" ? <ProgressBar /> : null}
++    </span>
++  );
++}
++
++/**
++ * For the environments map: which backend is the WSL one, and the card subtitle while it comes up
++ * (null once it settles). Called once per map, not per card.
++ */
++export function useWslRuntimeCardStatus(): {
++  readonly instanceId: string | null;
++  readonly text: string | null;
++  readonly inProgress: boolean;
++} {
++  const reading = useDesktopWslRuntimeStatus();
++  const display = describeWslRuntimeStatus(reading?.status ?? null, reading?.readAt ?? 0);
++  const text = useWslRuntimeText()(display);
++  const shown = display.kind === "progress" || display.kind === "failed";
++  return {
++    instanceId: reading?.status.instanceId ?? null,
++    text: shown ? text : null,
++    inProgress: display.kind === "progress",
++  };
++}
+diff --git a/apps/web/src/components/settings/wslRuntimeStatus.logic.test.ts b/apps/web/src/components/settings/wslRuntimeStatus.logic.test.ts
+new file mode 100644
+index 0000000000..2161108a5a
+--- /dev/null
++++ b/apps/web/src/components/settings/wslRuntimeStatus.logic.test.ts
+@@ -0,0 +1,92 @@
++import type { DesktopWslRuntimeStatus } from "@t3tools/contracts";
++import { describe, expect, it } from "vite-plus/test";
++
++import {
++  describeWslRuntimeStatus,
++  isWslRuntimeBackend,
++  shortRuntimeId,
++} from "./wslRuntimeStatus.logic";
++
++const status = (overrides: Partial<DesktopWslRuntimeStatus> = {}): DesktopWslRuntimeStatus => ({
++  phase: "idle",
++  phaseStartedAt: null,
++  instanceId: "wsl:Ubuntu",
++  distro: "Ubuntu",
++  runtimeDir: null,
++  runtimeId: null,
++  version: null,
++  lastError: null,
++  canRetry: false,
++  ...overrides,
++});
++
++describe("describeWslRuntimeStatus", () => {
++  it("hides nothing-to-say states", () => {
++    expect(describeWslRuntimeStatus(null, 0)).toEqual({ kind: "hidden" });
++    expect(describeWslRuntimeStatus(status({ phase: "idle" }), 0)).toEqual({ kind: "hidden" });
++    expect(describeWslRuntimeStatus(status({ phase: "disabled" }), 0)).toEqual({ kind: "hidden" });
++  });
++
++  it("shows each start phase with its elapsed time", () => {
++    const started = 1_000_000;
++    expect(
++      describeWslRuntimeStatus(
++        status({ phase: "installing", phaseStartedAt: started }),
++        started + 72_000,
++      ),
++    ).toEqual({ kind: "progress", phase: "installing", elapsed: "1m 12s" });
++    expect(
++      describeWslRuntimeStatus(
++        status({ phase: "waiting_ready", phaseStartedAt: started }),
++        started,
++      ),
++    ).toEqual({ kind: "progress", phase: "waiting_ready", elapsed: "0s" });
++    expect(describeWslRuntimeStatus(status({ phase: "probing" }), started)).toEqual({
++      kind: "progress",
++      phase: "probing",
++      elapsed: "0s",
++    });
++  });
++
++  it("names the runtime and version once ready", () => {
++    expect(
++      describeWslRuntimeStatus(
++        status({
++          phase: "ready",
++          runtimeId: "sha256-a95e31f0c2d94b7e",
++          version: "0.1.12",
++        }),
++        0,
++      ),
++    ).toEqual({ kind: "ready", runtime: "sha256-a95e31…", version: "0.1.12" });
++  });
++
++  it("carries the failure and whether retry is safe", () => {
++    expect(
++      describeWslRuntimeStatus(
++        status({ phase: "failed", lastError: "  install timed out ", canRetry: true }),
++        0,
++      ),
++    ).toEqual({ kind: "failed", error: "install timed out", canRetry: true });
++    expect(describeWslRuntimeStatus(status({ phase: "failed", lastError: " " }), 0)).toEqual({
++      kind: "failed",
++      error: null,
++      canRetry: false,
++    });
++  });
++});
++
++describe("runtime and backend identity", () => {
++  it("shortens a runtime id to its hash prefix", () => {
++    expect(shortRuntimeId("sha256-a95e31f0c2d9")).toBe("sha256-a95e31…");
++    expect(shortRuntimeId("sha256-a95e")).toBe("sha256-a95e");
++    expect(shortRuntimeId(null)).toBeNull();
++  });
++
++  it("matches the map's environment to the WSL backend by its backend id", () => {
++    expect(isWslRuntimeBackend("wsl:Ubuntu", { instanceId: "wsl:Ubuntu" })).toBe(true);
++    expect(isWslRuntimeBackend("primary", { instanceId: "wsl:Ubuntu" })).toBe(false);
++    expect(isWslRuntimeBackend(null, { instanceId: null })).toBe(false);
++    expect(isWslRuntimeBackend("wsl:Ubuntu", null)).toBe(false);
++  });
++});
+diff --git a/apps/web/src/components/settings/wslRuntimeStatus.logic.ts b/apps/web/src/components/settings/wslRuntimeStatus.logic.ts
+new file mode 100644
+index 0000000000..5a33a68a50
+--- /dev/null
++++ b/apps/web/src/components/settings/wslRuntimeStatus.logic.ts
+@@ -0,0 +1,56 @@
++import type { DesktopWslRuntimeStatus } from "@t3tools/contracts";
++
++import { formatLimitCountdown } from "../chat/ComposerStats.logic";
++
++export type WslRuntimeStatusDisplay =
++  | { readonly kind: "hidden" }
++  | {
++      readonly kind: "progress";
++      readonly phase: "probing" | "installing" | "starting" | "waiting_ready";
++      readonly elapsed: string;
++    }
++  | { readonly kind: "ready"; readonly runtime: string | null; readonly version: string | null }
++  | { readonly kind: "failed"; readonly error: string | null; readonly canRetry: boolean };
++
++/** "sha256-a95e31…": enough of the runtime's hash to tell two builds apart. */
++export function shortRuntimeId(runtimeId: string | null): string | null {
++  if (runtimeId === null || runtimeId.trim() === "") return null;
++  return runtimeId.length > 13 ? `${runtimeId.slice(0, 13)}…` : runtimeId;
++}
++
++export function describeWslRuntimeStatus(
++  status: DesktopWslRuntimeStatus | null,
++  nowMs: number,
++): WslRuntimeStatusDisplay {
++  if (status === null) return { kind: "hidden" };
++  switch (status.phase) {
++    case "idle":
++    case "disabled":
++      return { kind: "hidden" };
++    case "ready":
++      return { kind: "ready", runtime: shortRuntimeId(status.runtimeId), version: status.version };
++    case "failed":
++      return {
++        kind: "failed",
++        error: status.lastError?.trim() || null,
++        canRetry: status.canRetry,
++      };
++    default:
++      return {
++        kind: "progress",
++        phase: status.phase,
++        elapsed:
++          status.phaseStartedAt === null
++            ? "0s"
++            : (formatLimitCountdown(nowMs - status.phaseStartedAt) ?? "0s"),
++      };
++  }
++}
++
++/** The map card's environment, when it is the desktop's WSL backend. */
++export function isWslRuntimeBackend(
++  backendId: string | null,
++  status: Pick<DesktopWslRuntimeStatus, "instanceId"> | null,
++): boolean {
++  return backendId !== null && status?.instanceId === backendId;
++}
+diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
+index 47a934c841..dedcdaf2f2 100644
+--- a/apps/web/src/i18n/translations/de.json
++++ b/apps/web/src/i18n/translations/de.json
+@@ -13136,6 +13136,15 @@
+   "4247054d89acc43b": "Restart",
+   "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
+   "5155d8a1517ce2a6": "Hard restart",
++  "df9e1c9b0a417643": "Running",
++  "e0008f279478b943": "runtime {runtime}",
++  "b5435aa5b470bafd": "WSL backend couldn't start",
++  "37f67c932a71d65b": "Checking the WSL runtime",
++  "162f05d14b4f2430": "Installing runtime",
++  "9cac8a8e72ee1257": "Starting server",
++  "d9e6d3b990911174": "Waiting for server to be ready",
++  "ec73af48187fd315": "Retry",
++  "676c1199c166e513": "Fix the cause, then use Restart in Settings > About to try again.",
+   "ca907740e0ed3853": "Reload window",
+   "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
+   "d25c50db08889926": "Restart T3 Code",
+diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
+index 2a4ccc655a..8eecdd7805 100644
+--- a/apps/web/src/i18n/translations/en.json
++++ b/apps/web/src/i18n/translations/en.json
+@@ -13145,6 +13145,15 @@
+   "4247054d89acc43b": "Restart",
+   "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
+   "5155d8a1517ce2a6": "Hard restart",
++  "df9e1c9b0a417643": "Running",
++  "e0008f279478b943": "runtime {runtime}",
++  "b5435aa5b470bafd": "WSL backend couldn't start",
++  "37f67c932a71d65b": "Checking the WSL runtime",
++  "162f05d14b4f2430": "Installing runtime",
++  "9cac8a8e72ee1257": "Starting server",
++  "d9e6d3b990911174": "Waiting for server to be ready",
++  "ec73af48187fd315": "Retry",
++  "676c1199c166e513": "Fix the cause, then use Restart in Settings > About to try again.",
+   "ca907740e0ed3853": "Reload window",
+   "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
+   "d25c50db08889926": "Restart T3 Code",
+diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
+index b30a386d3e..dcd362439f 100644
+--- a/apps/web/src/i18n/translations/es.json
++++ b/apps/web/src/i18n/translations/es.json
+@@ -13131,6 +13131,15 @@
+   "4247054d89acc43b": "Restart",
+   "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
+   "5155d8a1517ce2a6": "Hard restart",
++  "df9e1c9b0a417643": "Running",
++  "e0008f279478b943": "runtime {runtime}",
++  "b5435aa5b470bafd": "WSL backend couldn't start",
++  "37f67c932a71d65b": "Checking the WSL runtime",
++  "162f05d14b4f2430": "Installing runtime",
++  "9cac8a8e72ee1257": "Starting server",
++  "d9e6d3b990911174": "Waiting for server to be ready",
++  "ec73af48187fd315": "Retry",
++  "676c1199c166e513": "Fix the cause, then use Restart in Settings > About to try again.",
+   "ca907740e0ed3853": "Reload window",
+   "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
+   "d25c50db08889926": "Restart T3 Code",
+diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
+index 95b4072b9b..d3e27c5e8a 100644
+--- a/apps/web/src/i18n/translations/fr.json
++++ b/apps/web/src/i18n/translations/fr.json
+@@ -13136,6 +13136,15 @@
+   "4247054d89acc43b": "Restart",
+   "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
+   "5155d8a1517ce2a6": "Hard restart",
++  "df9e1c9b0a417643": "Running",
++  "e0008f279478b943": "runtime {runtime}",
++  "b5435aa5b470bafd": "WSL backend couldn't start",
++  "37f67c932a71d65b": "Checking the WSL runtime",
++  "162f05d14b4f2430": "Installing runtime",
++  "9cac8a8e72ee1257": "Starting server",
++  "d9e6d3b990911174": "Waiting for server to be ready",
++  "ec73af48187fd315": "Retry",
++  "676c1199c166e513": "Fix the cause, then use Restart in Settings > About to try again.",
+   "ca907740e0ed3853": "Reload window",
+   "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
+   "d25c50db08889926": "Restart T3 Code",
+diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
+index 5ca27cf309..60dee99358 100644
+--- a/apps/web/src/i18n/translations/ja.json
++++ b/apps/web/src/i18n/translations/ja.json
+@@ -13072,6 +13072,15 @@
+   "4247054d89acc43b": "Restart",
+   "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
+   "5155d8a1517ce2a6": "Hard restart",
++  "df9e1c9b0a417643": "Running",
++  "e0008f279478b943": "runtime {runtime}",
++  "b5435aa5b470bafd": "WSL backend couldn't start",
++  "37f67c932a71d65b": "Checking the WSL runtime",
++  "162f05d14b4f2430": "Installing runtime",
++  "9cac8a8e72ee1257": "Starting server",
++  "d9e6d3b990911174": "Waiting for server to be ready",
++  "ec73af48187fd315": "Retry",
++  "676c1199c166e513": "Fix the cause, then use Restart in Settings > About to try again.",
+   "ca907740e0ed3853": "Reload window",
+   "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
+   "d25c50db08889926": "Restart T3 Code",
+diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
+index 8d5d431c4e..37d0ff3e0c 100644
+--- a/apps/web/src/i18n/translations/ko.json
++++ b/apps/web/src/i18n/translations/ko.json
+@@ -13069,6 +13069,15 @@
+   "4247054d89acc43b": "Restart",
+   "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
+   "5155d8a1517ce2a6": "Hard restart",
++  "df9e1c9b0a417643": "Running",
++  "e0008f279478b943": "runtime {runtime}",
++  "b5435aa5b470bafd": "WSL backend couldn't start",
++  "37f67c932a71d65b": "Checking the WSL runtime",
++  "162f05d14b4f2430": "Installing runtime",
++  "9cac8a8e72ee1257": "Starting server",
++  "d9e6d3b990911174": "Waiting for server to be ready",
++  "ec73af48187fd315": "Retry",
++  "676c1199c166e513": "Fix the cause, then use Restart in Settings > About to try again.",
+   "ca907740e0ed3853": "Reload window",
+   "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
+   "d25c50db08889926": "Restart T3 Code",
+diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
+index 1d30b84fb7..8524eaedfa 100644
+--- a/apps/web/src/i18n/translations/pt-BR.json
++++ b/apps/web/src/i18n/translations/pt-BR.json
+@@ -13136,6 +13136,15 @@
+   "4247054d89acc43b": "Restart",
+   "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
+   "5155d8a1517ce2a6": "Hard restart",
++  "df9e1c9b0a417643": "Running",
++  "e0008f279478b943": "runtime {runtime}",
++  "b5435aa5b470bafd": "WSL backend couldn't start",
++  "37f67c932a71d65b": "Checking the WSL runtime",
++  "162f05d14b4f2430": "Installing runtime",
++  "9cac8a8e72ee1257": "Starting server",
++  "d9e6d3b990911174": "Waiting for server to be ready",
++  "ec73af48187fd315": "Retry",
++  "676c1199c166e513": "Fix the cause, then use Restart in Settings > About to try again.",
+   "ca907740e0ed3853": "Reload window",
+   "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
+   "d25c50db08889926": "Restart T3 Code",
+diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
+index 0726a83efb..e725e6aabc 100644
+--- a/apps/web/src/i18n/translations/ru.json
++++ b/apps/web/src/i18n/translations/ru.json
+@@ -13135,6 +13135,15 @@
+   "4247054d89acc43b": "Restart",
+   "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
+   "5155d8a1517ce2a6": "Hard restart",
++  "df9e1c9b0a417643": "Running",
++  "e0008f279478b943": "runtime {runtime}",
++  "b5435aa5b470bafd": "WSL backend couldn't start",
++  "37f67c932a71d65b": "Checking the WSL runtime",
++  "162f05d14b4f2430": "Installing runtime",
++  "9cac8a8e72ee1257": "Starting server",
++  "d9e6d3b990911174": "Waiting for server to be ready",
++  "ec73af48187fd315": "Retry",
++  "676c1199c166e513": "Fix the cause, then use Restart in Settings > About to try again.",
+   "ca907740e0ed3853": "Reload window",
+   "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
+   "d25c50db08889926": "Restart T3 Code",
+diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
+index 93b91b914d..066be24b74 100644
+--- a/apps/web/src/i18n/translations/sv.json
++++ b/apps/web/src/i18n/translations/sv.json
+@@ -13143,6 +13143,15 @@
+   "4247054d89acc43b": "Restart",
+   "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
+   "5155d8a1517ce2a6": "Hard restart",
++  "df9e1c9b0a417643": "Running",
++  "e0008f279478b943": "runtime {runtime}",
++  "b5435aa5b470bafd": "WSL backend couldn't start",
++  "37f67c932a71d65b": "Checking the WSL runtime",
++  "162f05d14b4f2430": "Installing runtime",
++  "9cac8a8e72ee1257": "Starting server",
++  "d9e6d3b990911174": "Waiting for server to be ready",
++  "ec73af48187fd315": "Retry",
++  "676c1199c166e513": "Fix the cause, then use Restart in Settings > About to try again.",
+   "ca907740e0ed3853": "Reload window",
+   "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
+   "d25c50db08889926": "Restart T3 Code",
+diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
+index 3809277c7e..244811cd99 100644
+--- a/apps/web/src/i18n/translations/zh.json
++++ b/apps/web/src/i18n/translations/zh.json
+@@ -13150,6 +13150,15 @@
+   "4247054d89acc43b": "Restart",
+   "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
+   "5155d8a1517ce2a6": "Hard restart",
++  "df9e1c9b0a417643": "Running",
++  "e0008f279478b943": "runtime {runtime}",
++  "b5435aa5b470bafd": "WSL backend couldn't start",
++  "37f67c932a71d65b": "Checking the WSL runtime",
++  "162f05d14b4f2430": "Installing runtime",
++  "9cac8a8e72ee1257": "Starting server",
++  "d9e6d3b990911174": "Waiting for server to be ready",
++  "ec73af48187fd315": "Retry",
++  "676c1199c166e513": "Fix the cause, then use Restart in Settings > About to try again.",
+   "ca907740e0ed3853": "Reload window",
+   "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
+   "d25c50db08889926": "Restart T3 Code",
+diff --git a/apps/web/src/state/desktopWslRuntimeStatus.ts b/apps/web/src/state/desktopWslRuntimeStatus.ts
+new file mode 100644
+index 0000000000..6ee542c597
+--- /dev/null
++++ b/apps/web/src/state/desktopWslRuntimeStatus.ts
+@@ -0,0 +1,67 @@
++import type { DesktopWslRuntimeStatus } from "@t3tools/contracts";
++import { useSyncExternalStore } from "react";
++
++// Fast while the runtime is coming up, slow once it settles.
++const TRANSIENT_POLL_MS = 1_000;
++const SETTLED_POLL_MS = 10_000;
++const TRANSIENT = new Set<DesktopWslRuntimeStatus["phase"]>([
++  "probing",
++  "installing",
++  "starting",
++  "waiting_ready",
++]);
++
++export interface DesktopWslRuntimeStatusReading {
++  readonly status: DesktopWslRuntimeStatus;
++  /** When this reading arrived; elapsed times count to it, so they advance with each poll. */
++  readonly readAt: number;
++}
++
++let snapshot: DesktopWslRuntimeStatusReading | null = null;
++let timer: ReturnType<typeof setTimeout> | null = null;
++const listeners = new Set<() => void>();
++
++const poll = () => {
++  timer = null;
++  const read =
++    typeof window === "undefined" ? undefined : window.desktopBridge?.getWslRuntimeStatus;
++  if (read === undefined || listeners.size === 0) return;
++  void read()
++    .then((next) => {
++      snapshot = { status: next, readAt: Date.now() };
++      for (const listener of listeners) listener();
++    })
++    .catch(() => {})
++    .finally(() => {
++      if (listeners.size > 0 && timer === null) {
++        const transient = snapshot !== null && TRANSIENT.has(snapshot.status.phase);
++        timer = setTimeout(poll, transient ? TRANSIENT_POLL_MS : SETTLED_POLL_MS);
++      }
++    });
++};
++
++function subscribe(listener: () => void) {
++  listeners.add(listener);
++  if (listeners.size === 1) poll();
++  return () => {
++    listeners.delete(listener);
++    if (listeners.size === 0 && timer !== null) {
++      clearTimeout(timer);
++      timer = null;
++    }
++  };
++}
++
++/** The desktop's WSL runtime status, polled only while something on screen reads it. */
++export function useDesktopWslRuntimeStatus(): DesktopWslRuntimeStatusReading | null {
++  return useSyncExternalStore(
++    subscribe,
++    () => snapshot,
++    () => null,
++  );
++}
++
++export function refreshDesktopWslRuntimeStatus(): void {
++  if (timer !== null) clearTimeout(timer);
++  poll();
++}
+diff --git a/packages/contracts/src/ipc.ts b/packages/contracts/src/ipc.ts
+index 460a287d1b..a0fce5ea26 100644
+--- a/packages/contracts/src/ipc.ts
++++ b/packages/contracts/src/ipc.ts
+@@ -588,6 +588,35 @@ export const DesktopWslStateSchema = Schema.Struct({
+   preflightError: Schema.NullOr(Schema.String),
+ });
+ 
++export const DesktopWslRuntimePhaseSchema = Schema.Literals([
++  "idle",
++  "probing",
++  "installing",
++  "starting",
++  "waiting_ready",
++  "ready",
++  "failed",
++  "disabled",
++]);
++export type DesktopWslRuntimePhase = typeof DesktopWslRuntimePhaseSchema.Type;
++
++/** How the WSL backend's runtime is coming up, for status lines while it installs and starts. */
++export const DesktopWslRuntimeStatusSchema = Schema.Struct({
++  phase: DesktopWslRuntimePhaseSchema,
++  // Epoch milliseconds when the current phase began.
++  phaseStartedAt: Schema.NullOr(Schema.Number),
++  // The pool id of the WSL backend, such as "wsl:Ubuntu".
++  instanceId: Schema.NullOr(Schema.String),
++  distro: Schema.NullOr(Schema.String),
++  runtimeDir: Schema.NullOr(Schema.String),
++  runtimeId: Schema.NullOr(Schema.String),
++  version: Schema.NullOr(Schema.String),
++  lastError: Schema.NullOr(Schema.String),
++  // Re-running the WSL reconcile retries a backend that stopped after a failed start.
++  canRetry: Schema.Boolean,
++});
++export type DesktopWslRuntimeStatus = typeof DesktopWslRuntimeStatusSchema.Type;
++
+ export type DesktopPreviewNavStatus =
+   | { kind: "Idle" }
+   | { kind: "Loading"; url: string; title: string }
+@@ -1198,6 +1227,7 @@ export interface DesktopBridge {
+   setWslBackendEnabled: (enabled: boolean) => Promise<DesktopWslState>;
+   setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
+   setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
++  getWslRuntimeStatus?: () => Promise<DesktopWslRuntimeStatus>;
+   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
+   /** Maps a Windows path to the one a local backend (`primary` or `wsl:…`) sees; null when it cannot. */
+   toLocalBackendPath: (backendId: string, windowsPath: string) => Promise<string | null>;

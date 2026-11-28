@@ -1,0 +1,577 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: acqxi <kacqxi@gmail.com>
+Date: Fri, 27 Nov 2026 01:27:43 +0800
+Subject: [PATCH 11/15] Customized build: title marker and check-only updates
+
+Window titles end with " (Customized)" and Settings > About shows
+"(Customized)" next to the version, so this build is never mistaken for
+a stock install. Titles only: productName, appId, AppUserModelId, the
+userData path and updates keep the stock names.
+
+With T3CODE_UPDATE_CHECK_ONLY set, as the customize launcher does, the
+desktop keeps checking the official update feed but refuses to download
+or install; T3CODE_DISABLE_AUTO_UPDATE no longer turns the check off.
+A found update shows in the sidebar, in the update button's tooltip and
+on the Settings version row: quit, update the official T3 Code, then run
+t3code-customize.
+---
+ apps/desktop/src/app/DesktopConfig.ts         |  1 +
+ .../src/updates/DesktopUpdates.test.ts        | 34 +++++++++++++++++++
+ apps/desktop/src/updates/DesktopUpdates.ts    | 16 +++++++--
+ apps/desktop/src/window/DesktopWindow.ts      | 11 ++++--
+ apps/web/src/appInit.tsx                      |  6 ++--
+ apps/web/src/branding.ts                      |  3 ++
+ .../components/desktopUpdate.logic.test.ts    | 17 ++++++++++
+ .../web/src/components/desktopUpdate.logic.ts | 17 ++++++++++
+ .../components/settings/AboutVersionTitle.tsx |  3 +-
+ .../components/settings/SettingsPanels.tsx    |  6 ++--
+ .../src/components/sidebar/SidebarChrome.tsx  |  7 +++-
+ .../components/sidebar/SidebarUpdatePill.tsx  | 21 +++++++++++-
+ apps/web/src/i18n/translations/de.json        |  1 +
+ apps/web/src/i18n/translations/en.json        |  1 +
+ apps/web/src/i18n/translations/es.json        |  1 +
+ apps/web/src/i18n/translations/fr.json        |  1 +
+ apps/web/src/i18n/translations/ja.json        |  1 +
+ apps/web/src/i18n/translations/ko.json        |  1 +
+ apps/web/src/i18n/translations/pt-BR.json     |  1 +
+ apps/web/src/i18n/translations/ru.json        |  1 +
+ apps/web/src/i18n/translations/sv.json        |  1 +
+ apps/web/src/i18n/translations/zh.json        |  1 +
+ packages/contracts/src/ipc.ts                 |  3 ++
+ 23 files changed, 141 insertions(+), 14 deletions(-)
+
+diff --git a/apps/desktop/src/app/DesktopConfig.ts b/apps/desktop/src/app/DesktopConfig.ts
+index ef2909045b..7b7baf57b2 100644
+--- a/apps/desktop/src/app/DesktopConfig.ts
++++ b/apps/desktop/src/app/DesktopConfig.ts
+@@ -58,6 +58,7 @@ export const DesktopConfig = Config.all({
+   desktopLauncherPath: trimmedString("T3CODE_DESKTOP_LAUNCHER_PATH"),
+   appImagePath: trimmedString("APPIMAGE"),
+   disableAutoUpdate: optionalBoolean("T3CODE_DISABLE_AUTO_UPDATE"),
++  updateCheckOnly: optionalBoolean("T3CODE_UPDATE_CHECK_ONLY"),
+   mockUpdates: optionalBoolean("T3CODE_DESKTOP_MOCK_UPDATES"),
+   mockUpdateServerPort: Config.Port("T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(
+     Config.withDefault(3000),
+diff --git a/apps/desktop/src/updates/DesktopUpdates.test.ts b/apps/desktop/src/updates/DesktopUpdates.test.ts
+index e72028b747..d22d1b0b29 100644
+--- a/apps/desktop/src/updates/DesktopUpdates.test.ts
++++ b/apps/desktop/src/updates/DesktopUpdates.test.ts
+@@ -139,6 +139,40 @@ describe("DesktopUpdates", () => {
+     ).pipe(Effect.provide(harness.layer));
+   });
+ 
++  it.effect("offers updates without downloading them when check-only", () => {
++    const harness = makeHarness({
++      env: { T3CODE_DISABLE_AUTO_UPDATE: "true", T3CODE_UPDATE_CHECK_ONLY: "true" },
++    });
++
++    return Effect.scoped(
++      Effect.gen(function* () {
++        const updates = yield* DesktopUpdates.DesktopUpdates;
++        const desktopState = yield* DesktopState.DesktopState;
++        yield* updates.configure;
++
++        const configured = yield* updates.getState;
++        assert.isTrue(configured.enabled);
++        assert.isTrue(configured.checkOnly);
++        assert.isFalse(yield* Ref.get(desktopState.canInstallUpdates));
++
++        const checked = yield* updates.check("poll");
++        assert.isTrue(checked.checked);
++        harness.emit("update-available", { version: "1.2.4" });
++        yield* flushCallbacks;
++        const offered = yield* updates.getState;
++        assert.equal(offered.status, "available");
++        assert.equal(offered.availableVersion, "1.2.4");
++        assert.isTrue(offered.checkOnly);
++
++        const download = yield* updates.download;
++        assert.isFalse(download.accepted);
++        const install = yield* updates.install;
++        assert.isFalse(install.accepted);
++        assert.equal((yield* updates.getState).status, "available");
++      }),
++    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
++  });
++
+   it.effect("re-checks an offered update without announcing it again", () => {
+     const harness = makeHarness();
+ 
+diff --git a/apps/desktop/src/updates/DesktopUpdates.ts b/apps/desktop/src/updates/DesktopUpdates.ts
+index b6a9aa0ac6..429bb61033 100644
+--- a/apps/desktop/src/updates/DesktopUpdates.ts
++++ b/apps/desktop/src/updates/DesktopUpdates.ts
+@@ -494,7 +494,8 @@ export const make = Effect.gen(function* () {
+         platform: environment.platform,
+         appImage: Option.getOrUndefined(config.appImagePath),
+         isDebPackage,
+-        disabledByEnv: config.disableAutoUpdate,
++        // A check-only build still checks; it refuses to download and install instead.
++        disabledByEnv: config.disableAutoUpdate && !config.updateCheckOnly,
+         hasUpdateFeedConfig: hasFeedConfig,
+       }),
+     );
+@@ -667,7 +668,11 @@ export const make = Effect.gen(function* () {
+       admitAfterCheck(
+         Effect.gen(function* () {
+           const state = yield* Ref.get(updateStateRef);
+-          if (!(yield* Ref.get(updaterConfiguredRef)) || state.status !== "available") {
++          if (
++            config.updateCheckOnly ||
++            !(yield* Ref.get(updaterConfiguredRef)) ||
++            state.status !== "available"
++          ) {
+             return "refused" as const;
+           }
+           const activeAction = yield* Ref.get(activeUpdateActionRef);
+@@ -838,6 +843,7 @@ export const make = Effect.gen(function* () {
+     Ref.get(notAppliedVersionRef).pipe(
+       Effect.map((notAppliedVersion) => ({
+         ...createBaseUpdateState(channel, disabledReason, environment),
++        ...(config.updateCheckOnly ? { checkOnly: true as const } : {}),
+         // Callers fall back to the channel's reason only when nothing else turns updates off.
+         ...(Option.isSome(disabledReason) &&
+         disabledReason.value === Option.getOrUndefined(channelBlockedReason(channel))
+@@ -908,6 +914,7 @@ export const make = Effect.gen(function* () {
+               state.downloadedVersion !== null &&
+               (expectedVersion === undefined || state.downloadedVersion === expectedVersion);
+             if (
++              config.updateCheckOnly ||
+               (yield* Ref.get(desktopState.quitting)) ||
+               !(yield* Ref.get(updaterConfiguredRef)) ||
+               !hasExpectedDownload
+@@ -1356,7 +1363,10 @@ export const make = Effect.gen(function* () {
+       const settings = yield* desktopSettings.get;
+       const disabledReason = yield* resolveDisabledReason;
+       // A blocked nightly channel still lets the user switch back to stable, so it stays updatable.
+-      yield* Ref.set(desktopState.canInstallUpdates, Option.isNone(disabledReason));
++      yield* Ref.set(
++        desktopState.canInstallUpdates,
++        Option.isNone(disabledReason) && !config.updateCheckOnly,
++      );
+       yield* setState(
+         yield* baseUpdateState(
+           settings.updateChannel,
+diff --git a/apps/desktop/src/window/DesktopWindow.ts b/apps/desktop/src/window/DesktopWindow.ts
+index 0b635528a3..5da901a284 100644
+--- a/apps/desktop/src/window/DesktopWindow.ts
++++ b/apps/desktop/src/window/DesktopWindow.ts
+@@ -236,6 +236,11 @@ function normalBoundsOnWindowDisplay(
+   };
+ }
+ 
++// Window titles only: the app name, app id and data paths stay stock.
++function customizedWindowTitle(displayName: string): string {
++  return `${displayName} (Customized)`;
++}
++
+ function readDisplayBoundsOrEmpty(): readonly DisplayBounds[] {
+   try {
+     return Electron.screen.getAllDisplays().map((display) => display.bounds);
+@@ -498,7 +503,7 @@ export const make = Effect.gen(function* () {
+       ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
+       backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
+       ...iconOption,
+-      title: environment.displayName,
++      title: customizedWindowTitle(environment.displayName),
+       ...getWindowTitleBarOptions(shouldUseDarkColors, environment.platform),
+       webPreferences: {
+         preload: environment.preloadPath,
+@@ -874,7 +879,7 @@ export const make = Effect.gen(function* () {
+     window.on("page-title-updated", (event, title) => {
+       if (title.trim() !== "") return;
+       event.preventDefault();
+-      window.setTitle(environment.displayName);
++      window.setTitle(customizedWindowTitle(environment.displayName));
+     });
+     window.on("resize", scheduleBoundsPersist);
+     window.on("move", scheduleBoundsPersist);
+@@ -1153,7 +1158,7 @@ export const make = Effect.gen(function* () {
+       show: false,
+       skipTaskbar: false,
+       backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
+-      title: environment.displayName,
++      title: customizedWindowTitle(environment.displayName),
+       webPreferences: {
+         contextIsolation: true,
+         nodeIntegration: false,
+diff --git a/apps/web/src/appInit.tsx b/apps/web/src/appInit.tsx
+index df7cd77df4..6715b9ea72 100644
+--- a/apps/web/src/appInit.tsx
++++ b/apps/web/src/appInit.tsx
+@@ -28,7 +28,7 @@ import { startDesktopUpdateLaunchNotice } from "./components/sidebar/updateEvery
+ import { startSlowRpcRequestToasts } from "./components/SlowRpcRequestToastCoordinator";
+ import { startThreadNotifications } from "./components/ThreadNotificationCoordinator";
+ import { startGuideRunNotifications } from "./components/pullRequest/guide/PullRequestGuideRunCoordinator";
+-import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL } from "./branding";
++import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL, CUSTOM_BUILD_LABEL } from "./branding";
+ import { resolveServerBackedAppDisplayName, resolveWindowTitle } from "./branding.logic";
+ import { isElectron } from "./env";
+ import {
+@@ -170,7 +170,7 @@ function startDocumentTitle(router: AppRouter): void {
+               scopeProjectRef(thread.environmentId, thread.projectId),
+             ),
+           );
+-    const title = resolveWindowTitle({
++    const title = `${resolveWindowTitle({
+       appDisplayName: resolveServerBackedAppDisplayName({
+         baseName: APP_BASE_NAME,
+         fallbackDisplayName: APP_DISPLAY_NAME,
+@@ -186,7 +186,7 @@ function startDocumentTitle(router: AppRouter): void {
+         },
+       }),
+       desktop: isElectron,
+-    });
++    })} (${CUSTOM_BUILD_LABEL})`;
+     // Projects change whenever any project does; most changes leave the title alone.
+     if (document.title !== title) document.title = title;
+   };
+diff --git a/apps/web/src/branding.ts b/apps/web/src/branding.ts
+index bf5b76f0dd..0e767494a6 100644
+--- a/apps/web/src/branding.ts
++++ b/apps/web/src/branding.ts
+@@ -30,6 +30,9 @@ export const APP_DISPLAY_NAME =
+   injectedDesktopAppBranding?.displayName ??
+   formatAppDisplayName({ baseName: APP_BASE_NAME, stageLabel: APP_STAGE_LABEL });
+ export const APP_VERSION = import.meta.env.APP_VERSION || "0.0.0";
++// Marks this patched build, so it is never mistaken for a stock install. Identity only: data
++// paths, app ids and updates still use the stock names.
++export const CUSTOM_BUILD_LABEL = "Customized";
+ export const DESKTOP_DOWNLOAD_URL = "https://t3.codes/download";
+ // Redirects to the App Store or Google Play to match the phone that opens it.
+ export const MOBILE_APP_URL = "https://t3.codes/mobile";
+diff --git a/apps/web/src/components/desktopUpdate.logic.test.ts b/apps/web/src/components/desktopUpdate.logic.test.ts
+index 601527e51a..dd44f007e8 100644
+--- a/apps/web/src/components/desktopUpdate.logic.test.ts
++++ b/apps/web/src/components/desktopUpdate.logic.test.ts
+@@ -3,6 +3,7 @@ import type { DesktopUpdateState } from "@t3tools/contracts";
+ 
+ import {
+   canCheckForUpdate,
++  getCheckOnlyUpdateNotice,
+   getDesktopUpdateButtonTooltip,
+   getDesktopUpdateReleaseHistoryUrl,
+   getDesktopUpdateActionError,
+@@ -149,6 +150,22 @@ describe("desktop update button state", () => {
+     };
+     expect(resolveDesktopUpdateButtonAction(state)).toBe("none");
+   });
++
++  it("points a check-only build to the official app instead of downloading", () => {
++    const state: DesktopUpdateState = {
++      ...baseState,
++      status: "available",
++      availableVersion: "1.2.0",
++      checkOnly: true,
++    };
++    expect(resolveDesktopUpdateButtonAction(state)).toBe("none");
++    expect(getCheckOnlyUpdateNotice(state)).toContain("1.2.0");
++    expect(getDesktopUpdateButtonTooltip(state)).toBe(getCheckOnlyUpdateNotice(state));
++    expect(
++      getCheckOnlyUpdateNotice({ ...baseState, status: "available", availableVersion: "1.2.0" }),
++    ).toBeNull();
++    expect(getCheckOnlyUpdateNotice({ ...state, availableVersion: null })).toBeNull();
++  });
+ });
+ 
+ describe("desktop update UI helpers", () => {
+diff --git a/apps/web/src/components/desktopUpdate.logic.ts b/apps/web/src/components/desktopUpdate.logic.ts
+index 4922ee3b52..5951ad076a 100644
+--- a/apps/web/src/components/desktopUpdate.logic.ts
++++ b/apps/web/src/components/desktopUpdate.logic.ts
+@@ -54,6 +54,7 @@ export function getDesktopUpdateReleaseHistoryUrl(
+ export function resolveDesktopUpdateButtonAction(
+   state: DesktopUpdateState,
+ ): DesktopUpdateButtonAction {
++  if (state.checkOnly) return "none";
+   if (
+     state.downloadedVersion &&
+     (state.status === "downloaded" ||
+@@ -73,6 +74,20 @@ export function resolveDesktopUpdateButtonAction(
+   return "none";
+ }
+ 
++/** A check-only build points to the official app, which installs the update, and a rebuild. */
++export function getCheckOnlyUpdateNotice(
++  state: DesktopUpdateState | null,
++  resolve: MessageResolver = m,
++): string | null {
++  if (!state?.checkOnly || state.availableVersion === null) return null;
++  return resolve(
++    msg(
++      "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
++      { version: state.availableVersion },
++    ),
++  );
++}
++
+ export function shouldShowArm64IntelBuildWarning(state: DesktopUpdateState | null): boolean {
+   return state?.hostArch === "arm64" && state.appArch === "x64";
+ }
+@@ -115,6 +130,8 @@ export function getDesktopUpdateButtonTooltip(
+   state: DesktopUpdateState,
+   resolve: MessageResolver = m,
+ ): string {
++  const checkOnlyNotice = getCheckOnlyUpdateNotice(state, resolve);
++  if (checkOnlyNotice !== null) return checkOnlyNotice;
+   if (
+     state.notAppliedVersion !== undefined &&
+     (state.status === "available" || state.status === "downloaded") &&
+diff --git a/apps/web/src/components/settings/AboutVersionTitle.tsx b/apps/web/src/components/settings/AboutVersionTitle.tsx
+index 5026d19321..cec2c05a04 100644
+--- a/apps/web/src/components/settings/AboutVersionTitle.tsx
++++ b/apps/web/src/components/settings/AboutVersionTitle.tsx
+@@ -1,6 +1,6 @@
+ import { msg, T, useGT } from "gt-react";
+ 
+-import { APP_VERSION } from "../../branding";
++import { APP_VERSION, CUSTOM_BUILD_LABEL } from "../../branding";
+ import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+ import { InlineButton } from "../ui/button";
+ import { stackedThreadToast, toastManager } from "../ui/toast";
+@@ -48,6 +48,7 @@ export function AboutVersionTitle() {
+           }
+         />
+       </code>
++      <span className="text-2xs font-medium text-muted-foreground">({CUSTOM_BUILD_LABEL})</span>
+     </span>
+   );
+ }
+diff --git a/apps/web/src/components/settings/SettingsPanels.tsx b/apps/web/src/components/settings/SettingsPanels.tsx
+index a7c7ca2822..b98b21f590 100644
+--- a/apps/web/src/components/settings/SettingsPanels.tsx
++++ b/apps/web/src/components/settings/SettingsPanels.tsx
+@@ -42,6 +42,7 @@ import { CliCommandSettingsRow } from "./CliCommandSettingsRow";
+ import { MobileAppSettingsRow } from "./MobileAppSettingsRow";
+ import {
+   canCheckForUpdate,
++  getCheckOnlyUpdateNotice,
+   getDesktopUpdateActionError,
+   getDesktopUpdateButtonTooltip,
+   getDesktopUpdateDisabledReason,
+@@ -334,10 +335,11 @@ function AboutVersionSection() {
+   const buttonLabel =
+     actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? gt("Check for Updates");
+   const description =
+-    action === "download" || action === "install"
++    getCheckOnlyUpdateNotice(updateState, messages) ??
++    (action === "download" || action === "install"
+       ? gt("Update available.")
+       : (getDesktopUpdateDisabledReason(updateState, updatesDenial, messages) ??
+-        gt("Current version of the application."));
++        gt("Current version of the application.")));
+ 
+   return (
+     <>
+diff --git a/apps/web/src/components/sidebar/SidebarChrome.tsx b/apps/web/src/components/sidebar/SidebarChrome.tsx
+index 637921f1f9..49c73c988a 100644
+--- a/apps/web/src/components/sidebar/SidebarChrome.tsx
++++ b/apps/web/src/components/sidebar/SidebarChrome.tsx
+@@ -38,7 +38,11 @@ import { IssueGlyph } from "../issue/issuePresentation";
+ import { isSidebarUtilityPage, useNavigateToMainApp } from "./mainAppLocation";
+ import { SidebarThreadUndoNotice } from "./SidebarThreadUndoNotice";
+ import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
+-import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUpdatePill";
++import {
++  SidebarCheckOnlyUpdateNotice,
++  SidebarUpdateArchitectureWarning,
++  SidebarUpdatePill,
++} from "./SidebarUpdatePill";
+ import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
+ import { observeResize } from "~/lib/observeResize";
+ import { SharedTooltipTrigger } from "../ui/shared-tooltip";
+@@ -317,6 +321,7 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
+     <SidebarFooter>
+       <SidebarProviderUpdatePill />
+       <SidebarUpdateArchitectureWarning />
++      <SidebarCheckOnlyUpdateNotice />
+       <SidebarUtilityMenu />
+     </SidebarFooter>
+   );
+diff --git a/apps/web/src/components/sidebar/SidebarUpdatePill.tsx b/apps/web/src/components/sidebar/SidebarUpdatePill.tsx
+index 396db469d3..7ce1e704a4 100644
+--- a/apps/web/src/components/sidebar/SidebarUpdatePill.tsx
++++ b/apps/web/src/components/sidebar/SidebarUpdatePill.tsx
+@@ -1,7 +1,7 @@
+ import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
+ import { managedUpdatesDenial } from "@t3tools/client-runtime/contract-labels";
+ import { type DesktopBridge, type DesktopUpdateState } from "@t3tools/contracts";
+-import { TriangleAlertIcon } from "lucide-react";
++import { CircleArrowUpIcon, TriangleAlertIcon } from "lucide-react";
+ import { msg, T, useGT, useMessages } from "gt-react";
+ import { type ComponentProps, useId, useRef, useState } from "react";
+ import { flushSync } from "react-dom";
+@@ -17,6 +17,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
+ import {
+   canCheckForUpdate,
+   getArm64IntelBuildWarningDescription,
++  getCheckOnlyUpdateNotice,
+   getDesktopUpdateActionError,
+   getDesktopUpdateButtonTooltip,
+   getDesktopUpdateDownloadedVersion,
+@@ -117,6 +118,24 @@ function resolveSidebarUpdatePresentation({
+   } as const;
+ }
+ 
++export function SidebarCheckOnlyUpdateNotice() {
++  return isElectron ? <SidebarCheckOnlyUpdateNoticeContent /> : null;
++}
++
++function SidebarCheckOnlyUpdateNoticeContent() {
++  const state = useDesktopUpdateState();
++  const messages = useMessages();
++  const notice = getCheckOnlyUpdateNotice(state, messages);
++  if (notice === null) return null;
++
++  return (
++    <Alert variant="sidebar">
++      <CircleArrowUpIcon />
++      <AlertDescription>{notice}</AlertDescription>
++    </Alert>
++  );
++}
++
+ export function SidebarUpdateArchitectureWarning() {
+   return isElectron ? <SidebarUpdateArchitectureWarningContent /> : null;
+ }
+diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
+index 3149378aea..73074c96cd 100644
+--- a/apps/web/src/i18n/translations/de.json
++++ b/apps/web/src/i18n/translations/de.json
+@@ -13127,6 +13127,7 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
+diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
+index c3b00b52da..2d6c3472c2 100644
+--- a/apps/web/src/i18n/translations/en.json
++++ b/apps/web/src/i18n/translations/en.json
+@@ -13136,6 +13136,7 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
+diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
+index 8e05aaba0d..5f349c3bfa 100644
+--- a/apps/web/src/i18n/translations/es.json
++++ b/apps/web/src/i18n/translations/es.json
+@@ -13122,6 +13122,7 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
+diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
+index 989c0ebef6..6db84dc9b7 100644
+--- a/apps/web/src/i18n/translations/fr.json
++++ b/apps/web/src/i18n/translations/fr.json
+@@ -13127,6 +13127,7 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
+diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
+index dd6f4e0bf3..8f6fa5c39c 100644
+--- a/apps/web/src/i18n/translations/ja.json
++++ b/apps/web/src/i18n/translations/ja.json
+@@ -13063,6 +13063,7 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
+diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
+index 5c792a4aaa..2f1f4c74dd 100644
+--- a/apps/web/src/i18n/translations/ko.json
++++ b/apps/web/src/i18n/translations/ko.json
+@@ -13060,6 +13060,7 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
+diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
+index 39e2457d0d..a2a022656a 100644
+--- a/apps/web/src/i18n/translations/pt-BR.json
++++ b/apps/web/src/i18n/translations/pt-BR.json
+@@ -13127,6 +13127,7 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
+diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
+index 01328dcd3d..0bb6c96dc4 100644
+--- a/apps/web/src/i18n/translations/ru.json
++++ b/apps/web/src/i18n/translations/ru.json
+@@ -13126,6 +13126,7 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
+diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
+index 42dd21d78f..3c3991ba8f 100644
+--- a/apps/web/src/i18n/translations/sv.json
++++ b/apps/web/src/i18n/translations/sv.json
+@@ -13134,6 +13134,7 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
+diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
+index 136e0580f1..eb41d745e9 100644
+--- a/apps/web/src/i18n/translations/zh.json
++++ b/apps/web/src/i18n/translations/zh.json
+@@ -13141,6 +13141,7 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+   "8cead9d99b4ccd05": "The share of each limit left, or the share used.",
+diff --git a/packages/contracts/src/ipc.ts b/packages/contracts/src/ipc.ts
+index adbb28bbf1..f47b9a49e8 100644
+--- a/packages/contracts/src/ipc.ts
++++ b/packages/contracts/src/ipc.ts
+@@ -299,6 +299,8 @@ export interface DesktopUpdateState {
+   channelBlockedByPolicy?: true;
+   /** The check failed only because this build's track differs from the saved `channel`. */
+   trackMismatch?: { readonly buildChannel: DesktopUpdateChannel };
++  /** This build only checks; the official app installs the update and the customized build is rebuilt. */
++  checkOnly?: true;
+ }
+ 
+ export interface DesktopUpdateReleaseNote {
+@@ -344,6 +346,7 @@ export const DesktopUpdateStateSchema = Schema.Struct({
+   notAppliedVersion: Schema.optionalKey(Schema.String),
+   channelBlockedByPolicy: Schema.optionalKey(Schema.Literal(true)),
+   trackMismatch: Schema.optionalKey(Schema.Struct({ buildChannel: DesktopUpdateChannelSchema })),
++  checkOnly: Schema.optionalKey(Schema.Literal(true)),
+ });
+ 
+ export const DesktopCliCommandStateSchema = Schema.Struct({

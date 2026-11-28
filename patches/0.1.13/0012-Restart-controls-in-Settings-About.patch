@@ -1,0 +1,929 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: acqxi <kacqxi@gmail.com>
+Date: Fri, 27 Nov 2026 01:27:43 +0800
+Subject: [PATCH 12/15] Restart controls in Settings > About
+
+Settings > About gets a Restart group:
+- Reload window reloads only the renderer; backends and turns go on.
+- Restart T3 Code stops every backend the normal way and relaunches.
+- Hard restart gives backends 3 s, then kills each one's process tree
+  (taskkill /T /F on Windows, SIGKILL elsewhere) and, for a WSL backend
+  on a staged runtime, every process in the distro running from that
+  exact runtime directory with its descendants (wsl.exe -e sh -c with
+  the directory as a positional argument, 5 s timeout, best effort),
+  then relaunches.
+Both restarts ask first. A plain browser shows only Reload window.
+
+On Windows, when T3CODE_CUSTOMIZE_RELAUNCH names an existing launch.ps1,
+a relaunch starts that launcher (hidden, -WaitPid <main pid>) and quits
+instead of calling app.relaunch, so a rebuilt build opens next time.
+---
+ apps/desktop/src/app/DesktopLifecycle.ts      |  34 ++++-
+ apps/desktop/src/app/DesktopRestart.test.ts   |  99 ++++++++++++
+ apps/desktop/src/app/DesktopRestart.ts        | 142 ++++++++++++++++++
+ .../backend/DesktopBackendConfiguration.ts    |   3 +
+ .../src/backend/DesktopBackendManager.ts      |   2 +
+ apps/desktop/src/ipc/DesktopIpcHandlers.ts    |   2 +
+ apps/desktop/src/ipc/channels.ts              |   1 +
+ apps/desktop/src/ipc/methods/restart.ts       |  66 ++++++++
+ apps/desktop/src/preload.ts                   |   1 +
+ .../components/settings/RestartSettings.tsx   |  62 ++++++++
+ .../components/settings/SettingsPanels.tsx    |   3 +
+ .../src/components/settings/settingsSearch.ts |  20 +++
+ apps/web/src/i18n/translations/de.json        |  15 ++
+ apps/web/src/i18n/translations/en.json        |  15 ++
+ apps/web/src/i18n/translations/es.json        |  15 ++
+ apps/web/src/i18n/translations/fr.json        |  15 ++
+ apps/web/src/i18n/translations/ja.json        |  15 ++
+ apps/web/src/i18n/translations/ko.json        |  15 ++
+ apps/web/src/i18n/translations/pt-BR.json     |  15 ++
+ apps/web/src/i18n/translations/ru.json        |  15 ++
+ apps/web/src/i18n/translations/sv.json        |  15 ++
+ apps/web/src/i18n/translations/zh.json        |  15 ++
+ packages/contracts/src/ipc.ts                 |   2 +
+ 23 files changed, 585 insertions(+), 2 deletions(-)
+ create mode 100644 apps/desktop/src/app/DesktopRestart.test.ts
+ create mode 100644 apps/desktop/src/app/DesktopRestart.ts
+ create mode 100644 apps/desktop/src/ipc/methods/restart.ts
+ create mode 100644 apps/web/src/components/settings/RestartSettings.tsx
+
+diff --git a/apps/desktop/src/app/DesktopLifecycle.ts b/apps/desktop/src/app/DesktopLifecycle.ts
+index 9568e72dde..110254d41a 100644
+--- a/apps/desktop/src/app/DesktopLifecycle.ts
++++ b/apps/desktop/src/app/DesktopLifecycle.ts
+@@ -13,6 +13,7 @@ import type * as Electron from "electron";
+ import * as HostProcess from "@t3tools/shared/HostProcess";
+ 
+ import * as DesktopEnvironment from "./DesktopEnvironment.ts";
++import { currentRelaunchCommand } from "./DesktopRestart.ts";
+ import { stopChildProcessesBeforeExit, stopZygotesBeforeExit } from "./DesktopExitChildren.ts";
+ import { makeComponentLogger } from "./DesktopObservability.ts";
+ import * as DesktopShutdown from "./DesktopShutdown.ts";
+@@ -47,6 +48,11 @@ type DesktopLifecycleRegistrationServices =
+   | DesktopLifecycleRuntimeServices
+   | ElectronWindow.ElectronWindow;
+ 
++export interface RelaunchOptions {
++  /** Runs when backends have not stopped within the grace, then shutdown finishes. */
++  readonly forceStop?: { readonly after: Duration.Duration; readonly run: Effect.Effect<void> };
++}
++
+ /**
+  * @effect-expect-leaking DesktopEnvironment | DesktopShutdown | DesktopState | DesktopWindow | ElectronApp | ElectronTheme | ElectronWindow
+  */
+@@ -55,6 +61,7 @@ export class DesktopLifecycle extends Context.Service<
+   {
+     readonly relaunch: (
+       reason: string,
++      options?: RelaunchOptions,
+     ) => Effect.Effect<void, never, DesktopLifecycleRuntimeServices>;
+     readonly register: Effect.Effect<
+       void,
+@@ -218,7 +225,7 @@ function quitFromSignal(
+ 
+ /** @public */
+ export const make = DesktopLifecycle.of({
+-  relaunch: Effect.fn("desktop.lifecycle.relaunch")(function* (reason) {
++  relaunch: Effect.fn("desktop.lifecycle.relaunch")(function* (reason, options) {
+     const electronApp = yield* ElectronApp.ElectronApp;
+     const environment = yield* DesktopEnvironment.DesktopEnvironment;
+     const state = yield* DesktopState.DesktopState;
+@@ -226,11 +233,34 @@ export const make = DesktopLifecycle.of({
+     yield* Effect.gen(function* () {
+       yield* Effect.yieldNow;
+       yield* Ref.set(state.quitting, true);
+-      yield* requestDesktopShutdownAndWait();
++      const forceStop = options?.forceStop;
++      if (forceStop === undefined) {
++        yield* requestDesktopShutdownAndWait();
++      } else {
++        const shutdown = yield* DesktopShutdown.DesktopShutdown;
++        const desktopWindow = yield* DesktopWindow.DesktopWindow;
++        yield* desktopWindow.flushMainWindowBounds;
++        yield* shutdown.request;
++        const stopped = yield* shutdown.awaitComplete.pipe(Effect.timeoutOption(forceStop.after));
++        if (Option.isNone(stopped)) {
++          yield* logLifecycleInfo("backends still running; force-stopping them", { reason });
++          yield* forceStop.run;
++          yield* shutdown.awaitComplete.pipe(Effect.timeoutOption(SHUTDOWN_STALL_THRESHOLD));
++        }
++      }
+       if (environment.isDevelopment) {
+         yield* electronApp.exit(75);
+         return;
+       }
++      const launcher = yield* Effect.sync(() => currentRelaunchCommand(environment.platform));
++      if (launcher.kind === "launcher") {
++        // The customization launcher waits for this process, then opens the current build.
++        yield* logLifecycleInfo("relaunching through the customization launcher", { reason });
++        // Electron's own relauncher outlives this process; a child spawned here does not.
++        yield* electronApp.relaunch({ execPath: launcher.command, args: [...launcher.args] });
++        yield* electronApp.exit(0);
++        return;
++      }
+       // Startup already acted on the app link that launched it; passing it on replays it.
+       const appLinkPrefix = `${ElectronProtocol.getDesktopScheme(environment.isDevelopment)}:`;
+       const args = yield* HostProcess.Arguments;
+diff --git a/apps/desktop/src/app/DesktopRestart.test.ts b/apps/desktop/src/app/DesktopRestart.test.ts
+new file mode 100644
+index 0000000000..79c7924fae
+--- /dev/null
++++ b/apps/desktop/src/app/DesktopRestart.test.ts
+@@ -0,0 +1,99 @@
++import { assert, describe, it } from "@effect/vitest";
++
++import {
++  buildWslRuntimeKillCommand,
++  CUSTOMIZE_RELAUNCH_ENV,
++  resolveRelaunchCommand,
++  WSL_RUNTIME_KILL_SCRIPT,
++} from "./DesktopRestart.ts";
++
++const script = "C:\\Users\\me\\t3code-customize\\launch.ps1";
++const resolve = (overrides: Partial<Parameters<typeof resolveRelaunchCommand>[0]> = {}) =>
++  resolveRelaunchCommand({
++    platform: "win32",
++    env: { [CUSTOMIZE_RELAUNCH_ENV]: script },
++    pid: 4242,
++    fileExists: (path) => path === script,
++    ...overrides,
++  });
++
++describe("resolveRelaunchCommand", () => {
++  it("relaunches through the customization launcher, which waits for this process", () => {
++    assert.deepStrictEqual(resolve(), {
++      kind: "launcher",
++      command: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
++      args: [
++        "-NoProfile",
++        "-NonInteractive",
++        "-WindowStyle",
++        "Hidden",
++        "-ExecutionPolicy",
++        "Bypass",
++        "-File",
++        script,
++        "-WaitPid",
++        "4242",
++      ],
++    });
++  });
++
++  it("uses an absolute PowerShell path under SystemRoot, since Electron starts it directly", () => {
++    const launcher = resolve({ env: { [CUSTOMIZE_RELAUNCH_ENV]: script, SystemRoot: "D:\\Win" } });
++    assert.strictEqual(
++      launcher.kind === "launcher" ? launcher.command : undefined,
++      "D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
++    );
++  });
++
++  it("falls back to Electron's relaunch without the launcher variable", () => {
++    assert.deepStrictEqual(resolve({ env: {} }), { kind: "electron" });
++    assert.deepStrictEqual(resolve({ env: { [CUSTOMIZE_RELAUNCH_ENV]: "  " } }), {
++      kind: "electron",
++    });
++  });
++
++  it("falls back off Windows", () => {
++    assert.deepStrictEqual(resolve({ platform: "linux" }), { kind: "electron" });
++    assert.deepStrictEqual(resolve({ platform: "darwin" }), { kind: "electron" });
++  });
++
++  it("falls back when the launcher script is missing", () => {
++    assert.deepStrictEqual(resolve({ fileExists: () => false }), { kind: "electron" });
++  });
++});
++
++describe("buildWslRuntimeKillCommand", () => {
++  const runtimeDir = "/home/me/.t3/wsl-runtime/sha256-0123abcd";
++
++  it("passes the runtime directory as a positional argument, never inside the script", () => {
++    const command = buildWslRuntimeKillCommand({
++      runningDistro: "Ubuntu",
++      wslRuntimeDir: runtimeDir,
++    });
++    assert.deepStrictEqual(command, {
++      command: "wsl.exe",
++      args: ["-d", "Ubuntu", "-e", "sh", "-c", WSL_RUNTIME_KILL_SCRIPT, "sh", runtimeDir],
++    });
++    assert.isFalse(WSL_RUNTIME_KILL_SCRIPT.includes("sha256-"));
++    assert.isTrue(WSL_RUNTIME_KILL_SCRIPT.includes('"$dir"/*'));
++  });
++
++  it("keeps an odd path as one argument", () => {
++    const odd = "/home/me/it's $(here)/sha256-1";
++    assert.strictEqual(
++      buildWslRuntimeKillCommand({ runningDistro: "Ubuntu", wslRuntimeDir: odd })?.args.at(-1),
++      odd,
++    );
++  });
++
++  it("skips backends that are not WSL or whose runtime is unknown", () => {
++    assert.isNull(buildWslRuntimeKillCommand({}));
++    assert.isNull(buildWslRuntimeKillCommand({ wslRuntimeDir: runtimeDir }));
++    assert.isNull(buildWslRuntimeKillCommand({ runningDistro: " ", wslRuntimeDir: runtimeDir }));
++    assert.isNull(buildWslRuntimeKillCommand({ runningDistro: "Ubuntu" }));
++    assert.isNull(
++      buildWslRuntimeKillCommand({ runningDistro: "Ubuntu", wslRuntimeDir: "relative" }),
++    );
++    assert.isNull(buildWslRuntimeKillCommand({ runningDistro: "Ubuntu", wslRuntimeDir: "/" }));
++  });
++});
+diff --git a/apps/desktop/src/app/DesktopRestart.ts b/apps/desktop/src/app/DesktopRestart.ts
+new file mode 100644
+index 0000000000..74b5b4b7c1
+--- /dev/null
++++ b/apps/desktop/src/app/DesktopRestart.ts
+@@ -0,0 +1,142 @@
++// @effect-diagnostics nodeBuiltinImport:off - Detached launcher spawn and synchronous tree kills on the way out.
++import * as NodeChildProcess from "node:child_process";
++import * as NodeFS from "node:fs";
++
++/** Set by the customization launcher to its `launch.ps1`, which opens whichever build is current. */
++export const CUSTOMIZE_RELAUNCH_ENV = "T3CODE_CUSTOMIZE_RELAUNCH";
++
++export type RelaunchCommand =
++  | { readonly kind: "electron" }
++  | { readonly kind: "launcher"; readonly command: string; readonly args: ReadonlyArray<string> };
++
++/** Electron's relaunch reuses this build's executable; the launcher picks up a rebuilt one. */
++export function resolveRelaunchCommand(input: {
++  readonly platform: NodeJS.Platform;
++  readonly env: Readonly<Record<string, string | undefined>>;
++  readonly pid: number;
++  readonly fileExists: (path: string) => boolean;
++}): RelaunchCommand {
++  const script = input.env[CUSTOMIZE_RELAUNCH_ENV]?.trim();
++  if (input.platform !== "win32" || !script || !input.fileExists(script)) {
++    return { kind: "electron" };
++  }
++  // Electron's relauncher starts this path directly, so it must be absolute.
++  const systemRoot = input.env.SystemRoot?.trim() || input.env.SYSTEMROOT?.trim() || "C:\\Windows";
++  return {
++    kind: "launcher",
++    command: `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
++    args: [
++      "-NoProfile",
++      "-NonInteractive",
++      "-WindowStyle",
++      "Hidden",
++      "-ExecutionPolicy",
++      "Bypass",
++      "-File",
++      script,
++      "-WaitPid",
++      String(input.pid),
++    ],
++  };
++}
++
++export const currentRelaunchCommand = (platform: NodeJS.Platform): RelaunchCommand =>
++  resolveRelaunchCommand({
++    platform,
++    env: process.env,
++    pid: process.pid,
++    fileExists: (path) => NodeFS.existsSync(path),
++  });
++
++const isAlive = (pid: number): boolean => {
++  try {
++    process.kill(pid, 0);
++    return true;
++  } catch (error) {
++    return error instanceof Error && "code" in error && error.code === "EPERM";
++  }
++};
++
++/**
++ * Kills backend processes that are still running, with their children on Windows (taskkill /T
++ * walks the tree of a live root, so it must run before the root exits). For the WSL backend the
++ * root is wsl.exe; the server inside the distro stops itself once its launcher is gone.
++ */
++export function forceStopProcessTrees(
++  pids: ReadonlyArray<number>,
++  platform: NodeJS.Platform,
++): ReadonlyArray<number> {
++  const killed = pids.filter((pid) => Number.isInteger(pid) && pid > 0 && isAlive(pid));
++  for (const pid of killed) {
++    if (platform === "win32") {
++      NodeChildProcess.spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
++        windowsHide: true,
++        stdio: "ignore",
++        timeout: 5_000,
++      });
++    } else {
++      try {
++        process.kill(pid, "SIGKILL");
++      } catch {}
++    }
++  }
++  return killed;
++}
++
++/**
++ * Runs in the distro with the runtime directory as $1: SIGKILLs every process whose executable (or
++ * argv[0]) lies inside that directory, descendants first. The directory is per runtime archive
++ * hash, so a stock install's runtime never matches.
++ */
++export const WSL_RUNTIME_KILL_SCRIPT = [
++  'dir="${1%/}"',
++  'case "$dir" in /?*) ;; *) exit 0 ;; esac',
++  '[ -d "$dir" ] || exit 0',
++  "children() {",
++  "  for stat in /proc/[0-9]*/stat; do",
++  '    line=$(cat "$stat" 2>/dev/null) || continue',
++  "    set -- ${line##*) }",
++  '    [ "$2" = "$target" ] && { p=${stat#/proc/}; printf "%s\\n" "${p%/stat}"; }',
++  "  done",
++  "}",
++  "kill_tree() {",
++  '  for child in $(target=$1; children); do kill_tree "$child"; done',
++  '  kill -9 "$1" 2>/dev/null',
++  "}",
++  "for proc in /proc/[0-9]*; do",
++  "  pid=${proc#/proc/}",
++  '  [ "$pid" = "$$" ] && continue',
++  '  exe=$(readlink "$proc/exe" 2>/dev/null) ||',
++  "    exe=$(tr '\\0' '\\n' 2>/dev/null < \"$proc/cmdline\" | head -n 1)",
++  '  case "$exe" in "$dir"/*) kill_tree "$pid" ;; esac',
++  "done",
++].join("\n");
++
++/** The in-distro kill for a WSL backend, or null when it is not one or its runtime is unknown. */
++export function buildWslRuntimeKillCommand(config: {
++  readonly runningDistro?: string | undefined;
++  readonly wslRuntimeDir?: string | undefined;
++}): { readonly command: string; readonly args: ReadonlyArray<string> } | null {
++  const distro = config.runningDistro?.trim();
++  const runtimeDir = config.wslRuntimeDir;
++  if (!distro || runtimeDir === undefined || !runtimeDir.startsWith("/") || runtimeDir === "/") {
++    return null;
++  }
++  // The path travels as a positional argument; it is never spliced into the script.
++  return {
++    command: "wsl.exe",
++    args: ["-d", distro, "-e", "sh", "-c", WSL_RUNTIME_KILL_SCRIPT, "sh", runtimeDir],
++  };
++}
++
++/** Best effort: a stuck distro must not hold the restart. */
++export function runWslRuntimeKill(command: {
++  readonly command: string;
++  readonly args: ReadonlyArray<string>;
++}): void {
++  NodeChildProcess.spawnSync(command.command, [...command.args], {
++    windowsHide: true,
++    stdio: "ignore",
++    timeout: 5_000,
++  });
++}
+diff --git a/apps/desktop/src/backend/DesktopBackendConfiguration.ts b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+index 5c9ea2f78c..941b9fd60f 100644
+--- a/apps/desktop/src/backend/DesktopBackendConfiguration.ts
++++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
+@@ -301,6 +301,7 @@ interface WslPreflightSuccess {
+   readonly resolvedPath: string;
+   readonly t3Home: string | null;
+   readonly runtimeId?: string;
++  readonly runtimeDir?: string;
+ }
+ 
+ interface WslPreflightFailure {
+@@ -447,6 +448,7 @@ const runWslPreflight = Effect.fn("desktop.backendConfiguration.wslPreflight")(f
+           resolvedPath: stagedProbe.resolvedPath,
+           t3Home: stagedProbe.t3Home,
+           runtimeId: input.runtimeArchive.runtimeId,
++          runtimeDir: runtime.linuxAppRoot,
+         } as const;
+       }
+       stagedFailure = { reason: runtime.reason };
+@@ -774,6 +776,7 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
+     ...(preflight.runtimeId === undefined
+       ? {}
+       : { wslRuntimeId: preflight.runtimeId, wslT3Home: preflight.t3Home }),
++    ...(preflight.runtimeDir === undefined ? {} : { wslRuntimeDir: preflight.runtimeDir }),
+   } satisfies DesktopBackendManager.DesktopBackendStartConfig;
+ });
+ 
+diff --git a/apps/desktop/src/backend/DesktopBackendManager.ts b/apps/desktop/src/backend/DesktopBackendManager.ts
+index 91bdd2b33e..19dd79e5a3 100644
+--- a/apps/desktop/src/backend/DesktopBackendManager.ts
++++ b/apps/desktop/src/backend/DesktopBackendManager.ts
+@@ -97,6 +97,8 @@ export interface DesktopBackendStartConfig extends BackendProcessContext {
+   readonly runningDistro?: string;
+   readonly wslRuntimeId?: string;
+   readonly wslT3Home?: string | null;
++  /** The staged runtime directory a WSL backend launched from; a hard restart kills only its processes. */
++  readonly wslRuntimeDir?: string;
+ }
+ 
+ export interface PreflightFailure {
+diff --git a/apps/desktop/src/ipc/DesktopIpcHandlers.ts b/apps/desktop/src/ipc/DesktopIpcHandlers.ts
+index 9ffc466d5a..f524a906ff 100644
+--- a/apps/desktop/src/ipc/DesktopIpcHandlers.ts
++++ b/apps/desktop/src/ipc/DesktopIpcHandlers.ts
+@@ -87,6 +87,7 @@ import {
+   takeLegacyLocalStorage,
+ } from "./methods/legacyLocalStorage.ts";
+ import { getWslState, setWslBackendEnabled, setWslDistro, setWslOnly } from "./methods/wsl.ts";
++import { restartApp } from "./methods/restart.ts";
+ import {
+   getCliCommandState,
+   installCliCommand,
+@@ -115,6 +116,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
+   yield* ipc.handleSync(getLocalEnvironmentBootstraps);
+   yield* ipc.handleSync(getLocalEnvironmentEnabled);
+   yield* ipc.handle(setLocalEnvironmentEnabled);
++  yield* ipc.handle(restartApp);
+   yield* ipc.handle(getHostEnvironmentId);
+   yield* ipc.handle(getLocalEnvironmentBearerToken);
+ 
+diff --git a/apps/desktop/src/ipc/channels.ts b/apps/desktop/src/ipc/channels.ts
+index d590591f59..85c2f3e111 100644
+--- a/apps/desktop/src/ipc/channels.ts
++++ b/apps/desktop/src/ipc/channels.ts
+@@ -43,6 +43,7 @@ export const GET_PRIMARY_PASTE_ENABLED_CHANNEL = "desktop:get-primary-paste-enab
+ export const GET_LOCAL_ENVIRONMENT_BOOTSTRAPS_CHANNEL = "desktop:get-local-environment-bootstraps";
+ export const GET_LOCAL_ENVIRONMENT_ENABLED_CHANNEL = "desktop:get-local-environment-enabled";
+ export const SET_LOCAL_ENVIRONMENT_ENABLED_CHANNEL = "desktop:set-local-environment-enabled";
++export const RESTART_APP_CHANNEL = "desktop:restart-app";
+ export const GET_HOST_ENVIRONMENT_ID_CHANNEL = "desktop:get-host-environment-id";
+ export const GET_LOCAL_ENVIRONMENT_BEARER_TOKEN_CHANNEL =
+   "desktop:get-local-environment-bearer-token";
+diff --git a/apps/desktop/src/ipc/methods/restart.ts b/apps/desktop/src/ipc/methods/restart.ts
+new file mode 100644
+index 0000000000..47f0652f9a
+--- /dev/null
++++ b/apps/desktop/src/ipc/methods/restart.ts
+@@ -0,0 +1,66 @@
++import * as Duration from "effect/Duration";
++import * as Effect from "effect/Effect";
++import * as Option from "effect/Option";
++import * as Schema from "effect/Schema";
++
++import * as DesktopEnvironment from "../../app/DesktopEnvironment.ts";
++import * as DesktopLifecycle from "../../app/DesktopLifecycle.ts";
++import {
++  buildWslRuntimeKillCommand,
++  forceStopProcessTrees,
++  runWslRuntimeKill,
++} from "../../app/DesktopRestart.ts";
++import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
++import * as IpcChannels from "../channels.ts";
++import { makeIpcMethod } from "../DesktopIpc.ts";
++
++// A hung backend gets this long to stop on its own before its process tree is killed.
++const HARD_RESTART_GRACE = Duration.seconds(3);
++
++export const restartApp = makeIpcMethod({
++  channel: IpcChannels.RESTART_APP_CHANNEL,
++  payload: Schema.Literals(["graceful", "hard"]),
++  result: Schema.Void,
++  handler: Effect.fn("desktop.ipc.restart.restartApp")(function* (mode) {
++    const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
++    if (mode === "graceful") {
++      yield* lifecycle.relaunch("restart requested");
++      return;
++    }
++    const { platform } = yield* DesktopEnvironment.DesktopEnvironment;
++    // Read before shutdown starts: a stopping backend forgets its process.
++    const pool = yield* DesktopBackendPool.DesktopBackendPool;
++    const instances = yield* pool.list;
++    const pids = yield* Effect.forEach(instances, (instance) =>
++      instance.snapshot.pipe(Effect.map((snapshot) => Option.getOrNull(snapshot.activePid))),
++    );
++    const roots = pids.filter((pid) => pid !== null);
++    // WSL servers live in the distro, out of taskkill's reach; each is keyed by its own runtime dir.
++    const wslKills = yield* Effect.forEach(instances, (instance) =>
++      instance.currentConfig.pipe(
++        Effect.map((config) =>
++          Option.isSome(config) ? buildWslRuntimeKillCommand(config.value) : null,
++        ),
++      ),
++    );
++    yield* lifecycle.relaunch("hard restart requested", {
++      forceStop: {
++        after: HARD_RESTART_GRACE,
++        run: Effect.sync(() => {
++          const killed = forceStopProcessTrees(roots, platform);
++          for (const command of wslKills) if (command !== null) runWslRuntimeKill(command);
++          return killed;
++        }).pipe(
++          Effect.flatMap((killed) =>
++            Effect.logInfo("force-stopped backend processes", {
++              pids: killed,
++              wslRuntimes: wslKills.flatMap((command) =>
++                command === null ? [] : [command.args.at(-1)],
++              ),
++            }),
++          ),
++        ),
++      },
++    });
++  }),
++});
+diff --git a/apps/desktop/src/preload.ts b/apps/desktop/src/preload.ts
+index ab472baabe..bdce6c2080 100644
+--- a/apps/desktop/src/preload.ts
++++ b/apps/desktop/src/preload.ts
+@@ -162,6 +162,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
+     ipcRenderer.sendSync(IpcChannels.GET_LOCAL_ENVIRONMENT_ENABLED_CHANNEL) !== false,
+   setLocalEnvironmentEnabled: (enabled) =>
+     ipcRenderer.invoke(IpcChannels.SET_LOCAL_ENVIRONMENT_ENABLED_CHANNEL, enabled),
++  restartApp: (mode) => ipcRenderer.invoke(IpcChannels.RESTART_APP_CHANNEL, mode),
+   getHostEnvironmentId: () => ipcRenderer.invoke(IpcChannels.GET_HOST_ENVIRONMENT_ID_CHANNEL),
+   getClientSettings: () => ipcRenderer.invoke(IpcChannels.GET_CLIENT_SETTINGS_CHANNEL),
+   setClientSettings: (settings) =>
+diff --git a/apps/web/src/components/settings/RestartSettings.tsx b/apps/web/src/components/settings/RestartSettings.tsx
+new file mode 100644
+index 0000000000..431802c649
+--- /dev/null
++++ b/apps/web/src/components/settings/RestartSettings.tsx
+@@ -0,0 +1,62 @@
++import { useGT } from "gt-react";
++
++import { ensureLocalApi } from "../../localApi";
++import { Button } from "../ui/button";
++import { SettingsRow, SettingsSection } from "./settingsLayout";
++import { useSearchableSetting } from "./settingsSearch";
++
++/** Reload the window, or relaunch the whole app (gracefully or by force) without hunting processes. */
++export function RestartSettingsSection() {
++  const gt = useGT();
++  const setting = useSearchableSetting();
++  const restartApp = window.desktopBridge?.restartApp;
++  const restart = async (mode: "graceful" | "hard") => {
++    if (restartApp === undefined) return;
++    const confirmed = await ensureLocalApi().dialogs.confirm(
++      mode === "graceful"
++        ? gt("Restart T3 Code? Running agent turns are interrupted.")
++        : gt(
++            "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
++          ),
++      { variant: "destructive" },
++    );
++    if (confirmed) await restartApp(mode);
++  };
++  return (
++    <SettingsSection id="restart" title={gt("Restart")}>
++      <SettingsRow
++        {...setting("reload-window")}
++        description={gt("Reload the interface only. Backends and running turns keep going.")}
++        control={
++          <Button size="xs" variant="outline" onClick={() => window.location.reload()}>
++            {gt("Reload", { $context: "verb, reloads the app window" })}
++          </Button>
++        }
++      />
++      {restartApp === undefined ? null : (
++        <>
++          <SettingsRow
++            {...setting("restart-app")}
++            description={gt("Stop every backend the normal way, then start the app again.")}
++            control={
++              <Button size="xs" variant="outline" onClick={() => void restart("graceful")}>
++                {gt("Restart", { $context: "verb, relaunches the app" })}
++              </Button>
++            }
++          />
++          <SettingsRow
++            {...setting("hard-restart")}
++            description={gt(
++              "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
++            )}
++            control={
++              <Button size="xs" variant="destructive-outline" onClick={() => void restart("hard")}>
++                {gt("Hard restart", { $context: "verb, force-relaunches the app" })}
++              </Button>
++            }
++          />
++        </>
++      )}
++    </SettingsSection>
++  );
++}
+diff --git a/apps/web/src/components/settings/SettingsPanels.tsx b/apps/web/src/components/settings/SettingsPanels.tsx
+index b98b21f590..ff90b5adab 100644
+--- a/apps/web/src/components/settings/SettingsPanels.tsx
++++ b/apps/web/src/components/settings/SettingsPanels.tsx
+@@ -38,6 +38,7 @@ import * as Equal from "effect/Equal";
+ import * as Schema from "effect/Schema";
+ import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
+ import { AboutVersionTitle } from "./AboutVersionTitle";
++import { RestartSettingsSection } from "./RestartSettings";
+ import { CliCommandSettingsRow } from "./CliCommandSettingsRow";
+ import { MobileAppSettingsRow } from "./MobileAppSettingsRow";
+ import {
+@@ -2606,6 +2607,8 @@ export function AboutSettingsPanel() {
+         )}
+       </SettingsSection>
+ 
++      <RestartSettingsSection />
++
+       <SettingsSection id="legal" title={gt("Legal")}>
+         <SettingsRow
+           {...setting("privacy-policy")}
+diff --git a/apps/web/src/components/settings/settingsSearch.ts b/apps/web/src/components/settings/settingsSearch.ts
+index b3232e3f13..0a7cf8f930 100644
+--- a/apps/web/src/components/settings/settingsSearch.ts
++++ b/apps/web/src/components/settings/settingsSearch.ts
+@@ -1016,6 +1016,26 @@ export const SETTINGS_SEARCH_ITEMS = [
+     scope: "project-defaults",
+     searchTerms: [msg("generated thread titles prompt custom style naming rename regenerate")],
+   },
++  {
++    id: "reload-window",
++    title: msg("Reload window"),
++    to: "/settings/about",
++    searchTerms: [msg("restart refresh reload interface renderer window frozen")],
++  },
++  {
++    id: "restart-app",
++    title: msg("Restart T3 Code"),
++    to: "/settings/about",
++    searchTerms: [msg("restart relaunch quit reopen backend server wsl")],
++    desktopOnly: true,
++  },
++  {
++    id: "hard-restart",
++    title: msg("Hard restart"),
++    to: "/settings/about",
++    searchTerms: [msg("force restart kill hung stuck frozen backend server wsl process")],
++    desktopOnly: true,
++  },
+   {
+     id: "app-version",
+     title: msg("Version"),
+diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
+index 73074c96cd..47a934c841 100644
+--- a/apps/web/src/i18n/translations/de.json
++++ b/apps/web/src/i18n/translations/de.json
+@@ -13127,6 +13127,21 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
++  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
++  "91486e2aef3c35a6": "Restart",
++  "90209534b57a7925": "Reload the interface only. Backends and running turns keep going.",
++  "75b018cf52b40f6e": "Reload",
++  "6489c43c6715abae": "Stop every backend the normal way, then start the app again.",
++  "4247054d89acc43b": "Restart",
++  "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
++  "5155d8a1517ce2a6": "Hard restart",
++  "ca907740e0ed3853": "Reload window",
++  "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
++  "d25c50db08889926": "Restart T3 Code",
++  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
++  "c3e2bb1210758027": "Hard restart",
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
+index 2d6c3472c2..2a4ccc655a 100644
+--- a/apps/web/src/i18n/translations/en.json
++++ b/apps/web/src/i18n/translations/en.json
+@@ -13136,6 +13136,21 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
++  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
++  "91486e2aef3c35a6": "Restart",
++  "90209534b57a7925": "Reload the interface only. Backends and running turns keep going.",
++  "75b018cf52b40f6e": "Reload",
++  "6489c43c6715abae": "Stop every backend the normal way, then start the app again.",
++  "4247054d89acc43b": "Restart",
++  "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
++  "5155d8a1517ce2a6": "Hard restart",
++  "ca907740e0ed3853": "Reload window",
++  "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
++  "d25c50db08889926": "Restart T3 Code",
++  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
++  "c3e2bb1210758027": "Hard restart",
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
+index 5f349c3bfa..b30a386d3e 100644
+--- a/apps/web/src/i18n/translations/es.json
++++ b/apps/web/src/i18n/translations/es.json
+@@ -13122,6 +13122,21 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
++  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
++  "91486e2aef3c35a6": "Restart",
++  "90209534b57a7925": "Reload the interface only. Backends and running turns keep going.",
++  "75b018cf52b40f6e": "Reload",
++  "6489c43c6715abae": "Stop every backend the normal way, then start the app again.",
++  "4247054d89acc43b": "Restart",
++  "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
++  "5155d8a1517ce2a6": "Hard restart",
++  "ca907740e0ed3853": "Reload window",
++  "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
++  "d25c50db08889926": "Restart T3 Code",
++  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
++  "c3e2bb1210758027": "Hard restart",
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
+index 6db84dc9b7..95b4072b9b 100644
+--- a/apps/web/src/i18n/translations/fr.json
++++ b/apps/web/src/i18n/translations/fr.json
+@@ -13127,6 +13127,21 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
++  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
++  "91486e2aef3c35a6": "Restart",
++  "90209534b57a7925": "Reload the interface only. Backends and running turns keep going.",
++  "75b018cf52b40f6e": "Reload",
++  "6489c43c6715abae": "Stop every backend the normal way, then start the app again.",
++  "4247054d89acc43b": "Restart",
++  "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
++  "5155d8a1517ce2a6": "Hard restart",
++  "ca907740e0ed3853": "Reload window",
++  "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
++  "d25c50db08889926": "Restart T3 Code",
++  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
++  "c3e2bb1210758027": "Hard restart",
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
+index 8f6fa5c39c..5ca27cf309 100644
+--- a/apps/web/src/i18n/translations/ja.json
++++ b/apps/web/src/i18n/translations/ja.json
+@@ -13063,6 +13063,21 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
++  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
++  "91486e2aef3c35a6": "Restart",
++  "90209534b57a7925": "Reload the interface only. Backends and running turns keep going.",
++  "75b018cf52b40f6e": "Reload",
++  "6489c43c6715abae": "Stop every backend the normal way, then start the app again.",
++  "4247054d89acc43b": "Restart",
++  "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
++  "5155d8a1517ce2a6": "Hard restart",
++  "ca907740e0ed3853": "Reload window",
++  "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
++  "d25c50db08889926": "Restart T3 Code",
++  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
++  "c3e2bb1210758027": "Hard restart",
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
+index 2f1f4c74dd..8d5d431c4e 100644
+--- a/apps/web/src/i18n/translations/ko.json
++++ b/apps/web/src/i18n/translations/ko.json
+@@ -13060,6 +13060,21 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
++  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
++  "91486e2aef3c35a6": "Restart",
++  "90209534b57a7925": "Reload the interface only. Backends and running turns keep going.",
++  "75b018cf52b40f6e": "Reload",
++  "6489c43c6715abae": "Stop every backend the normal way, then start the app again.",
++  "4247054d89acc43b": "Restart",
++  "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
++  "5155d8a1517ce2a6": "Hard restart",
++  "ca907740e0ed3853": "Reload window",
++  "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
++  "d25c50db08889926": "Restart T3 Code",
++  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
++  "c3e2bb1210758027": "Hard restart",
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
+index a2a022656a..1d30b84fb7 100644
+--- a/apps/web/src/i18n/translations/pt-BR.json
++++ b/apps/web/src/i18n/translations/pt-BR.json
+@@ -13127,6 +13127,21 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
++  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
++  "91486e2aef3c35a6": "Restart",
++  "90209534b57a7925": "Reload the interface only. Backends and running turns keep going.",
++  "75b018cf52b40f6e": "Reload",
++  "6489c43c6715abae": "Stop every backend the normal way, then start the app again.",
++  "4247054d89acc43b": "Restart",
++  "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
++  "5155d8a1517ce2a6": "Hard restart",
++  "ca907740e0ed3853": "Reload window",
++  "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
++  "d25c50db08889926": "Restart T3 Code",
++  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
++  "c3e2bb1210758027": "Hard restart",
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
+index 0bb6c96dc4..0726a83efb 100644
+--- a/apps/web/src/i18n/translations/ru.json
++++ b/apps/web/src/i18n/translations/ru.json
+@@ -13126,6 +13126,21 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
++  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
++  "91486e2aef3c35a6": "Restart",
++  "90209534b57a7925": "Reload the interface only. Backends and running turns keep going.",
++  "75b018cf52b40f6e": "Reload",
++  "6489c43c6715abae": "Stop every backend the normal way, then start the app again.",
++  "4247054d89acc43b": "Restart",
++  "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
++  "5155d8a1517ce2a6": "Hard restart",
++  "ca907740e0ed3853": "Reload window",
++  "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
++  "d25c50db08889926": "Restart T3 Code",
++  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
++  "c3e2bb1210758027": "Hard restart",
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
+index 3c3991ba8f..93b91b914d 100644
+--- a/apps/web/src/i18n/translations/sv.json
++++ b/apps/web/src/i18n/translations/sv.json
+@@ -13134,6 +13134,21 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
++  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
++  "91486e2aef3c35a6": "Restart",
++  "90209534b57a7925": "Reload the interface only. Backends and running turns keep going.",
++  "75b018cf52b40f6e": "Reload",
++  "6489c43c6715abae": "Stop every backend the normal way, then start the app again.",
++  "4247054d89acc43b": "Restart",
++  "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
++  "5155d8a1517ce2a6": "Hard restart",
++  "ca907740e0ed3853": "Reload window",
++  "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
++  "d25c50db08889926": "Restart T3 Code",
++  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
++  "c3e2bb1210758027": "Hard restart",
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
+index eb41d745e9..3809277c7e 100644
+--- a/apps/web/src/i18n/translations/zh.json
++++ b/apps/web/src/i18n/translations/zh.json
+@@ -13141,6 +13141,21 @@
+   "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
+   "32bd6d615d23de95": "stats for nerds usage limits percent left remaining used quota",
+   "642e242bd89ba25e": "stats for nerds usage limits quota 5 hour weekly all providers current provider codex claude antigravity",
++  "6c22a1a9bbd7fd49": "Restart T3 Code? Running agent turns are interrupted.",
++  "347cb6324be6aa05": "Force-restart T3 Code? Backends get 3 seconds to stop, then they are killed. Running agent turns are interrupted.",
++  "91486e2aef3c35a6": "Restart",
++  "90209534b57a7925": "Reload the interface only. Backends and running turns keep going.",
++  "75b018cf52b40f6e": "Reload",
++  "6489c43c6715abae": "Stop every backend the normal way, then start the app again.",
++  "4247054d89acc43b": "Restart",
++  "3abaaf4c41b27a3e": "For a backend that stopped responding: kill every backend after 3 seconds, then start the app again.",
++  "5155d8a1517ce2a6": "Hard restart",
++  "ca907740e0ed3853": "Reload window",
++  "b649eeb600c069ef": "restart refresh reload interface renderer window frozen",
++  "d25c50db08889926": "Restart T3 Code",
++  "910ce10806c8ea00": "restart relaunch quit reopen backend server wsl",
++  "c3e2bb1210758027": "Hard restart",
++  "bebaff4f9bd72594": "force restart kill hung stuck frozen backend server wsl process",
+   "b2bbc68b3b65b0e9": "T3 Code {version} is available. Quit this app, update the official T3 Code, then run t3code-customize.",
+   "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
+   "ab0ffd55b1286af8": "The thread's provider only, or every provider that reports limits.",
+diff --git a/packages/contracts/src/ipc.ts b/packages/contracts/src/ipc.ts
+index f47b9a49e8..460a287d1b 100644
+--- a/packages/contracts/src/ipc.ts
++++ b/packages/contracts/src/ipc.ts
+@@ -1143,6 +1143,8 @@ export interface DesktopBridge {
+   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
+   getLocalEnvironmentEnabled: () => boolean;
+   setLocalEnvironmentEnabled: (enabled: boolean) => Promise<void>;
++  /** "graceful" stops backends the normal way; "hard" kills them after a short grace. Both relaunch. */
++  restartApp?: (mode: "graceful" | "hard") => Promise<void>;
+   /** The environment ID recorded in this app's T3 home, such as its own machine's background service. */
+   getHostEnvironmentId?: () => Promise<string | null>;
+   getLocalEnvironmentBearerToken: () => Promise<string>;

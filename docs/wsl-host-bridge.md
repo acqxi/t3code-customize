@@ -7,7 +7,7 @@ PowerShell) to the Windows backend on the same machine, through T3's own
 Linked environments. Projects stay on WSL's ext4 disk; only delegated tasks run
 on Windows, under the Windows worker's own permissions, sign-ins and approvals.
 
-It is patches 0009 (helper, link path, Desktop supervisor) and 0010 (the controls on the Environments map and in Connections), built and installed like the others.
+It is patches 0014 (helper, link path, Desktop supervisor) and 0015 (the controls on the Environments map and in Connections), built and installed like the others.
 
 ## Why a bridge is needed
 

@@ -15,6 +15,7 @@ Unofficial. Not affiliated with T3 Tools. For T3 Code (Nightly, Beta or Release)
 - **Performance metrics**: time to first token and to first answer, live, average and peak tokens/s, token and cache usage, tool time and turn time, plus the provider, model, effort and speed of each turn. Show them under each reply, under the composer (current and previous turn, on one line), in the Thread details panel, or any combination. Estimated values show `≈` and unavailable ones `—`; which metrics exist depends on the provider. Codex, Claude Code and ACP agents such as Antigravity are timed from their streams. Switch the detail grid between the last turn, the whole thread and each model it used; the Usage dashboard's model breakdown adds tok/s, TTFT and TTFA per model. See [docs/performance-metrics.md](docs/performance-metrics.md).
 - **Subscription switch** when you have more than one signed-in subscription that offers your model. If the current one is on pace to run out before its 5 hour or weekly window resets, a chip like **Opus 5.5 on Personal →** switches the thread to the same model on the one with the most room. It also points out a subscription whose weekly allowance resets within a day mostly unused. Hover it for the reasoning.
 - **WSL host bridge** (Windows Desktop with a WSL backend): agents in WSL hand work that needs Windows, such as a browser, Computer Use, GUI apps or PowerShell, to the Windows backend on the same computer through T3's own Linked environments. The Desktop carries it over `wsl.exe` stdio, so the Windows backend needs no network access. Turn it on from the **Host bridge** link on the Environments map, or in **Settings > Connections > Local host bridge**. See [docs/wsl-host-bridge.md](docs/wsl-host-bridge.md).
+- **Customized build controls**: window titles and **Settings > About** say "(Customized)"; **Settings > About > Restart** reloads the window, restarts T3 Code or hard-restarts it when a backend hangs; the WSL backend shows each step while its runtime installs and starts; and Windows copies tell you when a new official release is out.
 
 The official app's native dependencies and public T3 Connect configuration are
 reused. Windows signature changes and platform restrictions are described below.
@@ -159,7 +160,7 @@ Your current T3 Code keeps working the whole time.
 
 ## How it works
 
-T3 Code is open source (MIT). This repo holds twelve patches and one script. The script:
+T3 Code is open source (MIT). This repo holds one patch per feature ([listed below](#the-patches)) and one script. The script:
 
 1. reads your installed application: its exact upstream commit and the public config T3 Connect needs,
 2. applies the patches to that commit and runs their tests,
@@ -176,6 +177,33 @@ On macOS nothing is copied or re-signed, so your app keeps its signature, keycha
 
 Everything runs on your machine. Your T3 data is never modified by the build, and neither is your
 installed app, except for that one `boot.cjs` line on macOS releases with the inspect fuse off. The customized app uses the same T3 profile as stock; quit stock before switching.
+
+## The patches
+
+The 0.1.13 set in `patches/0.1.13/`, applied in this order. Each patch adds its own
+tests (listed in `checks.json`) and its strings in every web locale; later patches
+build on earlier ones. Frozen sets in tags keep their own numbering.
+
+| Patch | Feature | Mainly changes |
+| --- | --- | --- |
+| 0001 | Stats for nerds: the stats line under the composer, response tokens/s and its switch | Claude and Codex adapters, composer |
+| 0002 | Usage limits: background polling, merging across resets, fetch-time ordering | server providers, provider-core |
+| 0003 | Context window: auto-compaction threshold and **Compact now** | composer |
+| 0004 | Subscription switch chip | composer |
+| 0005 | Performance metrics: the turn timing contract and tracker for Claude, Codex and ACP | contracts, provider-core, adapters |
+| 0006 | Performance metrics under the composer, under each reply and in the detail grid | web |
+| 0007 | Stats for nerds settings in Appearance, where stats show, **Turn performance** in Thread details | web settings, Thread details |
+| 0008 | Usage limits of every provider in the composer and Thread details, shown as left or used | web |
+| 0009 | Last turn, whole thread and per-model views of the performance grid | web |
+| 0010 | Performance columns in the Usage dashboard's model breakdown | server, web |
+| 0011 | "(Customized)" title marker and the check-only update notice | desktop, web |
+| 0012 | Restart group in **Settings > About** | desktop, web |
+| 0013 | WSL runtime status in Connections and on the Environments map | desktop, web |
+| 0014 | WSL host bridge: helper, native link path and Desktop supervisor | server, desktop, shared |
+| 0015 | WSL host bridge controls in Connections and on the Environments map | web |
+
+Metric definitions are in [docs/performance-metrics.md](docs/performance-metrics.md), the
+host bridge design in [docs/wsl-host-bridge.md](docs/wsl-host-bridge.md).
 
 ## Commands
 

@@ -1,0 +1,1312 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: acqxi <kacqxi@gmail.com>
+Date: Fri, 27 Nov 2026 01:36:00 +0800
+Subject: [PATCH 07/15] Stats for nerds: settings, placement and thread details
+
+- Settings: Stats for nerds moves from Chat to Appearance, with its
+  master switch, a "Where stats show" checkbox menu (under each reply,
+  under the composer, in thread details; each backed by its own setting,
+  the last by the thread details item) and one "Metrics" checkbox menu
+  for every metric by full name and short label
+  (statsForNerdsHiddenMetrics), with reset buttons, one-line descriptions
+  and search entries (a metric's name finds the Metrics row).
+- Thread details: a "Turn performance" item (id "performance", off by
+  default, offered while Stats for nerds is on) with the current or last
+  turn's metrics in the same compact grid as the composer popover.
+- New catalog keys in every web locale.
+---
+ apps/web/src/components/ChatView.tsx          |  16 +-
+ .../chat/ThreadDetailsItemsMenu.tsx           |   5 +-
+ .../components/chat/ThreadDetailsPanel.tsx    |  10 +
+ .../src/components/chat/TurnPerformance.tsx   |  56 +++++
+ .../chat/statsForNerdsPlacement.test.ts       |  72 ++++++
+ .../components/chat/statsForNerdsPlacement.ts |  82 +++++++
+ .../chat/threadDetailsItems.test.ts           |  12 +
+ .../src/components/chat/threadDetailsItems.ts |   6 +
+ .../settings/AppearanceSettingsPanel.tsx      |   3 +
+ .../components/settings/SettingsPanels.tsx    |  36 +--
+ .../settings/StatsForNerdsSettings.tsx        | 223 ++++++++++++++++++
+ .../settings/ThreadDetailsItemsRow.tsx        |  11 +-
+ .../settings/settingsSearch.test.ts           |  10 +
+ .../src/components/settings/settingsSearch.ts |  37 ++-
+ apps/web/src/i18n/translations/de.json        |  24 +-
+ apps/web/src/i18n/translations/en.json        |  24 +-
+ apps/web/src/i18n/translations/es.json        |  24 +-
+ apps/web/src/i18n/translations/fr.json        |  24 +-
+ apps/web/src/i18n/translations/ja.json        |  24 +-
+ apps/web/src/i18n/translations/ko.json        |  24 +-
+ apps/web/src/i18n/translations/pt-BR.json     |  24 +-
+ apps/web/src/i18n/translations/ru.json        |  24 +-
+ apps/web/src/i18n/translations/sv.json        |  24 +-
+ apps/web/src/i18n/translations/zh.json        |  24 +-
+ packages/contracts/src/settings.ts            |   4 +-
+ 25 files changed, 747 insertions(+), 76 deletions(-)
+ create mode 100644 apps/web/src/components/chat/statsForNerdsPlacement.test.ts
+ create mode 100644 apps/web/src/components/chat/statsForNerdsPlacement.ts
+ create mode 100644 apps/web/src/components/settings/StatsForNerdsSettings.tsx
+
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index 1973773e7b..0c0a2101e5 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -366,6 +366,7 @@ import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEn
+ import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
+ import { ComposerStats } from "./chat/ComposerStats";
+ import { selectComposerStatsTurns, selectRecordedCompactions } from "./chat/ComposerStats.logic";
++import { resolveThreadDetailsVisibility } from "./chat/threadDetailsItems";
+ import {
+   ComposerTurnPerformance,
+   TurnPerformanceTimelineCtx,
+@@ -1691,11 +1692,13 @@ export default function ChatView(props: ChatViewProps) {
+     const { current, previous } = selectComposerPerformanceTurns(
+       selectComposerStatsTurns(serverProjection),
+     );
+-    const composer = settings.statsForNerdsShowInComposer
+-      ? {
+-          current: current === null ? null : sourceOf(current),
+-          previous: previous === null ? null : sourceOf(previous),
+-        }
++    const latest = {
++      current: current === null ? null : sourceOf(current),
++      previous: previous === null ? null : sourceOf(previous),
++    };
++    const composer = settings.statsForNerdsShowInComposer ? latest : null;
++    const threadDetails = resolveThreadDetailsVisibility(settings).performance
++      ? { threadRef: routeThreadDetailRef, ...latest, hiddenMetrics }
+       : null;
+     const timeline: TurnPerformanceTimelineValue | null = settings.statsForNerdsShowPerReply
+       ? {
+@@ -1709,7 +1712,7 @@ export default function ChatView(props: ChatViewProps) {
+           hiddenMetrics,
+         }
+       : null;
+-    return { composer, timeline, hiddenMetrics };
++    return { composer, timeline, threadDetails, hiddenMetrics };
+   })();
+   const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection);
+   const activeWorkStartedAt =
+@@ -4365,6 +4368,7 @@ export default function ChatView(props: ChatViewProps) {
+                     sources: serverConfig?.usageLimitSources ?? EMPTY_USAGE_LIMIT_SOURCES,
+                     contextWindow: activeContextWindow,
+                   }}
++                  performance={turnPerformance?.threadDetails ?? null}
+                 />
+ 
+                 <PullRequestThreadDialogHost
+diff --git a/apps/web/src/components/chat/ThreadDetailsItemsMenu.tsx b/apps/web/src/components/chat/ThreadDetailsItemsMenu.tsx
+index 691e15fdc0..d56b9b019c 100644
+--- a/apps/web/src/components/chat/ThreadDetailsItemsMenu.tsx
++++ b/apps/web/src/components/chat/ThreadDetailsItemsMenu.tsx
+@@ -7,15 +7,16 @@ import {
+ import { MenuCheckboxItem, MenuGroup, MenuGroupLabel, MenuItem, MenuSeparator } from "../ui/menu";
+ import {
+   isDefaultThreadDetailsVisibility,
++  offeredThreadDetailsItems,
+   resolveThreadDetailsVisibility,
+   RESET_THREAD_DETAILS_ITEMS,
+   setThreadDetailsItem,
+-  THREAD_DETAILS_ITEMS,
+ } from "./threadDetailsItems";
+ 
+ /** Menu body that shows and hides thread details items. The card's context menu and Settings share it. */
+ export function ThreadDetailsItemsMenuItems() {
+   const visibility = useClientSettings(resolveThreadDetailsVisibility);
++  const statsForNerdsEnabled = useClientSettings((settings) => settings.statsForNerdsEnabled);
+   const m = useMessages();
+   return (
+     <>
+@@ -23,7 +24,7 @@ export function ThreadDetailsItemsMenuItems() {
+         <MenuGroupLabel>
+           <T>Show in thread details</T>
+         </MenuGroupLabel>
+-        {THREAD_DETAILS_ITEMS.map((item) => (
++        {offeredThreadDetailsItems(statsForNerdsEnabled).map((item) => (
+           <MenuCheckboxItem
+             key={item.id}
+             checked={visibility[item.id]}
+diff --git a/apps/web/src/components/chat/ThreadDetailsPanel.tsx b/apps/web/src/components/chat/ThreadDetailsPanel.tsx
+index 32de434760..27aec2262e 100644
+--- a/apps/web/src/components/chat/ThreadDetailsPanel.tsx
++++ b/apps/web/src/components/chat/ThreadDetailsPanel.tsx
+@@ -34,6 +34,10 @@ import {
+   type ThreadDetailsUsageInput,
+ } from "./ThreadDetailsUsage";
+ import { ThreadDetailsItemsMenuItems } from "./ThreadDetailsItemsMenu";
++import {
++  ThreadDetailsTurnPerformance,
++  type ThreadDetailsPerformanceInput,
++} from "./TurnPerformance";
+ import { resolveThreadDetailsVisibility, THREAD_DETAILS_ITEMS } from "./threadDetailsItems";
+ import { useClientSettings } from "../../hooks/useSettings";
+ import { useProject, useServerConfigs } from "../../state/entities";
+@@ -95,6 +99,8 @@ interface ThreadDetailsPanelProps extends Pick<
+   ) => Promise<ProjectScriptActionResult>;
+   onDeleteProjectScript: (scriptId: string) => Promise<ProjectScriptActionResult>;
+   usage: ThreadDetailsUsageInput;
++  /** Stats for nerds turn performance, or null while Stats for nerds is off. */
++  performance?: ThreadDetailsPerformanceInput | null;
+ }
+ 
+ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
+@@ -333,6 +339,10 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
+                 <ThreadDetailsContext usage={props.usage.contextWindow} />
+               ) : null}
+ 
++              {visible.performance && props.performance ? (
++                <ThreadDetailsTurnPerformance {...props.performance} />
++              ) : null}
++
+               {/* Shown only when no section above has content, so an emptied card can be refilled. */}
+               <div className="p-2 group-has-[>section>:last-child:not(:empty)]/details-items:hidden">
+                 <ThreadDetailsControl
+diff --git a/apps/web/src/components/chat/TurnPerformance.tsx b/apps/web/src/components/chat/TurnPerformance.tsx
+index 126dea3e6b..03caaf8c89 100644
+--- a/apps/web/src/components/chat/TurnPerformance.tsx
++++ b/apps/web/src/components/chat/TurnPerformance.tsx
+@@ -7,6 +7,7 @@ import { readThreadStreamedTurnItems } from "../../state/entities";
+ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+ import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+ import { composerFloatingLayerProps } from "./composerEventScope";
++import { ThreadDetailsSection } from "./ThreadDetailsSection";
+ import {
+   LEGACY_RESPONSE_RATE_LABEL,
+   TURN_PERFORMANCE_METRIC_LABELS,
+@@ -514,6 +515,61 @@ export function ComposerTurnPerformance({
+   );
+ }
+ 
++export interface ThreadDetailsPerformanceInput {
++  readonly threadRef: ScopedThreadRef | null;
++  readonly current: TurnPerformanceSource | null;
++  readonly previous: TurnPerformanceSource | null;
++  readonly hiddenMetrics: ReadonlySet<string>;
++}
++
++/** Thread details: the running turn, else the last completed one, one metric per row. */
++export function ThreadDetailsTurnPerformance({
++  threadRef,
++  current,
++  previous,
++  hiddenMetrics,
++}: ThreadDetailsPerformanceInput) {
++  const source = current ?? previous;
++  if (source === null) return null;
++  const threadKey = threadRef === null ? "" : `${threadRef.environmentId}:${threadRef.threadId}`;
++  return (
++    <ThreadDetailsTurnPerformanceRows
++      key={`${threadKey}:${source.turn.id}`}
++      threadRef={threadRef}
++      source={source}
++      hidden={hiddenMetrics}
++    />
++  );
++}
++
++function ThreadDetailsTurnPerformanceRows({
++  threadRef,
++  source,
++  hidden,
++}: {
++  threadRef: ScopedThreadRef | null;
++  source: TurnPerformanceSource;
++  hidden: ReadonlySet<string>;
++}) {
++  const gt = useGT();
++  const running = isTurnRunning(source.turn);
++  const metrics = useTurnMetrics(threadRef, source, hidden);
++  return (
++    <ThreadDetailsSection
++      headingId="thread-details-performance-heading"
++      title={gt("Turn performance")}
++      showHeading={false}
++    >
++      <div data-thread-details-performance={source.turn.id} className="space-y-1.5 px-2.5">
++        <p className="text-2xs text-muted-foreground">
++          {running ? gt("Current turn") : gt("Last turn", { $context: "previous agent turn" })}
++        </p>
++        <TurnPerformanceGrid source={source} metrics={metrics} live={running} />
++      </div>
++    </ThreadDetailsSection>
++  );
++}
++
+ export interface TurnPerformanceTimelineValue {
+   readonly threadId: ThreadId;
+   /** This thread's own provider turns; items from other threads never resolve. */
+diff --git a/apps/web/src/components/chat/statsForNerdsPlacement.test.ts b/apps/web/src/components/chat/statsForNerdsPlacement.test.ts
+new file mode 100644
+index 0000000000..831319fcf9
+--- /dev/null
++++ b/apps/web/src/components/chat/statsForNerdsPlacement.test.ts
+@@ -0,0 +1,72 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import {
++  isDefaultStatsForNerdsPlacements,
++  resetStatsForNerdsPlacements,
++  resolveStatsForNerdsPlacements,
++  setStatsForNerdsPlacement,
++} from "./statsForNerdsPlacement";
++import { resolveThreadDetailsVisibility } from "./threadDetailsItems";
++
++const defaults = { statsForNerdsShowPerReply: true, statsForNerdsShowInComposer: true };
++const base = { ...defaults, threadDetailsItems: {}, threadDetailsUsageEnabled: false };
++
++describe("stats for nerds placements", () => {
++  it("reads the two switches and the thread details item", () => {
++    expect(resolveStatsForNerdsPlacements(base)).toEqual({
++      perReply: true,
++      composer: true,
++      threadDetails: false,
++    });
++    expect(
++      resolveStatsForNerdsPlacements({
++        ...base,
++        statsForNerdsShowInComposer: false,
++        threadDetailsItems: { performance: true },
++      }),
++    ).toEqual({ perReply: true, composer: false, threadDetails: true });
++  });
++
++  it("writes each place to its own setting", () => {
++    expect(setStatsForNerdsPlacement(base, "perReply", false)).toEqual({
++      statsForNerdsShowPerReply: false,
++    });
++    expect(setStatsForNerdsPlacement(base, "composer", false)).toEqual({
++      statsForNerdsShowInComposer: false,
++    });
++    const shown = setStatsForNerdsPlacement(
++      { ...base, threadDetailsItems: { servers: false } },
++      "threadDetails",
++      true,
++    );
++    expect(shown).toEqual({ threadDetailsItems: { servers: false, performance: true } });
++  });
++
++  it("is the thread details card's own item, so the card menu and the placement agree", () => {
++    const patch = setStatsForNerdsPlacement(base, "threadDetails", true);
++    const next = { ...base, ...patch };
++    expect(resolveThreadDetailsVisibility(next).performance).toBe(true);
++    expect(resolveStatsForNerdsPlacements(next).threadDetails).toBe(true);
++    // Back to the default stores nothing.
++    expect(setStatsForNerdsPlacement(next, "threadDetails", false)).toEqual({
++      threadDetailsItems: {},
++    });
++  });
++
++  it("resets every place and keeps other thread details choices", () => {
++    const changed = {
++      statsForNerdsShowPerReply: false,
++      statsForNerdsShowInComposer: false,
++      threadDetailsItems: { performance: true, servers: false },
++      threadDetailsUsageEnabled: false,
++    };
++    expect(
++      isDefaultStatsForNerdsPlacements(resolveStatsForNerdsPlacements(changed), defaults),
++    ).toBe(false);
++    const reset = { ...changed, ...resetStatsForNerdsPlacements(changed, defaults) };
++    expect(reset.threadDetailsItems).toEqual({ servers: false });
++    expect(isDefaultStatsForNerdsPlacements(resolveStatsForNerdsPlacements(reset), defaults)).toBe(
++      true,
++    );
++  });
++});
+diff --git a/apps/web/src/components/chat/statsForNerdsPlacement.ts b/apps/web/src/components/chat/statsForNerdsPlacement.ts
+new file mode 100644
+index 0000000000..f5fba7f8ae
+--- /dev/null
++++ b/apps/web/src/components/chat/statsForNerdsPlacement.ts
+@@ -0,0 +1,82 @@
++import type { ClientSettings } from "@t3tools/contracts";
++import { msg } from "gt-react";
++
++import {
++  resolveThreadDetailsVisibility,
++  setThreadDetailsItem,
++  THREAD_DETAILS_ITEMS,
++} from "./threadDetailsItems";
++
++/**
++ * Where Stats for nerds turn performance shows. Each place keeps its own stored setting: the two
++ * Stats for nerds switches, and the thread details "performance" item, so the card's own menu and
++ * this list can never disagree.
++ */
++export const STATS_FOR_NERDS_PLACEMENTS = [
++  { id: "perReply", label: msg("Under each reply") },
++  { id: "composer", label: msg("Under the composer") },
++  { id: "threadDetails", label: msg("In thread details") },
++] as const;
++
++export type StatsForNerdsPlacement = (typeof STATS_FOR_NERDS_PLACEMENTS)[number]["id"];
++
++type PlacementSettings = Pick<
++  ClientSettings,
++  | "statsForNerdsShowPerReply"
++  | "statsForNerdsShowInComposer"
++  | "threadDetailsItems"
++  | "threadDetailsUsageEnabled"
++>;
++
++const PERFORMANCE_ITEM = THREAD_DETAILS_ITEMS.find((item) => item.id === "performance")!;
++
++export function resolveStatsForNerdsPlacements(
++  settings: PlacementSettings,
++): Readonly<Record<StatsForNerdsPlacement, boolean>> {
++  return {
++    perReply: settings.statsForNerdsShowPerReply,
++    composer: settings.statsForNerdsShowInComposer,
++    threadDetails: resolveThreadDetailsVisibility(settings).performance,
++  };
++}
++
++export function setStatsForNerdsPlacement(
++  settings: PlacementSettings,
++  placement: StatsForNerdsPlacement,
++  visible: boolean,
++): Partial<ClientSettings> {
++  switch (placement) {
++    case "perReply":
++      return { statsForNerdsShowPerReply: visible };
++    case "composer":
++      return { statsForNerdsShowInComposer: visible };
++    case "threadDetails":
++      return { threadDetailsItems: setThreadDetailsItem(settings, PERFORMANCE_ITEM, visible) };
++  }
++}
++
++export function isDefaultStatsForNerdsPlacements(
++  placements: Readonly<Record<StatsForNerdsPlacement, boolean>>,
++  defaults: Pick<ClientSettings, "statsForNerdsShowPerReply" | "statsForNerdsShowInComposer">,
++): boolean {
++  return (
++    placements.perReply === defaults.statsForNerdsShowPerReply &&
++    placements.composer === defaults.statsForNerdsShowInComposer &&
++    placements.threadDetails === PERFORMANCE_ITEM.defaultVisible
++  );
++}
++
++export function resetStatsForNerdsPlacements(
++  settings: PlacementSettings,
++  defaults: Pick<ClientSettings, "statsForNerdsShowPerReply" | "statsForNerdsShowInComposer">,
++): Partial<ClientSettings> {
++  return {
++    statsForNerdsShowPerReply: defaults.statsForNerdsShowPerReply,
++    statsForNerdsShowInComposer: defaults.statsForNerdsShowInComposer,
++    threadDetailsItems: setThreadDetailsItem(
++      settings,
++      PERFORMANCE_ITEM,
++      PERFORMANCE_ITEM.defaultVisible,
++    ),
++  };
++}
+diff --git a/apps/web/src/components/chat/threadDetailsItems.test.ts b/apps/web/src/components/chat/threadDetailsItems.test.ts
+index 6e3e746fd7..c439014b8e 100644
+--- a/apps/web/src/components/chat/threadDetailsItems.test.ts
++++ b/apps/web/src/components/chat/threadDetailsItems.test.ts
+@@ -1,6 +1,7 @@
+ import { describe, expect, it } from "vite-plus/test";
+ 
+ import {
++  offeredThreadDetailsItems,
+   resolveThreadDetailsVisibility,
+   setThreadDetailsItem,
+   THREAD_DETAILS_ITEMS,
+@@ -33,4 +34,15 @@ describe("thread details items", () => {
+     const hidden = { threadDetailsItems: { servers: false }, threadDetailsUsageEnabled: false };
+     expect(setThreadDetailsItem(hidden, servers, true)).toEqual({});
+   });
++
++  it("keeps turn performance off by default and offers it only with Stats for nerds", () => {
++    expect(
++      resolveThreadDetailsVisibility({ threadDetailsItems: {}, threadDetailsUsageEnabled: true })
++        .performance,
++    ).toBe(false);
++    expect(offeredThreadDetailsItems(false).some((item) => item.id === "performance")).toBe(false);
++    expect(offeredThreadDetailsItems(true).map((item) => item.id)).toEqual(
++      THREAD_DETAILS_ITEMS.map((item) => item.id),
++    );
++  });
+ });
+diff --git a/apps/web/src/components/chat/threadDetailsItems.ts b/apps/web/src/components/chat/threadDetailsItems.ts
+index 9f8f05449c..94de8e9102 100644
+--- a/apps/web/src/components/chat/threadDetailsItems.ts
++++ b/apps/web/src/components/chat/threadDetailsItems.ts
+@@ -27,6 +27,7 @@ export const THREAD_DETAILS_ITEMS = [
+   { id: "sideChats", label: msg("Side chats"), defaultVisible: true },
+   { id: "usage", label: msg("Usage limits"), defaultVisible: false },
+   { id: "context", label: msg("Context window"), defaultVisible: false },
++  { id: "performance", label: msg("Turn performance"), defaultVisible: false },
+ ] as const;
+ 
+ export type ThreadDetailsItemId = (typeof THREAD_DETAILS_ITEMS)[number]["id"];
+@@ -66,6 +67,11 @@ export function setThreadDetailsItem(
+   return visible === defaultVisible(item, settings) ? rest : { ...rest, [item.id]: visible };
+ }
+ 
++/** Turn performance is part of Stats for nerds, so the menus offer it only while that is on. */
++export function offeredThreadDetailsItems(statsForNerdsEnabled: boolean) {
++  return THREAD_DETAILS_ITEMS.filter((item) => item.id !== "performance" || statsForNerdsEnabled);
++}
++
+ export function isDefaultThreadDetailsVisibility(visibility: ThreadDetailsVisibility) {
+   return THREAD_DETAILS_ITEMS.every((item) => visibility[item.id] === item.defaultVisible);
+ }
+diff --git a/apps/web/src/components/settings/AppearanceSettingsPanel.tsx b/apps/web/src/components/settings/AppearanceSettingsPanel.tsx
+index 1bb96d39c9..43eca334a0 100644
+--- a/apps/web/src/components/settings/AppearanceSettingsPanel.tsx
++++ b/apps/web/src/components/settings/AppearanceSettingsPanel.tsx
+@@ -37,6 +37,7 @@ import { useSearchableSetting } from "./settingsSearch";
+ import { AdvancedSettings } from "./AdvancedSettings";
+ import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
+ import { TypographySection } from "./TypographySettings";
++import { StatsForNerdsSettingsSection } from "./StatsForNerdsSettings";
+ import { ThreadDetailsItemsRow } from "./ThreadDetailsItemsRow";
+ 
+ const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
+@@ -544,6 +545,8 @@ export function AppearanceSettingsPanel() {
+         </AdvancedSettings>
+       </SettingsSection>
+ 
++      <StatsForNerdsSettingsSection />
++
+       <TypographySection />
+     </SettingsPageContainer>
+   );
+diff --git a/apps/web/src/components/settings/SettingsPanels.tsx b/apps/web/src/components/settings/SettingsPanels.tsx
+index e0d23512bf..abc632f61a 100644
+--- a/apps/web/src/components/settings/SettingsPanels.tsx
++++ b/apps/web/src/components/settings/SettingsPanels.tsx
+@@ -597,6 +597,12 @@ export function useSettingsRestore(onRestored?: () => void) {
+     ...(settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled
+       ? [gt("Stats for nerds")]
+       : []),
++    ...(settings.statsForNerdsShowInComposer !==
++      DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowInComposer ||
++    settings.statsForNerdsShowPerReply !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowPerReply
++      ? [gt("Where stats show")]
++      : []),
++    ...(settings.statsForNerdsHiddenMetrics.length > 0 ? [gt("Stats for nerds metrics")] : []),
+     ...(settings.sideThreadOpenTarget !== DEFAULT_UNIFIED_SETTINGS.sideThreadOpenTarget
+       ? [gt("Open subagents and side chats in")]
+       : []),
+@@ -733,6 +739,9 @@ export function useSettingsRestore(onRestored?: () => void) {
+       sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut,
+       followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
+       statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
++      statsForNerdsShowInComposer: DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowInComposer,
++      statsForNerdsShowPerReply: DEFAULT_UNIFIED_SETTINGS.statsForNerdsShowPerReply,
++      statsForNerdsHiddenMetrics: DEFAULT_UNIFIED_SETTINGS.statsForNerdsHiddenMetrics,
+       sideThreadOpenTarget: DEFAULT_UNIFIED_SETTINGS.sideThreadOpenTarget,
+       toolCallVisibility: DEFAULT_UNIFIED_SETTINGS.toolCallVisibility,
+       screenReaderAnnouncements: DEFAULT_UNIFIED_SETTINGS.screenReaderAnnouncements,
+@@ -1278,33 +1287,6 @@ export function ChatSettingsPanel() {
+             />
+           }
+         />
+-        <SettingsRow
+-          {...setting("stats-for-nerds")}
+-          description={gt(
+-            "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+-          )}
+-          resetAction={
+-            settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled ? (
+-              <SettingResetButton
+-                ariaLabel={gt("Reset stats for nerds to default")}
+-                onClick={() =>
+-                  updateSettings({
+-                    statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
+-                  })
+-                }
+-              />
+-            ) : null
+-          }
+-          control={
+-            <Switch
+-              checked={settings.statsForNerdsEnabled}
+-              onCheckedChange={(checked) =>
+-                updateSettings({ statsForNerdsEnabled: Boolean(checked) })
+-              }
+-              aria-label={gt("Stats for nerds")}
+-            />
+-          }
+-        />
+         <SettingsRow
+           {...setting("send-shortcut")}
+           description={gt("Choose when Enter sends a prompt or inserts a new line")}
+diff --git a/apps/web/src/components/settings/StatsForNerdsSettings.tsx b/apps/web/src/components/settings/StatsForNerdsSettings.tsx
+new file mode 100644
+index 0000000000..7d58821ec7
+--- /dev/null
++++ b/apps/web/src/components/settings/StatsForNerdsSettings.tsx
+@@ -0,0 +1,223 @@
++import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
++import { T, useGT, useMessages, Var } from "gt-react";
++import { ChevronDownIcon } from "lucide-react";
++
++import {
++  isDefaultStatsForNerdsPlacements,
++  resetStatsForNerdsPlacements,
++  resolveStatsForNerdsPlacements,
++  setStatsForNerdsPlacement,
++  STATS_FOR_NERDS_PLACEMENTS,
++} from "../chat/statsForNerdsPlacement";
++import { TURN_PERFORMANCE_METRIC_LABELS } from "../chat/TurnPerformance.catalog";
++import { TURN_PERFORMANCE_METRIC_IDS, toggleHiddenMetric } from "../chat/TurnPerformance.logic";
++import { Button } from "../ui/button";
++import {
++  Menu,
++  MenuCheckboxItem,
++  MenuGroup,
++  MenuGroupLabel,
++  MenuItem,
++  MenuPopup,
++  MenuSeparator,
++  MenuTrigger,
++} from "../ui/menu";
++import { Switch } from "../ui/switch";
++import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
++import { useSearchableSetting } from "./settingsSearch";
++import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
++
++/** Under each reply, under the composer, in thread details: a checkbox menu like Thread details. */
++function StatsForNerdsPlacementRow() {
++  const gt = useGT();
++  const m = useMessages();
++  const setting = useSearchableSetting();
++  const settings = useScopedSettings();
++  const updateSettings = useUpdateScopedSettings();
++  const placements = resolveStatsForNerdsPlacements(settings);
++  const enabled = STATS_FOR_NERDS_PLACEMENTS.filter((placement) => placements[placement.id]).length;
++  const isDefault = isDefaultStatsForNerdsPlacements(placements, DEFAULT_UNIFIED_SETTINGS);
++  return (
++    <SettingsRow
++      {...setting("stats-for-nerds-placement")}
++      description={gt("Under replies, below the composer, or in thread details.")}
++      resetAction={
++        isDefault ? null : (
++          <SettingResetButton
++            ariaLabel={gt("Reset where stats show to default")}
++            onClick={() =>
++              updateSettings(resetStatsForNerdsPlacements(settings, DEFAULT_UNIFIED_SETTINGS))
++            }
++          />
++        )
++      }
++      control={
++        <Menu>
++          <MenuTrigger
++            render={
++              <Button
++                variant="outline"
++                size="sm"
++                className="w-full justify-between sm:w-40"
++                aria-label={gt("Where stats show: {enabled} of {total} on", {
++                  enabled,
++                  total: STATS_FOR_NERDS_PLACEMENTS.length,
++                })}
++              />
++            }
++          >
++            <T>
++              <Var>{enabled}</Var> of <Var>{STATS_FOR_NERDS_PLACEMENTS.length}</Var> on
++            </T>
++            <ChevronDownIcon aria-hidden />
++          </MenuTrigger>
++          <MenuPopup align="end">
++            <MenuGroup>
++              <MenuGroupLabel>
++                <T>Show stats</T>
++              </MenuGroupLabel>
++              {STATS_FOR_NERDS_PLACEMENTS.map((placement) => (
++                <MenuCheckboxItem
++                  key={placement.id}
++                  checked={placements[placement.id]}
++                  onCheckedChange={(checked) =>
++                    updateSettings(setStatsForNerdsPlacement(settings, placement.id, checked))
++                  }
++                >
++                  {m(placement.label)}
++                </MenuCheckboxItem>
++              ))}
++            </MenuGroup>
++            <MenuSeparator />
++            <MenuItem
++              disabled={isDefault}
++              onClick={() =>
++                updateSettings(resetStatsForNerdsPlacements(settings, DEFAULT_UNIFIED_SETTINGS))
++              }
++            >
++              <T>Reset to default</T>
++            </MenuItem>
++          </MenuPopup>
++        </Menu>
++      }
++    />
++  );
++}
++
++/** Which turn metrics show, as one checkbox menu instead of a row per metric. */
++function StatsForNerdsMetricsRow() {
++  const gt = useGT();
++  const m = useMessages();
++  const setting = useSearchableSetting();
++  const hidden = useScopedSettings((settings) => settings.statsForNerdsHiddenMetrics);
++  const updateSettings = useUpdateScopedSettings();
++  const shown = TURN_PERFORMANCE_METRIC_IDS.filter((id) => !hidden.includes(id)).length;
++  const total = TURN_PERFORMANCE_METRIC_IDS.length;
++  const reset = () =>
++    updateSettings({
++      statsForNerdsHiddenMetrics: DEFAULT_UNIFIED_SETTINGS.statsForNerdsHiddenMetrics,
++    });
++  return (
++    <SettingsRow
++      {...setting("stats-for-nerds-metrics")}
++      description={gt("Choose which turn metrics show.")}
++      resetAction={
++        hidden.length === 0 ? null : (
++          <SettingResetButton ariaLabel={gt("Reset metrics to default")} onClick={reset} />
++        )
++      }
++      control={
++        <Menu>
++          <MenuTrigger
++            render={
++              <Button
++                variant="outline"
++                size="sm"
++                className="w-full justify-between sm:w-40"
++                aria-label={gt("Metrics: {enabled} of {total} on", { enabled: shown, total })}
++              />
++            }
++          >
++            <T>
++              <Var>{shown}</Var> of <Var>{total}</Var> on
++            </T>
++            <ChevronDownIcon aria-hidden />
++          </MenuTrigger>
++          <MenuPopup align="end">
++            <MenuGroup>
++              <MenuGroupLabel>
++                <T>Show metrics</T>
++              </MenuGroupLabel>
++              {TURN_PERFORMANCE_METRIC_IDS.map((id) => {
++                const { label, abbr } = TURN_PERFORMANCE_METRIC_LABELS[id];
++                return (
++                  <MenuCheckboxItem
++                    key={id}
++                    checked={!hidden.includes(id)}
++                    onCheckedChange={(checked) =>
++                      updateSettings({
++                        statsForNerdsHiddenMetrics: toggleHiddenMetric(hidden, id, checked),
++                      })
++                    }
++                  >
++                    {m(label)}
++                    <span className="ms-auto ps-3 text-muted-foreground">{m(abbr)}</span>
++                  </MenuCheckboxItem>
++                );
++              })}
++            </MenuGroup>
++            <MenuSeparator />
++            <MenuItem disabled={hidden.length === 0} onClick={reset}>
++              <T>Reset to default</T>
++            </MenuItem>
++          </MenuPopup>
++        </Menu>
++      }
++    />
++  );
++}
++
++export function StatsForNerdsSettingsSection() {
++  const gt = useGT();
++  const setting = useSearchableSetting();
++  const settings = useScopedSettings();
++  const updateSettings = useUpdateScopedSettings();
++
++  return (
++    <SettingsSection id="stats-for-nerds-section" title={gt("Stats for nerds")}>
++      <SettingsRow
++        {...setting("stats-for-nerds")}
++        description={gt(
++          "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++        )}
++        resetAction={
++          settings.statsForNerdsEnabled !== DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled ? (
++            <SettingResetButton
++              ariaLabel={gt("Reset stats for nerds to default")}
++              onClick={() =>
++                updateSettings({
++                  statsForNerdsEnabled: DEFAULT_UNIFIED_SETTINGS.statsForNerdsEnabled,
++                })
++              }
++            />
++          ) : null
++        }
++        control={
++          <Switch
++            checked={settings.statsForNerdsEnabled}
++            onCheckedChange={(checked) =>
++              updateSettings({ statsForNerdsEnabled: Boolean(checked) })
++            }
++            aria-label={gt("Stats for nerds")}
++          />
++        }
++      />
++      {settings.statsForNerdsEnabled && (
++        <>
++          <StatsForNerdsPlacementRow />
++          <StatsForNerdsMetricsRow />
++        </>
++      )}
++    </SettingsSection>
++  );
++}
+diff --git a/apps/web/src/components/settings/ThreadDetailsItemsRow.tsx b/apps/web/src/components/settings/ThreadDetailsItemsRow.tsx
+index f8da21718c..91eb5042be 100644
+--- a/apps/web/src/components/settings/ThreadDetailsItemsRow.tsx
++++ b/apps/web/src/components/settings/ThreadDetailsItemsRow.tsx
+@@ -5,9 +5,9 @@ import { updateClientSettings, useClientSettings } from "../../hooks/useSettings
+ import { ThreadDetailsItemsMenuItems } from "../chat/ThreadDetailsItemsMenu";
+ import {
+   isDefaultThreadDetailsVisibility,
++  offeredThreadDetailsItems,
+   resolveThreadDetailsVisibility,
+   RESET_THREAD_DETAILS_ITEMS,
+-  THREAD_DETAILS_ITEMS,
+ } from "../chat/threadDetailsItems";
+ import { Button } from "../ui/button";
+ import { Menu, MenuPopup, MenuTrigger } from "../ui/menu";
+@@ -18,7 +18,10 @@ export function ThreadDetailsItemsRow() {
+   const gt = useGT();
+   const searchableSetting = useSearchableSetting();
+   const visibility = useClientSettings(resolveThreadDetailsVisibility);
+-  const enabled = THREAD_DETAILS_ITEMS.filter((item) => visibility[item.id]).length;
++  const offered = offeredThreadDetailsItems(
++    useClientSettings((settings) => settings.statsForNerdsEnabled),
++  );
++  const enabled = offered.filter((item) => visibility[item.id]).length;
+   return (
+     <SettingsRow
+       {...searchableSetting("thread-details-items")}
+@@ -43,13 +46,13 @@ export function ThreadDetailsItemsRow() {
+                 className="w-full justify-between sm:w-40"
+                 aria-label={gt("Thread details: {enabled} of {total} on", {
+                   enabled,
+-                  total: THREAD_DETAILS_ITEMS.length,
++                  total: offered.length,
+                 })}
+               />
+             }
+           >
+             <T>
+-              <Var>{enabled}</Var> of <Var>{THREAD_DETAILS_ITEMS.length}</Var> on
++              <Var>{enabled}</Var> of <Var>{offered.length}</Var> on
+             </T>
+             <ChevronDownIcon aria-hidden />
+           </MenuTrigger>
+diff --git a/apps/web/src/components/settings/settingsSearch.test.ts b/apps/web/src/components/settings/settingsSearch.test.ts
+index 3249b67624..c0fa32677b 100644
+--- a/apps/web/src/components/settings/settingsSearch.test.ts
++++ b/apps/web/src/components/settings/settingsSearch.test.ts
+@@ -415,3 +415,13 @@ describe("movedSettingsPath", () => {
+     expect(movedSettingsPath("/settings/appearance", "theme")).toBeNull();
+   });
+ });
++
++describe("stats for nerds metrics search", () => {
++  it("lands a metric's full name or short label on the one Metrics row", () => {
++    for (const query of ["time to first token", "TTFA", "reasoning tokens"]) {
++      expect(searchSettings(query, SETTINGS_SEARCH_ITEMS).map((item) => item.id)).toContain(
++        "stats-for-nerds-metrics",
++      );
++    }
++  });
++});
+diff --git a/apps/web/src/components/settings/settingsSearch.ts b/apps/web/src/components/settings/settingsSearch.ts
+index 4fc38779ca..171d9b6c93 100644
+--- a/apps/web/src/components/settings/settingsSearch.ts
++++ b/apps/web/src/components/settings/settingsSearch.ts
+@@ -16,6 +16,7 @@ import { writeLocalStorageValue } from "../../hooks/useLocalStorage";
+ import type { MessageResolver } from "../../i18n/messages";
+ import { commandLabel } from "./KeybindingsSettings.logic";
+ import type { ResolvedSettingsScope } from "./settingsScope";
++import { TURN_PERFORMANCE_METRIC_LABELS } from "../chat/TurnPerformance.catalog";
+ 
+ export type SettingsPath =
+   | "/settings/projects"
+@@ -396,6 +397,36 @@ export const SETTINGS_SEARCH_ITEMS = [
+       ),
+     ],
+   },
++  {
++    id: "stats-for-nerds",
++    title: msg("Stats for nerds"),
++    to: "/settings/appearance",
++    searchTerms: [
++      msg(
++        "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++      ),
++    ],
++  },
++  {
++    id: "stats-for-nerds-placement",
++    title: msg("Where stats show"),
++    to: "/settings/appearance",
++    searchTerms: [
++      msg(
++        "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++      ),
++    ],
++  },
++  {
++    id: "stats-for-nerds-metrics",
++    title: msg("Metrics", { $context: "stats for nerds: which turn metrics show" }),
++    to: "/settings/appearance",
++    // Each metric's full name and short label, so searching one lands on this row.
++    searchTerms: Object.values(TURN_PERFORMANCE_METRIC_LABELS).flatMap(({ label, abbr }) => [
++      label,
++      abbr,
++    ]),
++  },
+   {
+     id: "effort-display",
+     title: msg("Effort display"),
+@@ -829,12 +860,6 @@ export const SETTINGS_SEARCH_ITEMS = [
+     to: "/settings/chat",
+     searchTerms: [msg("composer rich text tiptap bold italic markdown styled wysiwyg")],
+   },
+-  {
+-    id: "stats-for-nerds",
+-    title: msg("Stats for nerds"),
+-    to: "/settings/chat",
+-    searchTerms: [msg("context tokens cache elapsed telemetry composer usage")],
+-  },
+   {
+     id: "send-shortcut",
+     title: msg("Send shortcut"),
+diff --git a/apps/web/src/i18n/translations/de.json b/apps/web/src/i18n/translations/de.json
+index fde3bd07b0..5be5f1a147 100644
+--- a/apps/web/src/i18n/translations/de.json
++++ b/apps/web/src/i18n/translations/de.json
+@@ -13020,9 +13020,7 @@
+     " weitere unter Verknüpfte Elemente"
+   ],
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13100,5 +13098,25 @@
+   "dbab44016b8171e5": "Not reported by this provider",
+   "112e6f4e8b9d3b4d": "Rate",
+   "077433dde44c0bdb": "Partial: measured from incomplete data.",
+-  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured.",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "77aeb1520122e429": "Show stats",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
+ }
+diff --git a/apps/web/src/i18n/translations/en.json b/apps/web/src/i18n/translations/en.json
+index 5028b1c761..8822ae8e8a 100644
+--- a/apps/web/src/i18n/translations/en.json
++++ b/apps/web/src/i18n/translations/en.json
+@@ -13029,9 +13029,7 @@
+     " more in Linked items"
+   ],
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13109,5 +13107,25 @@
+   "dbab44016b8171e5": "Not reported by this provider",
+   "112e6f4e8b9d3b4d": "Rate",
+   "077433dde44c0bdb": "Partial: measured from incomplete data.",
+-  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured.",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "77aeb1520122e429": "Show stats",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
+ }
+diff --git a/apps/web/src/i18n/translations/es.json b/apps/web/src/i18n/translations/es.json
+index b4272c2a0e..5800f1abc3 100644
+--- a/apps/web/src/i18n/translations/es.json
++++ b/apps/web/src/i18n/translations/es.json
+@@ -13015,9 +13015,7 @@
+     " más en Elementos vinculados"
+   ],
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13095,5 +13093,25 @@
+   "dbab44016b8171e5": "Not reported by this provider",
+   "112e6f4e8b9d3b4d": "Rate",
+   "077433dde44c0bdb": "Partial: measured from incomplete data.",
+-  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured.",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "77aeb1520122e429": "Show stats",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
+ }
+diff --git a/apps/web/src/i18n/translations/fr.json b/apps/web/src/i18n/translations/fr.json
+index c9a55f81a5..20d8f624ab 100644
+--- a/apps/web/src/i18n/translations/fr.json
++++ b/apps/web/src/i18n/translations/fr.json
+@@ -13020,9 +13020,7 @@
+     " de plus dans Éléments associés"
+   ],
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13100,5 +13098,25 @@
+   "dbab44016b8171e5": "Not reported by this provider",
+   "112e6f4e8b9d3b4d": "Rate",
+   "077433dde44c0bdb": "Partial: measured from incomplete data.",
+-  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured.",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "77aeb1520122e429": "Show stats",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
+ }
+diff --git a/apps/web/src/i18n/translations/ja.json b/apps/web/src/i18n/translations/ja.json
+index f3f55a4e70..cf1a4f8d64 100644
+--- a/apps/web/src/i18n/translations/ja.json
++++ b/apps/web/src/i18n/translations/ja.json
+@@ -12956,9 +12956,7 @@
+     " 件をリンクされた項目で表示"
+   ],
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13036,5 +13034,25 @@
+   "dbab44016b8171e5": "Not reported by this provider",
+   "112e6f4e8b9d3b4d": "Rate",
+   "077433dde44c0bdb": "Partial: measured from incomplete data.",
+-  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured.",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "77aeb1520122e429": "Show stats",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
+ }
+diff --git a/apps/web/src/i18n/translations/ko.json b/apps/web/src/i18n/translations/ko.json
+index a04c6275d8..8716c2f45a 100644
+--- a/apps/web/src/i18n/translations/ko.json
++++ b/apps/web/src/i18n/translations/ko.json
+@@ -12953,9 +12953,7 @@
+     "개 더 보기"
+   ],
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13033,5 +13031,25 @@
+   "dbab44016b8171e5": "Not reported by this provider",
+   "112e6f4e8b9d3b4d": "Rate",
+   "077433dde44c0bdb": "Partial: measured from incomplete data.",
+-  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured.",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "77aeb1520122e429": "Show stats",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
+ }
+diff --git a/apps/web/src/i18n/translations/pt-BR.json b/apps/web/src/i18n/translations/pt-BR.json
+index 2bd54d03ad..3c99658435 100644
+--- a/apps/web/src/i18n/translations/pt-BR.json
++++ b/apps/web/src/i18n/translations/pt-BR.json
+@@ -13020,9 +13020,7 @@
+     " mais em Itens vinculados"
+   ],
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13100,5 +13098,25 @@
+   "dbab44016b8171e5": "Not reported by this provider",
+   "112e6f4e8b9d3b4d": "Rate",
+   "077433dde44c0bdb": "Partial: measured from incomplete data.",
+-  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured.",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "77aeb1520122e429": "Show stats",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
+ }
+diff --git a/apps/web/src/i18n/translations/ru.json b/apps/web/src/i18n/translations/ru.json
+index 6c00a045cb..e99e60745b 100644
+--- a/apps/web/src/i18n/translations/ru.json
++++ b/apps/web/src/i18n/translations/ru.json
+@@ -13019,9 +13019,7 @@
+     " в разделе «Привязанные элементы»"
+   ],
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13099,5 +13097,25 @@
+   "dbab44016b8171e5": "Not reported by this provider",
+   "112e6f4e8b9d3b4d": "Rate",
+   "077433dde44c0bdb": "Partial: measured from incomplete data.",
+-  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured.",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "77aeb1520122e429": "Show stats",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
+ }
+diff --git a/apps/web/src/i18n/translations/sv.json b/apps/web/src/i18n/translations/sv.json
+index cdad67afe4..3a991a9c13 100644
+--- a/apps/web/src/i18n/translations/sv.json
++++ b/apps/web/src/i18n/translations/sv.json
+@@ -13027,9 +13027,7 @@
+     " till i Länkade objekt"
+   ],
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13107,5 +13105,25 @@
+   "dbab44016b8171e5": "Not reported by this provider",
+   "112e6f4e8b9d3b4d": "Rate",
+   "077433dde44c0bdb": "Partial: measured from incomplete data.",
+-  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured.",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "77aeb1520122e429": "Show stats",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
+ }
+diff --git a/apps/web/src/i18n/translations/zh.json b/apps/web/src/i18n/translations/zh.json
+index 855bb77718..27c54863c0 100644
+--- a/apps/web/src/i18n/translations/zh.json
++++ b/apps/web/src/i18n/translations/zh.json
+@@ -13034,9 +13034,7 @@
+     " 项"
+   ],
+   "01ff459d89a7efb4": "Stats for nerds",
+-  "270427ef8d82be7c": "Show reported context, main-agent turn tokens, cache rate, and elapsed time below the composer. Available stats depend on the provider.",
+   "3b779e627048205a": "Reset stats for nerds to default",
+-  "e4af6e1b80713019": "context tokens cache elapsed telemetry composer usage",
+   "f3e82ffb3e22c609": "Choose a project before compacting",
+   "38baeebc3b47b857": "Compaction is unavailable for this provider",
+   "d35c2d635ba3a859": "Compacting is unavailable right now",
+@@ -13114,5 +13112,25 @@
+   "dbab44016b8171e5": "Not reported by this provider",
+   "112e6f4e8b9d3b4d": "Rate",
+   "077433dde44c0bdb": "Partial: measured from incomplete data.",
+-  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured."
++  "80cc89e06f20816e": "≈ marks an estimate; a dimmed value is not reported. Hover, click or tap a value for its full name and how it was measured.",
++  "9805cacd8e73fe3b": "Turn performance",
++  "297c6c47208d0f94": "Current turn",
++  "1b8eb8550d8a5c43": "Last turn",
++  "ceaf4ec2e8b1c6e9": "Under each reply",
++  "eb43ad36fc72f3e2": "Under the composer",
++  "c802444f065ef6a9": "In thread details",
++  "33ce66f9b23fe715": "Where stats show",
++  "f2d09db544ce6b03": "Stats for nerds metrics",
++  "3ed184bf2a1cebd8": "Reset where stats show to default",
++  "e5d909416236939a": "Where stats show: {enabled} of {total} on",
++  "77aeb1520122e429": "Show stats",
++  "5407a39aea9584f8": "context tokens cache elapsed telemetry composer usage performance speed tokens per second tok/s ttft ttfa latency first token peak average tool time turn time model reasoning effort fast mode metrics",
++  "0a8fbf0a576cc2a9": "stats for nerds composer reply message footer thread details panel card current previous turn live tokens per second history",
++  "07a4e47e736712f5": "Under replies, below the composer, or in thread details.",
++  "4410d8035f25852a": "Choose which turn metrics show.",
++  "56fe29f602e5d96a": "Reset metrics to default",
++  "f8bdecc20a5b717d": "Metrics: {enabled} of {total} on",
++  "6132dc8503a72c50": "Turn speed, latency, tokens, context and usage limits; ≈ marks estimates.",
++  "8ea44c7f1633179e": "Show metrics",
++  "4a4030032575944d": "Metrics"
+ }
+diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
+index 46d03bef98..9d1ec5318b 100644
+--- a/packages/contracts/src/settings.ts
++++ b/packages/contracts/src/settings.ts
+@@ -536,7 +536,9 @@ export const ClientSettingsSchema = Schema.Struct({
+   statsForNerdsHiddenMetrics: Schema.Array(Schema.String).pipe(
+     Schema.withDecodingDefault(Effect.succeed([])),
+   ),
+-  statsForNerdsShowInComposer: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
++  statsForNerdsShowInComposer: Schema.Boolean.pipe(
++    Schema.withDecodingDefault(Effect.succeed(true)),
++  ),
+   statsForNerdsShowPerReply: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+ 
+   composerRichTextEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),

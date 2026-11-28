@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: acqxi <kacqxi@gmail.com>
 Date: Fri, 27 Nov 2026 01:35:59 +0800
-Subject: [PATCH 06/12] Performance metrics: composer, per-reply history
+Subject: [PATCH 06/15] Performance metrics: composer, per-reply history
 
 Stats for nerds turn performance in the web UI, coded against the
 OrchestrationV2TurnPerformance contract.

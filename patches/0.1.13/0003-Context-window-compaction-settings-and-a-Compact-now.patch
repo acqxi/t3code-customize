@@ -1,9 +1,12 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler South <tsouth2@gmail.com>
 Date: Sat, 10 Oct 2026 12:40:14 -0400
-Subject: [PATCH 03/12] fix(web): show compaction settings and add a stats
- compact action
+Subject: [PATCH 03/15] Context window: compaction settings and a Compact now
+ action
 
+The context meter's popover shows the window size and the provider's
+auto-compaction threshold, and gets a Compact now button that runs the
+thread's usual compaction.
 ---
  apps/web/src/components/ChatView.tsx          | 55 ++++++++++-
  .../chat/ComposerStats.logic.test.ts          | 96 +++++++++++++++++++

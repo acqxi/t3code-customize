@@ -31,6 +31,9 @@ Work only in that private source checkout and this repo.
   `git -c sequence.editor=true rebase -i --autosquash <nightly commit>`. Keep one
   commit per patch.
 - If a test file moved upstream, update its path in the set's `checks.json`.
+- Keep one feature per patch. If you split, merge, reorder or rename patches, update
+  the patch table in [README.md](README.md#the-patches) and
+  [README.zh-TW.md](README.zh-TW.md#patch-清單) to match.
 - `git log <base>..<nightly commit>` and `git show` explain what changed upstream.
 - To install dependencies, use exactly `pnpm install --frozen-lockfile --ignore-scripts`
   in the source checkout, the same as the tool.

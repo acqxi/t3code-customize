@@ -15,6 +15,7 @@
 - **效能指標**：首個 token 時間、首段回答時間，即時、平均與峰值 tokens/s，token 與快取用量，工具耗時與整輪耗時，以及每一輪的模型供應商、模型、推理強度與速度模式。可以顯示在每則回覆下方、輸入框下方（本輪與上一輪，排成一行）、Thread details 側欄，或任意組合。估計值標示 `≈`，無法取得的值顯示 `—`；有哪些指標取決於模型供應商。Codex、Claude Code 與 Antigravity 等 ACP 代理都依串流內容計時。效能明細可以在「最後一輪」、「整個對話串」與「各模型」之間切換；Usage 儀表板的模型明細也會加上各模型的 tok/s、TTFT 與 TTFA。定義見 [docs/performance-metrics.md](docs/performance-metrics.md)。
 - **訂閱切換**：同一個模型有多個已登入的訂閱可用時，若目前的訂閱照這個速度會在 5 小時或每週額度重置前用完，會出現像 **Opus 5.5 on Personal →** 的標籤，點一下就把對話串切到額度最充裕的那個訂閱上的同一個模型。每週額度將在一天內重置、卻還剩很多的訂閱也會提示。滑鼠移上去可以看到判斷依據。
 - **WSL 主機橋接**（使用 WSL 後端的 Windows Desktop）：WSL 中的代理可以透過 T3 原生的 Linked environments，把需要 Windows 的工作（瀏覽器、Computer Use、GUI 程式或 PowerShell）交給同一台電腦上的 Windows 後端。Desktop 經由 `wsl.exe` 的 stdio 轉送，Windows 後端不必開放網路存取。可在 Environments 地圖上的 **Host bridge** 連線，或在 **Settings > Connections > Local host bridge** 開啟。說明見 [docs/wsl-host-bridge.md](docs/wsl-host-bridge.md)。
+- **客製版控制項**：視窗標題與 **Settings > About** 會標示「(Customized)」；**Settings > About > Restart** 可以重新載入視窗、重新啟動 T3 Code，或在後端卡住時強制重啟；WSL 後端會顯示 runtime 安裝與啟動進行到哪一步；Windows 版在官方推出新版時會提醒你。
 
 客製版沿用官方 App 的原生相依套件與 T3 Connect 公開設定。Windows 簽章變動與平台限制說明如下。
 
@@ -107,7 +108,7 @@ upstream 變動很快，有時 nightly 會改到 patch 動到的程式碼。這�
 
 ## 運作方式
 
-T3 Code 是開放原始碼軟體（MIT）。本儲存庫包含十二個 patch 與一支腳本。腳本會：
+T3 Code 是開放原始碼軟體（MIT）。本儲存庫包含一支腳本，以及每個功能各一個 patch（[清單見下方](#patch-清單)）。腳本會：
 
 1. 讀取已安裝的 App：它對應的 upstream commit，以及 T3 Connect 需要的公開設定，
 2. 把 patch 套用到該 commit 並執行測試，
@@ -121,6 +122,30 @@ T3 Code 是開放原始碼軟體（MIT）。本儲存庫包含十二個 patch �
 macOS 上不會複製也不會重新簽署，所以 App 會保留簽章、鑰匙圈存取權、密碼金鑰與自動更新。啟動器會用啟動掛鉤開啟你自己的 T3 Code App，在任何 App 程式碼執行前載入重新建置的套件，再關閉掛鉤。用其他方式開啟 T3 Code 就是原版。關閉了 inspect fuse 的版本，則改在 `app.asar` 內的 `boot.cjs` 加一行來載入同樣的套件；這是對 App 唯一的改動，`uninstall` 會把它移除。
 
 所有作業都在你的電腦上進行。建置不會修改你的 T3 資料，也不會修改已安裝的 App；唯一的例外是上面提到、關閉了 inspect fuse 的 macOS 版本裡 `boot.cjs` 那一行。客製版跟原版使用同一份 T3 設定檔，切換前請先結束原版。
+
+## Patch 清單
+
+以下是 `patches/0.1.13/` 的 0.1.13 版 patch，依此順序套用。每個 patch 都附有自己的測試（列在 `checks.json`）以及所有 web 語系的字串；後面的 patch 建立在前面的 patch 之上。凍結在 tag 中的舊版 patch 有各自的編號。
+
+| Patch | 功能 | 主要修改 |
+| --- | --- | --- |
+| 0001 | Stats for nerds：輸入框下方的統計列、回覆的 tokens/s 與開關 | Claude 與 Codex adapter、輸入框 |
+| 0002 | 用量額度：背景輪詢、跨重置合併、依擷取時間排序 | 伺服器端模型供應商、provider-core |
+| 0003 | 脈絡視窗：自動壓縮門檻與 **Compact now** | 輸入框 |
+| 0004 | 訂閱切換標籤 | 輸入框 |
+| 0005 | 效能指標：每輪計時的資料定義，以及 Claude、Codex、ACP 的計時器 | contracts、provider-core、adapter |
+| 0006 | 效能指標顯示在輸入框下方、每則回覆下方與明細格 | web |
+| 0007 | Appearance 裡的 Stats for nerds 設定、顯示位置、Thread details 的 **Turn performance** | web 設定、Thread details |
+| 0008 | 輸入框與 Thread details 顯示所有模型供應商的用量額度，可選顯示剩餘或已用 | web |
+| 0009 | 效能明細格的最後一輪、整個對話串與各模型檢視 | web |
+| 0010 | Usage 儀表板模型明細的效能欄位 | 伺服器、web |
+| 0011 | 「(Customized)」標題標記與只檢查不下載的更新提醒 | 桌面版、web |
+| 0012 | **Settings > About** 的 Restart 區塊 | 桌面版、web |
+| 0013 | Connections 與 Environments 地圖上的 WSL runtime 狀態 | 桌面版、web |
+| 0014 | WSL 主機橋接：輔助程式、原生連結路徑與 Desktop 監管程式 | 伺服器、桌面版、shared |
+| 0015 | Connections 與 Environments 地圖上的 WSL 主機橋接控制項 | web |
+
+指標定義見 [docs/performance-metrics.md](docs/performance-metrics.md)，主機橋接的設計見 [docs/wsl-host-bridge.md](docs/wsl-host-bridge.md)。
 
 ## 指令
 
